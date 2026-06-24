@@ -1,0 +1,247 @@
+/**
+ * @fileoverview HorizonsService — gated extension wrapping the keyless JPL Horizons
+ *   HTTP API for small-body (asteroid/comet) and spacecraft ephemerides that the
+ *   in-process major-body engine cannot cover. The only network-touching code here
+ *   besides the satellite extension: it carries its own timeout + retry boundary and
+ *   degrades loudly (throws serviceUnavailable / notFound), never substituting core
+ *   output. Parses the OBSERVER ephemeris table between Horizons' $$SOE/$$EOE markers.
+ * @module services/horizons/horizons-service
+ */
+
+import type { Context } from '@cyanheads/mcp-ts-core';
+import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import type { ObserverInput } from '../ephemeris/types.js';
+import type { EphemerisPoint, EphemerisResult } from './types.js';
+
+/** Cap on inline ephemeris rows; beyond this the result truncates with disclosure. */
+const MAX_ROWS = 200;
+
+export class HorizonsService {
+  constructor(
+    private readonly baseUrl: string,
+    private readonly timeoutMs: number,
+  ) {}
+
+  /**
+   * Fetch an OBSERVER ephemeris for a small body. When an observer is supplied the
+   * coordinates are topocentric and alt/az is included; otherwise geocentric.
+   */
+  async ephemeris(
+    designation: string,
+    start: string,
+    stop: string,
+    step: string,
+    ctx: Context,
+    observer?: ObserverInput,
+  ): Promise<EphemerisResult> {
+    const reqCtx = requestContextService.createRequestContext({
+      operation: 'HorizonsService.ephemeris',
+      parentContext: { requestId: ctx.requestId, traceId: ctx.traceId },
+    });
+
+    const url = this.buildUrl(designation, start, stop, step, observer);
+
+    const text = await withRetry(
+      async () => {
+        const response = await fetchWithTimeout(url, this.timeoutMs, reqCtx, {
+          signal: ctx.signal,
+        });
+        return response.text();
+      },
+      {
+        operation: 'HorizonsService.ephemeris',
+        context: reqCtx,
+        baseDelayMs: 2000,
+        signal: ctx.signal,
+      },
+    );
+
+    return this.parse(designation, text, !!observer);
+  }
+
+  /** Build the Horizons GET URL with quoted, URL-encoded parameters. */
+  private buildUrl(
+    designation: string,
+    start: string,
+    stop: string,
+    step: string,
+    observer?: ObserverInput,
+  ): string {
+    const params = new URLSearchParams({
+      format: 'text',
+      COMMAND: `'${designation}'`,
+      EPHEM_TYPE: 'OBSERVER',
+      CENTER: observer ? "'coord@399'" : "'500@399'",
+      START_TIME: `'${start}'`,
+      STOP_TIME: `'${stop}'`,
+      STEP_SIZE: `'${step}'`,
+      QUANTITIES: "'1,9,20'",
+      CSV_FORMAT: 'YES',
+      ANG_FORMAT: 'DEG',
+      EXTRA_PREC: 'YES',
+    });
+    if (observer) {
+      params.set('COORD_TYPE', 'GEODETIC');
+      // SITE_COORD is E-longitude, latitude, height(km): "lon,lat,km".
+      params.set(
+        'SITE_COORD',
+        `'${observer.longitude},${observer.latitude},${(observer.elevation / 1000).toFixed(6)}'`,
+      );
+    }
+    return `${this.baseUrl}?${params.toString()}`;
+  }
+
+  /** Parse the CSV OBSERVER table between $$SOE and $$EOE. */
+  private parse(designation: string, text: string, hasObserver: boolean): EphemerisResult {
+    const hasBlock = text.includes('$$SOE');
+    const looksUnmatched =
+      /No matches found|Cannot interpret|No ephemeris|Matching small-bodies/i.test(text);
+    if (looksUnmatched && !hasBlock) {
+      throw notFound(`JPL Horizons has no match for designation "${designation}".`, {
+        reason: 'body_not_found',
+        recovery: {
+          hint: "Check the designation against JPL's small-body database at ssd.jpl.nasa.gov; try the SPK-ID form.",
+        },
+      });
+    }
+
+    const soe = text.indexOf('$$SOE');
+    const eoe = text.indexOf('$$EOE');
+    if (soe === -1 || eoe === -1) {
+      throw serviceUnavailable(
+        'JPL Horizons returned an unexpected response with no ephemeris block.',
+        {
+          reason: 'horizons_unavailable',
+          recovery: {
+            hint: 'Horizons may be degraded or rejected the request; retry in a few minutes.',
+          },
+        },
+      );
+    }
+
+    const block = text.slice(soe + 5, eoe).trim();
+    const rows = block.split('\n').filter((line) => line.trim().length > 0);
+
+    const points: EphemerisPoint[] = [];
+    let truncated = false;
+    for (const row of rows) {
+      if (points.length >= MAX_ROWS) {
+        truncated = true;
+        break;
+      }
+      const point = this.parseRow(row, hasObserver);
+      if (point) points.push(point);
+    }
+
+    if (points.length === 0) {
+      throw serviceUnavailable('JPL Horizons returned an ephemeris block with no parsable rows.', {
+        reason: 'horizons_unavailable',
+        recovery: {
+          hint: 'The step or time span may be invalid; adjust and retry, or retry in a few minutes.',
+        },
+      });
+    }
+
+    return { designation, points, truncated };
+  }
+
+  /**
+   * Parse one CSV row. With QUANTITIES '1,9,20' and CSV_FORMAT YES, columns are:
+   * date, (solar-presence flag), (lunar/illum flag), RA(deg), DEC(deg),
+   * Azimuth(deg), Elevation(deg), APmag, S-brt, delta(AU), deldot.
+   * When no observer is set, the azimuth/elevation columns are absent.
+   */
+  private parseRow(row: string, hasObserver: boolean): EphemerisPoint | null {
+    const cols = row.split(',').map((c) => c.trim());
+    if (cols.length < 5) return null;
+    // Column 0 is the calendar date; columns 1-2 are presence flags (often blank).
+    const dateStr = cols[0];
+    if (!dateStr) return null;
+    const time = this.parseHorizonsDate(dateStr);
+    if (!time) return null;
+
+    // After the date + two flag columns, the angular quantities begin.
+    const numeric = cols
+      .slice(3)
+      .map((c) => (c === '' || c === 'n.a.' ? null : Number.parseFloat(c)));
+
+    let idx = 0;
+    const ra = numeric[idx++];
+    const dec = numeric[idx++];
+    let azimuth: number | null = null;
+    let altitude: number | null = null;
+    if (hasObserver) {
+      azimuth = numeric[idx++] ?? null;
+      altitude = numeric[idx++] ?? null;
+    }
+    const apMag = numeric[idx++];
+    // s-brt is skipped; delta (distance AU) follows.
+    idx++; // s-brt column
+    const delta = numeric[idx++];
+
+    if (ra === null || ra === undefined || dec === null || dec === undefined) return null;
+
+    const point: EphemerisPoint = {
+      timeUtc: time,
+      raHours: ra / 15, // Horizons RA is in degrees; convert to sidereal hours.
+      decDegrees: dec,
+      distanceAu: delta ?? Number.NaN,
+      magnitude: apMag ?? null,
+    };
+    if (hasObserver && altitude !== null && azimuth !== null) {
+      point.altitudeDegrees = altitude;
+      point.azimuthDegrees = azimuth;
+    }
+    return point;
+  }
+
+  /** Convert a Horizons calendar date (e.g. "2024-Apr-08 18:00:00.0000") to ISO 8601 UTC. */
+  private parseHorizonsDate(raw: string): string | null {
+    const cleaned = raw.replace(/^A\.D\.\s*/, '').trim();
+    const match = cleaned.match(
+      /^(\d{4})-([A-Za-z]{3})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?/,
+    );
+    if (!match) {
+      const d = new Date(cleaned);
+      return Number.isNaN(d.getTime()) ? null : d.toISOString();
+    }
+    const months: Record<string, string> = {
+      Jan: '01',
+      Feb: '02',
+      Mar: '03',
+      Apr: '04',
+      May: '05',
+      Jun: '06',
+      Jul: '07',
+      Aug: '08',
+      Sep: '09',
+      Oct: '10',
+      Nov: '11',
+      Dec: '12',
+    };
+    const [, year, monName, day, hh, mm, ss] = match;
+    const monNum = monName ? months[monName] : undefined;
+    if (!monNum) return null;
+    const iso = `${year}-${monNum}-${day}T${hh}:${mm}:${ss}Z`;
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+}
+
+// --- Init / accessor pattern ------------------------------------------------
+
+let _service: HorizonsService | undefined;
+
+/** Initialize the Horizons service with the configured endpoint and timeout. */
+export function initHorizonsService(baseUrl: string, timeoutMs: number): void {
+  _service = new HorizonsService(baseUrl, timeoutMs);
+}
+
+/** Accessor — throws if not initialized (the gate is off). */
+export function getHorizonsService(): HorizonsService {
+  if (!_service) {
+    throw new Error('HorizonsService not initialized — enable ASTRONOMY_ENABLE_HORIZONS');
+  }
+  return _service;
+}

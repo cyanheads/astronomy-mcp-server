@@ -1,6 +1,6 @@
 # astronomy-mcp-server — Design
 
-Observational astronomy computed in-process. Six keyless, offline, deterministic tools wrap
+Observational astronomy computed in-process. Five keyless, offline, deterministic tools wrap
 [`astronomy-engine`](https://github.com/cosinekitty/astronomy) (v2.1.19, MIT, zero deps,
 sub-arcminute accuracy) to answer "what's in the sky from here, and when." Two optional
 extensions add keyless HTTP data sources (JPL Horizons small bodies, CelesTrak satellite

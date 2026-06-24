@@ -1,25 +1,25 @@
 {
   "name": "astronomy-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "What's in the sky, computed offline — planet and moon positions, rise/set, phases, eclipses, and seasons for any place and time.",
   "author": {
-    "name": "",
-    "email": "",
-    "url": ""
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
   },
-  "homepage": "",
-  "repository": "",
+  "homepage": "https://github.com/cyanheads/astronomy-mcp-server",
+  "repository": "https://github.com/cyanheads/astronomy-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "astronomy", "ephemeris", "eclipse"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "astronomy-mcp-server",
-    "shortDescription": "",
-    "longDescription": "",
-    "developerName": "",
-    "category": "",
+    "shortDescription": "What's in the sky, computed offline — positions, rise/set, phases, eclipses, and seasons.",
+    "longDescription": "Observational astronomy computed in-process via astronomy-engine — apparent positions of the Sun, Moon, and planets; rise, set, and culmination times with twilight; moon phase and illumination; eclipses; equinoxes and solstices; oppositions, conjunctions, elongations, and apsides; and a one-call 'what's up tonight' list. Keyless, offline, and deterministic for any observer location and time. Optional gated extensions add JPL Horizons small-body ephemerides and CelesTrak satellite passes.",
+    "developerName": "cyanheads",
+    "category": "data",
     "capabilities": ["Read"],
-    "websiteURL": "",
+    "websiteURL": "https://github.com/cyanheads/astronomy-mcp-server",
     "defaultPrompt": []
   }
 }

@@ -1,0 +1,153 @@
+/**
+ * @fileoverview End-to-end tests for the five core tool handlers — schema conformance,
+ *   format() parity at runtime, enrichment, and the validation-gate error paths. The
+ *   deep numeric correctness lives in the EphemerisService tests; here we verify the
+ *   tool wiring, output shape, and the typed `ctx.fail` contracts.
+ * @module tests/tools/core-tools.test
+ */
+
+import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { findEventsTool } from '@/mcp-server/tools/definitions/find-events.tool.js';
+import { getMoonPhaseTool } from '@/mcp-server/tools/definitions/get-moon-phase.tool.js';
+import { getRiseSetTool } from '@/mcp-server/tools/definitions/get-rise-set.tool.js';
+import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
+import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
+import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+
+const SEATTLE = { latitude: 47.6062, longitude: -122.3321 };
+
+beforeAll(() => {
+  initEphemerisService();
+});
+
+describe('astronomy_get_sky_position', () => {
+  it('returns a schema-conforming position for Mars', async () => {
+    const ctx = createMockContext();
+    const input = getSkyPositionTool.input.parse({
+      body: 'mars',
+      ...SEATTLE,
+      time: '2024-08-01T08:00:00Z',
+    });
+    const result = await getSkyPositionTool.handler(input, ctx);
+    expect(result).toEqual(expect.schemaMatching(getSkyPositionTool.output));
+    expect(result.body).toBe('mars');
+  });
+
+  it('resolves a named star and ignores body when star is set', async () => {
+    const ctx = createMockContext();
+    const input = getSkyPositionTool.input.parse({ star: 'Vega', body: 'mars', ...SEATTLE });
+    const result = await getSkyPositionTool.handler(input, ctx);
+    expect(result.body).toBe('Vega');
+  });
+
+  it('fails with body_required when neither body nor star is supplied', () => {
+    const ctx = createMockContext({ errors: getSkyPositionTool.errors });
+    const input = getSkyPositionTool.input.parse({ ...SEATTLE });
+    expect(() => getSkyPositionTool.handler(input, ctx)).toThrow(/body|star/i);
+  });
+
+  it('format() renders every output field at runtime', async () => {
+    const ctx = createMockContext();
+    const input = getSkyPositionTool.input.parse({ body: 'jupiter', ...SEATTLE });
+    const result = await getSkyPositionTool.handler(input, ctx);
+    const block = getSkyPositionTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text).toContain('jupiter');
+    expect(text).toContain('Magnitude');
+    expect(text).toContain('Constellation');
+  });
+});
+
+describe('astronomy_get_moon_phase', () => {
+  it('returns a schema-conforming phase record', async () => {
+    const ctx = createMockContext();
+    const input = getMoonPhaseTool.input.parse({ time: '2024-04-23T23:49:00Z' });
+    const result = await getMoonPhaseTool.handler(input, ctx);
+    expect(result).toEqual(expect.schemaMatching(getMoonPhaseTool.output));
+    expect(result.next_quarters).toHaveLength(4);
+  });
+});
+
+describe('astronomy_get_rise_set', () => {
+  it('returns rise/set with twilight for the sun and conforms to schema', async () => {
+    const ctx = createMockContext();
+    const input = getRiseSetTool.input.parse({
+      body: 'sun',
+      ...SEATTLE,
+      start: '2024-06-21T00:00:00Z',
+    });
+    const result = await getRiseSetTool.handler(input, ctx);
+    expect(result).toEqual(expect.schemaMatching(getRiseSetTool.output));
+    expect(result.events[0]?.twilight).toBeDefined();
+  });
+
+  it('omits twilight for a non-sun body', async () => {
+    const ctx = createMockContext();
+    const input = getRiseSetTool.input.parse({
+      body: 'moon',
+      ...SEATTLE,
+      start: '2024-06-21T00:00:00Z',
+    });
+    const result = await getRiseSetTool.handler(input, ctx);
+    expect(result.events[0]?.twilight).toBeUndefined();
+  });
+});
+
+describe('astronomy_find_events', () => {
+  it('fails observer_required for a solar eclipse without coordinates', async () => {
+    const ctx = createMockContext({ errors: findEventsTool.errors });
+    const input = findEventsTool.input.parse({
+      event: 'solar_eclipse',
+      start: '2024-01-01T00:00:00Z',
+    });
+    await expect(Promise.resolve().then(() => findEventsTool.handler(input, ctx))).rejects.toThrow(
+      /observer|latitude/i,
+    );
+  });
+
+  it('fails body_required for an opposition without a body', async () => {
+    const ctx = createMockContext({ errors: findEventsTool.errors });
+    const input = findEventsTool.input.parse({
+      event: 'opposition',
+      start: '2024-01-01T00:00:00Z',
+    });
+    await expect(Promise.resolve().then(() => findEventsTool.handler(input, ctx))).rejects.toThrow(
+      /body/i,
+    );
+  });
+
+  it('fails body_not_supported for max_elongation of an outer planet', async () => {
+    const ctx = createMockContext({ errors: findEventsTool.errors });
+    const input = findEventsTool.input.parse({
+      event: 'max_elongation',
+      body: 'jupiter',
+      start: '2024-01-01T00:00:00Z',
+    });
+    await expect(Promise.resolve().then(() => findEventsTool.handler(input, ctx))).rejects.toThrow(
+      /mercury|venus/i,
+    );
+  });
+
+  it('returns geocentric equinoxes without an observer and conforms to schema', async () => {
+    const ctx = createMockContext({ errors: findEventsTool.errors });
+    const input = findEventsTool.input.parse({
+      event: 'equinox',
+      start: '2024-01-01T00:00:00Z',
+      count: 2,
+    });
+    const result = await findEventsTool.handler(input, ctx);
+    expect(result).toEqual(expect.schemaMatching(findEventsTool.output));
+    expect(result.events).toHaveLength(2);
+  });
+});
+
+describe('astronomy_list_visible', () => {
+  it('returns a ranked list and sets the sky-condition enrichment', async () => {
+    const ctx = createMockContext();
+    const input = listVisibleTool.input.parse({ ...SEATTLE, time: '2024-06-21T20:00:00Z' });
+    const result = await listVisibleTool.handler(input, ctx);
+    expect(result).toEqual(expect.schemaMatching(listVisibleTool.output));
+    expect(result.bodies[0]?.rank).toBe(1);
+  });
+});
