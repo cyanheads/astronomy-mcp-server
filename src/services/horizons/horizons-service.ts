@@ -197,7 +197,7 @@ export class HorizonsService {
     idx++; // s-brt column
     const delta = numeric[idx++];
 
-    if (ra === null || ra === undefined || dec === null || dec === undefined) return null;
+    if (ra == null || dec == null) return null;
 
     const point: EphemerisPoint = {
       timeUtc: time,
