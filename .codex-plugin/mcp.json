@@ -1,0 +1,9 @@
+{
+  "astronomy-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "astronomy-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}
