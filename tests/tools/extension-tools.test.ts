@@ -13,7 +13,7 @@
  * @module tests/tools/extension-tools.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getEphemerisTool } from '@/mcp-server/tools/definitions/get-ephemeris.tool.js';
@@ -30,6 +30,47 @@ function stubFetch(body: string, ok = true): void {
     'fetch',
     vi.fn(async () => new Response(body, { status: ok ? 200 : 503 })),
   );
+}
+
+/**
+ * Stub `fetch` so it throws the exact status-mapped McpError shape
+ * `fetchWithTimeout` raises on a non-2xx — its `data` carries the upstream
+ * internals the public server must NOT leak (statusCode, responseBody,
+ * requestId) and the message carries the request URL. `retryable: false` makes
+ * `withRetry` give up on the first attempt so the leak-strip is exercised
+ * without burning the backoff schedule. The service's catch must reclassify
+ * this into its typed domain error, dropping every internal.
+ */
+function stubFetchThrowsUpstream(): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => {
+      throw new McpError(
+        JsonRpcErrorCode.ServiceUnavailable,
+        'Fetch failed for https://internal.example.test/api. Status: 503',
+        {
+          requestId: 'req-internal-abc123',
+          operation: 'fetch',
+          statusCode: 503,
+          statusText: 'Service Unavailable',
+          responseBody: '<html>upstream stack trace and internal host details</html>',
+          errorSource: 'FetchHttpError',
+          retryable: false,
+        },
+      );
+    }),
+  );
+}
+
+/** Assert a client-facing error `data` payload carries none of the upstream internals. */
+function expectNoUpstreamLeak(data: unknown): void {
+  const serialized = JSON.stringify(data);
+  expect(serialized).not.toContain('statusCode');
+  expect(serialized).not.toContain('responseBody');
+  expect(serialized).not.toContain('requestId');
+  expect(serialized).not.toContain('503');
+  expect(serialized).not.toContain('internal.example.test');
+  expect(serialized).not.toMatch(/https?:\/\//);
 }
 
 /** Build a Horizons OBSERVER CSV block. Geocentric layout: date,flag,flag,RA,Dec,APmag,S-brt,delta,deldot. */
@@ -205,6 +246,23 @@ describe('astronomy_get_ephemeris — error contracts', () => {
     expect(err.data.reason).toBe('horizons_unavailable');
   });
 
+  it('maps a Horizons HTTP failure to horizons_unavailable without leaking HTTP internals', async () => {
+    // fetchWithTimeout throws a status-mapped McpError whose data carries the request
+    // URL, statusCode, and raw body. The service catches it and re-throws the typed
+    // contract with leak-free data — the framework error rides only as `cause`
+    // (server-side logs), never reaching the client surface.
+    stubFetchThrowsUpstream();
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '433;' });
+    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toEqual({
+      reason: 'horizons_unavailable',
+      recovery: { hint: expect.stringContaining('retry') },
+    });
+    expectNoUpstreamLeak(err.data);
+  });
+
   it('rejects an empty designation at schema validation', () => {
     expect(() => getEphemerisTool.input.parse({ designation: '' })).toThrow();
   });
@@ -325,6 +383,22 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
     const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
     expect(err.data.reason).toBe('celestrak_unavailable');
     expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+  });
+
+  it('maps a CelesTrak HTTP failure to celestrak_unavailable without leaking HTTP internals', async () => {
+    // A 5xx (not a 404, not a 200 sentinel) reaches the fetch catch as a status-mapped
+    // McpError carrying the URL, statusCode, and raw body. classifyFetchError must map
+    // it to the typed contract with leak-free data — internals stay on `cause` only.
+    stubFetchThrowsUpstream();
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ norad_id: 25544, ...SEATTLE });
+    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toEqual({
+      reason: 'celestrak_unavailable',
+      recovery: { hint: expect.stringContaining('retry') },
+    });
+    expectNoUpstreamLeak(err.data);
   });
 
   it('rejects a non-positive NORAD id at schema validation', () => {
