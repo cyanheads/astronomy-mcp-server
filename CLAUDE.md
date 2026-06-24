@@ -11,35 +11,30 @@
 
 ---
 
-## First Session
+## Server Surface
 
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
+Observational astronomy, computed in-process. The core is keyless and offline — `astronomy-engine` plus a bundled bright-star catalog, no upstream, no `ctx.state`, deterministic for `(body, time, observer)`. The server does **not** geocode: callers resolve a place name to latitude/longitude (e.g. via openstreetmap) and a timezone (e.g. via reference-data) upstream, then pass coordinates and an optional IANA `timezone` for observer-local output.
 
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
+**Five core tools** (always registered):
 
-1. **Get your bearings.** Take stock of the project tree, the skills in `skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
+| Tool | What it computes |
+|:-----|:-----------------|
+| `astronomy_get_sky_position` | Apparent topocentric position of one body or named star — equatorial / horizontal / ecliptic, magnitude, angular diameter, phase, constellation |
+| `astronomy_get_rise_set` | Rise / set / transit cycles, plus twilight bands for the Sun; circumpolar / never-rises notes |
+| `astronomy_get_moon_phase` | Phase angle, illumination, synodic age, next four quarter phases |
+| `astronomy_find_events` | Next N of: equinox, solstice, moon_quarter, lunar/solar eclipse, opposition, conjunction, max_elongation, perigee_apogee |
+| `astronomy_list_visible` | One-call "what is up now" — naked-eye bodies (+ optional catalog stars) above the horizon, ranked, with a sky-condition gate |
 
----
+Plus the `astronomy://body/{body}` resource (static reference card) and the `astronomy_stargazing_plan` prompt (chains the tools for a "plan tonight from <place>" workflow).
 
-## What's Next?
+**Two gated, network-backed extensions** register only when their env gate is on (default deployment is keyless + offline):
 
-When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
+- `astronomy_get_ephemeris` — small-body / spacecraft ephemeris from JPL Horizons. Gate: `ASTRONOMY_ENABLE_HORIZONS`.
+- `astronomy_get_satellite_passes` — visible passes via a CelesTrak TLE propagated with SGP4 offline. Gate: `ASTRONOMY_ENABLE_SATELLITES`.
 
-1. **Re-run the `setup` skill** — ensures CLAUDE.md, skills, structure, and metadata are populated and up to date with the current codebase
-2. **Run the `design-mcp-server` skill** — if the tool/resource surface hasn't been mapped yet, work through domain design
-3. **Add tools/resources/prompts** — scaffold new definitions using the `add-tool`, `add-app-tool`, `add-resource`, `add-prompt` skills
-4. **Add services** — scaffold domain service integrations using the `add-service` skill
-5. **Add tests** — scaffold tests for existing definitions using the `add-test` skill
-6. **Field-test definitions** — exercise tools/resources/prompts with real inputs using the `field-test` skill, get a report of issues and pain points
-7. **Run `devcheck`** — lint, format, typecheck, and security audit
-8. **Run the `security-pass` skill** — audit handlers for MCP-specific security gaps: output injection, scope blast radius, input sinks, tenant isolation
-9. **Run the `polish-docs-meta` skill** — finalize README, CHANGELOG, metadata, and agent protocol for shipping
-10. **Run the `maintenance` skill** — investigate changelogs, adopt upstream changes, and sync skills after `bun update --latest`
+Both extension services carry their own timeout + retry boundary, cache nothing on disk (Horizons is stateless; the satellite TLE cache is an in-process TTL `Map`), and degrade loudly — on any upstream failure they catch the framework's status-mapped `McpError` and re-throw a clean typed domain error (`{ reason, recovery }`, no `statusCode` / `responseBody` / `requestId` / internal URL), carrying the original as `cause` for server-side logs only. They never substitute core output.
 
-Tailor suggestions to what's actually missing or stale — don't recite the full list every time.
+**Config** (`src/config/server-config.ts`) is entirely optional — the core needs none. Every variable gates or tunes the two extensions (`ASTRONOMY_ENABLE_*`, `ASTRONOMY_*_BASE_URL`, `ASTRONOMY_DEFAULT_TIMEZONE`, `ASTRONOMY_REQUEST_TIMEOUT_MS`, `ASTRONOMY_TLE_CACHE_TTL_MS`).
 
 ---
 
