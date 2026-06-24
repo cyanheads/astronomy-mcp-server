@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "cyanheads/astronomy-mcp-server",
+  "name": "io.github.cyanheads/astronomy-mcp-server",
   "description": "Offline observational astronomy: positions, rise/set, moon phases, eclipses, and seasons.",
   "repository": {
     "url": "https://github.com/cyanheads/astronomy-mcp-server",

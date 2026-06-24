@@ -39,10 +39,10 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="astronomy-mcp-server"
-LABEL org.opencontainers.image.description=""
+LABEL org.opencontainers.image.description="What's in the sky, computed offline — planet and moon positions, rise/set, phases, eclipses, and seasons for any place and time."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
-LABEL org.opencontainers.image.source=""
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/astronomy-mcp-server"
 
 # Copy dependency manifests
 COPY package.json bun.lock ./

@@ -118,7 +118,7 @@ export class HorizonsService {
       throw notFound(`JPL Horizons has no match for designation "${designation}".`, {
         reason: 'body_not_found',
         recovery: {
-          hint: "Check the designation against JPL's small-body database at ssd.jpl.nasa.gov; try the SPK-ID form.",
+          hint: 'Use a record-resolving form: a numbered asteroid as "<number>;" (e.g. "433;"), a periodic comet as "DES=<designation>;CAP" (e.g. "DES=1P;CAP"), or a spacecraft as its negative SPK-ID. Verify the designation at ssd.jpl.nasa.gov/tools/sbdb_lookup.html.',
         },
       });
     }

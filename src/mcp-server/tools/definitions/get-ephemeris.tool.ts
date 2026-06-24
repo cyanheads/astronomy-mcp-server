@@ -49,14 +49,14 @@ export type EphemerisOutputType = z.infer<typeof EphemerisOutput>;
 export const getEphemerisTool = tool('astronomy_get_ephemeris', {
   title: 'astronomy-mcp-server: get small-body ephemeris',
   description:
-    'Fetch a time-series ephemeris for a small body (asteroid or comet) or spacecraft from JPL Horizons — RA/Dec, distance, and apparent magnitude over a span, optionally with observer-relative altitude/azimuth. This covers objects the in-process major-body set cannot: pass a designation like "433 Eros", "1P/Halley", or an SPK-ID. `start` and `stop` are ISO 8601 UTC; `step` is a Horizons step string such as "1d", "1h", or "10m". Supplying observer latitude/longitude yields topocentric coordinates and adds alt/az. This is a gated, network-backed extension (JPL Horizons is keyless but rate-limited and best-effort); large spans truncate inline — widen the step to reduce rows.',
+    'Fetch a time-series ephemeris for a small body (asteroid or comet) or spacecraft from JPL Horizons — RA/Dec, distance, and apparent magnitude over a span, optionally with observer-relative altitude/azimuth. This covers objects the in-process major-body set cannot. The designation is passed to Horizons verbatim, so it must be in a form Horizons resolves to a single record: a numbered asteroid takes a trailing-semicolon record lookup (e.g. "433;" for Eros, "1;" for Ceres), and a periodic comet takes the DES + closest-apparition form (e.g. "DES=1P;CAP" for Halley) — a bare name like "433 Eros" or "1P/Halley" returns no match or an ambiguous record list and is rejected. Spacecraft take their negative SPK-ID. `start` and `stop` are ISO 8601 UTC; `step` is a Horizons step string such as "1d", "1h", or "10m". Supplying observer latitude/longitude yields topocentric coordinates and adds alt/az. This is a gated, network-backed extension (JPL Horizons is keyless but rate-limited and best-effort); large spans truncate inline — widen the step to reduce rows.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
     designation: z
       .string()
       .min(1)
       .describe(
-        'JPL Horizons target designation, e.g. "433 Eros", "1P/Halley", or an SPK-ID. Find designations at ssd.jpl.nasa.gov.',
+        'JPL Horizons target, passed verbatim — use a form that resolves to one record. Numbered asteroid: trailing-semicolon record lookup, e.g. "433;" (Eros), "1;" (Ceres). Periodic comet: DES + closest-apparition flag, e.g. "DES=1P;CAP" (Halley), "DES=2P;CAP" (Encke). Spacecraft: negative SPK-ID, e.g. "-48" (Hubble). A bare name like "433 Eros" or "1P/Halley" fails. Look up designations at ssd.jpl.nasa.gov/tools/sbdb_lookup.html.',
       ),
     latitude: z
       .number()
@@ -101,9 +101,9 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     {
       reason: 'body_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'JPL Horizons has no match for the designation.',
+      when: 'JPL Horizons has no match for the designation, or the designation is ambiguous (a bare comet name matches multiple apparition records).',
       recovery:
-        "Check the designation against JPL's small-body database at ssd.jpl.nasa.gov; try the SPK-ID form.",
+        'Use a record-resolving form: a numbered asteroid as "<number>;" (e.g. "433;"), a periodic comet as "DES=<designation>;CAP" (e.g. "DES=1P;CAP"), or a spacecraft as its negative SPK-ID. Verify the designation at ssd.jpl.nasa.gov/tools/sbdb_lookup.html.',
     },
     {
       reason: 'horizons_unavailable',

@@ -22,7 +22,7 @@ idea sketch — not renamed, added, or dropped.
 | `astronomy_get_moon_phase` | Moon phase for a date: illuminated fraction, phase name, age (days since new), phase angle, and the next four quarter phases (new/first/full/last) with timestamps. | `true` | `false` | `time?`, `timezone?` | phase record + next 4 quarters |
 | `astronomy_find_events` | Search upcoming sky events from a start time, consolidated by an `event` enum. For eclipses takes an observer location and reports local visibility + contact times; the rest are geocentric. Returns the next `count` occurrences (default 1). `body` is required for `opposition`, `conjunction`, `max_elongation`, and `perigee_apogee`. | `true` | `false` | `event`, `start?`, `count?`, `body?`, `latitude?`, `longitude?`, `elevation?`, `timezone?` | array of event records |
 | `astronomy_list_visible` | Workflow flagship. For a location + instant, iterate every naked-eye body (sun, moon, planets; optional bundled bright stars), compute alt/az, filter to above-horizon, return a ranked "what's up" list with a visibility note. Sun-altitude gate flags daylight/twilight/dark. `time` is a single evaluation instant, not a window — for "tonight" pick a time after astronomical dusk. | `true` | `false` | `latitude`, `longitude`, `elevation?`, `time?`, `timezone?`, `min_altitude?`, `include_stars?` | ranked visible-body list + sky condition |
-| `astronomy_get_ephemeris` | *(extension, gated)* Ephemeris for a small body (asteroid/comet) or spacecraft via JPL Horizons. Designations like `433 Eros`, `1P/Halley`, or SPK-ID. RA/Dec, distance, magnitude over a time span. Covers what the major-body set can't. `start`/`stop` are ISO 8601 UTC; `step` is a Horizons step string (e.g. `"1d"`, `"1h"`, `"10m"`). | `true` | `true` | `designation`, `latitude?`, `longitude?`, `elevation?`, `start?`, `stop?`, `step?` | time-series of positions |
+| `astronomy_get_ephemeris` | *(extension, gated)* Ephemeris for a small body (asteroid/comet) or spacecraft via JPL Horizons. The designation is passed to Horizons verbatim and must resolve to one record: numbered asteroid as `433;` (trailing semicolon), periodic comet as `DES=1P;CAP` (DES + closest-apparition), spacecraft as a negative SPK-ID — a bare name (`433 Eros`, `1P/Halley`) returns no match or an ambiguous record list. RA/Dec, distance, magnitude over a time span. Covers what the major-body set can't. `start`/`stop` are ISO 8601 UTC; `step` is a Horizons step string (e.g. `"1d"`, `"1h"`, `"10m"`). | `true` | `true` | `designation`, `latitude?`, `longitude?`, `elevation?`, `start?`, `stop?`, `step?` | time-series of positions |
 | `astronomy_get_satellite_passes` | *(extension, gated)* Visible passes of a satellite (ISS, by NORAD ID) over an observer in the next `days` (default 7). Fetches the TLE from CelesTrak, propagates with SGP4 (offline), returns pass start/peak/end with alt/az; only sunlit-satellite + dark-ground passes are "visible." NORAD IDs are found at celestrak.org or heavens-above.com. | `true` | `true` | `norad_id`, `latitude`, `longitude`, `elevation?`, `days?`, `start?`, `timezone?` | array of visible passes |
 
 Seven tools total. Five form the keyless offline core (always registered); two extensions
@@ -225,21 +225,25 @@ type Body =
 
 ```ts
 // common: { event: string; time_utc: string; time_local?: string }
+// Eclipse contact times are emitted under a `contacts` record (phase → ISO 8601 UTC | null),
+// not as flat *_utc fields. Apsis classification is `apsis_kind` (not `kind`, which is the
+// eclipse-classification field).
 // + per-event detail:
 //
-// Events that do NOT require input `body` (geocentric / body-independent):
-//   solar_eclipse  → { kind: 'partial'|'annular'|'total'|'none'; obscuration: number|null;
-//                      local_visible: boolean; partial_begin_utc, peak_utc, partial_end_utc, … }  (local circumstances when observer given)
-//   lunar_eclipse  → { kind; obscuration; penumbral_begin_utc, partial_begin_utc, total_begin_utc, peak_utc, … }
+//   solar_eclipse  → { kind: 'partial'|'annular'|'total'; obscuration: number|null;
+//                    local_visible: boolean; contacts: { partial_begin_utc, peak_utc, partial_end_utc, … } }
+//                    // REQUIRES an observer (latitude/longitude) — local circumstances; throws observer_required without it.
+//   lunar_eclipse  → { kind: 'penumbral'|'partial'|'total'; obscuration: number|null;
+//                      contacts: { penumbral_begin_utc, partial_begin_utc, total_begin_utc, peak_utc, … } }  // geocentric — no observer needed.
 //   equinox        → { which: 'march'|'september' }
 //   solstice       → { which: 'june'|'december' }
 //   moon_quarter   → { quarter: 'new'|'first_quarter'|'full'|'last_quarter' }
 //
-// Events that REQUIRE input `body` (a planet from the Body enum; throws body_required without it):
+// Events that REQUIRE input `body` (throws body_required without it):
 //   opposition     → { body: string }                         // SearchRelativeLongitude(body, 180)
 //   conjunction    → { body: string }                         // SearchRelativeLongitude(body, 0)
-//   max_elongation → { body: string; elongation_degrees: number; visibility: 'morning'|'evening' }  // SearchMaxElongation (inner planets only: mercury, venus)
-//   perigee_apogee → { body: 'moon'|<planet>; kind: 'perigee'|'apogee'|'perihelion'|'aphelion'; distance_km: number, distance_au: number }
+//   max_elongation → { body: string; elongation_degrees: number; visibility: 'morning'|'evening' }  // SearchMaxElongation (mercury/venus only; other bodies throw body_not_supported)
+//   perigee_apogee → { body: 'moon'|<planet>; apsis_kind: 'perigee'|'apogee'|'perihelion'|'aphelion'; distance_km: number; distance_au: number }
 //                    // moon → SearchLunarApsis; planet → SearchPlanetApsis
 ```
 
@@ -285,8 +289,10 @@ include_stars: boolean // include catalog bright stars in the output, default fa
 {
   designation: string;        // echoed input designation
   points: EphemerisPoint[];
-  truncated: boolean;         // true if Horizons returned more rows than an inline cap; use step to reduce
 }
+// Truncation is reported out-of-band via the enrichment block, not in the output object:
+//   enrichment: { truncated: boolean; shown: number; cap: number }   // inline row cap = 200
+//   When truncated, an enrichment notice advises widening `step` or shortening the span.
 ```
 
 **SatellitePass** (element of `astronomy_get_satellite_passes` output array):
@@ -508,28 +514,30 @@ when, recovery }]`, thrown via `ctx.fail`):
 | `astronomy_get_sky_position` | `time_out_of_range` | `InvalidParams` | Requested instant is outside `astronomy-engine`'s supported span (high accuracy ≈1900–2100). Recovery: use a date between 1900 and 2100. |
 | `astronomy_get_sky_position` | `star_not_found` | `NotFound` | `star` field supplied but the name is not in the bundled catalog. Recovery: check spelling or use a common name / Bayer designation (e.g. "Sirius", "Polaris"). |
 | `astronomy_get_rise_set` | `no_event_in_window` | *(not an error — `null` field + `note`)* | Circumpolar / never-rises: surfaced as `null` rise/set with an explanatory `note`, NOT thrown. The agent needs the fact, not a failure. |
-| `astronomy_find_events` | `observer_required` | `InvalidParams` | `event` is `solar_eclipse` or `lunar_eclipse` but `latitude`/`longitude` are not supplied. Recovery: add observer coordinates and retry. |
+| `astronomy_find_events` | `observer_required` | `InvalidParams` | `event` is `solar_eclipse` but `latitude`/`longitude` are not supplied (lunar eclipses are geocentric and need no observer). Recovery: add observer coordinates and retry. |
 | `astronomy_find_events` | `body_required` | `InvalidParams` | `event` is one of `opposition`, `conjunction`, `max_elongation`, or `perigee_apogee` but `body` is not supplied. Recovery: add the target body (e.g. `"mars"`) and retry. |
-| `astronomy_get_ephemeris` | `body_not_found` | `NotFound` | Horizons has no match for the designation. Recovery: check the designation against JPL's small-body database at ssd.jpl.nasa.gov; try the SPK-ID form. |
+| `astronomy_find_events` | `body_not_supported` | `InvalidParams` | `event` is `max_elongation` but `body` is not mercury or venus. Recovery: use `"mercury"` or `"venus"` — outer planets have no greatest elongation. |
+| `astronomy_get_ephemeris` | `body_not_found` | `NotFound` | Horizons has no match for the designation, or a bare comet name is ambiguous. Recovery: use a record-resolving form — `"433;"` (numbered asteroid), `"DES=1P;CAP"` (periodic comet), or a negative SPK-ID; verify at ssd.jpl.nasa.gov. |
 | `astronomy_get_ephemeris` | `horizons_unavailable` | `ServiceUnavailable` | Horizons API failed after retries. Retryable. |
 | `astronomy_get_satellite_passes` | `tle_not_found` | `NotFound` | CelesTrak has no current element set for the NORAD ID. Recovery: verify the catalog number at celestrak.org; the object may have decayed. |
 | `astronomy_get_satellite_passes` | `celestrak_unavailable` | `ServiceUnavailable` | TLE fetch failed after retries. Retryable. |
 
-Two cross-cutting validation gates: (1) `astronomy_find_events` `observer_required` — eclipse
-events require observer coordinates and fail fast rather than returning geocentric data the
-agent didn't ask for; (2) `astronomy_find_events` `body_required` — body-specific events
-(`opposition`, `conjunction`, `max_elongation`, `perigee_apogee`) require a `body` and fail
-fast with a clear recovery hint naming the valid values. Baseline errors (timeout, generic
-validation) bubble.
+Two cross-cutting validation gates: (1) `astronomy_find_events` `observer_required` — a
+`solar_eclipse` needs observer coordinates for its local circumstances and fails fast rather
+than returning data the agent can't use (lunar eclipses are geocentric and skip this gate);
+(2) `astronomy_find_events` `body_required` — body-specific events (`opposition`,
+`conjunction`, `max_elongation`, `perigee_apogee`) require a `body` and fail fast with a clear
+recovery hint naming the valid values. Baseline errors (timeout, generic validation) bubble.
 
 ## Output Design Notes
 
-- **Capped lists disclose truncation.** `astronomy_get_rise_set` (`count`),
-  `astronomy_find_events` (`count`), and `astronomy_get_ephemeris` (span/`step`) all accept a
-  cap and return arrays — each discloses when the cap was hit via `ctx.enrich.truncated({
-  shown, cap })`. `astronomy_list_visible` returns the full above-horizon set (bounded at
-  ~12 bodies + optional stars), so no cap, but it carries the `sky_condition` +
-  `sun_altitude_degrees` envelope as `enrichment` so both client surfaces see the gate.
+- **Capped lists disclose their counts.** `astronomy_get_rise_set` (`count`) and
+  `astronomy_find_events` (`count`) return arrays and emit a `totalCount` enrichment via
+  `ctx.enrich.total(n)`. `astronomy_get_ephemeris` (span/`step`) discloses when the inline row
+  cap was hit via `ctx.enrich({ truncated, shown, cap })`. `astronomy_list_visible` returns the
+  full above-horizon set (bounded at ~12 bodies + optional stars), so no cap, but it carries
+  `sky_condition` + `sun_altitude_degrees` (plus `totalCount`) as `enrichment` so both client
+  surfaces see the gate.
 - **Preserve uncertainty; never fabricate.** `magnitude`, `angular_diameter_arcsec`,
   `phase_angle_degrees`, and `illuminated_fraction` are `null` (not 0, not omitted) for
   bodies where `astronomy-engine` can't compute them. `format()` renders "magnitude:
