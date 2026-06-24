@@ -126,6 +126,22 @@ describe('astronomy_get_ephemeris — happy path', () => {
     expect(text).toContain('mag n/a');
   });
 
+  it('parses the seconds-less HH:MM date column as UTC (real OBSERVER-table format)', async () => {
+    // Horizons emits "2024-Jan-01 00:00" (no seconds) at hour/day steps — the
+    // common case. Asserts the timestamp is the requested UTC instant, never
+    // shifted by the host's local offset (the local-time `new Date(...)` trap).
+    stubFetch(
+      horizonsGeocentric(['2024-Jan-01 00:00, , , 45.000000, 12.500000, 9.50, 5.0, 1.500000, 0.0']),
+    );
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2024-01-01T00:00:00Z',
+    });
+    const result = await getEphemerisTool.handler(input, ctx);
+    expect(result.points[0]?.time_utc).toBe('2024-01-01T00:00:00.000Z');
+  });
+
   it('discloses truncation when Horizons returns more rows than the inline cap', async () => {
     const rows: string[] = [];
     for (let i = 0; i < 250; i++) {
@@ -280,6 +296,26 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
     const input = getSatellitePassesTool.input.parse({ norad_id: 99999, ...SEATTLE });
     const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
     expect(err.data.reason).toBe('tle_not_found');
+  });
+
+  it('maps a CelesTrak 404 to tle_not_found without leaking HTTP internals', async () => {
+    // CelesTrak answers a missing object with HTTP 404 (not a 200 sentinel), so
+    // fetchWithTimeout throws a NotFound McpError carrying the URL, status, and
+    // raw body in its data. The service must reclassify into the typed contract
+    // with leak-free data — no statusCode/responseBody/url/requestId.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('No GP data found', { status: 404 })),
+    );
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ norad_id: 999999, ...SEATTLE });
+    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
+    expect(err.data.reason).toBe('tle_not_found');
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.data).toEqual({
+      reason: 'tle_not_found',
+      recovery: { hint: expect.stringContaining('celestrak.org') },
+    });
   });
 
   it('fails celestrak_unavailable when the response is not a parsable TLE', async () => {

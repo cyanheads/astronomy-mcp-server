@@ -10,7 +10,12 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  notFound,
+  serviceUnavailable,
+} from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Body, Equator, Horizon, MakeTime, Observer } from 'astronomy-engine';
 import {
@@ -60,24 +65,58 @@ export class SatelliteService {
     });
     const url = `${this.baseUrl}?CATNR=${noradId}&FORMAT=TLE`;
 
-    const text = await withRetry(
-      async () => {
-        const response = await fetchWithTimeout(url, this.timeoutMs, reqCtx, {
+    let text: string;
+    try {
+      text = await withRetry(
+        async () => {
+          const response = await fetchWithTimeout(url, this.timeoutMs, reqCtx, {
+            signal: ctx.signal,
+          });
+          return response.text();
+        },
+        {
+          operation: 'SatelliteService.fetchTle',
+          context: reqCtx,
+          baseDelayMs: 1000,
           signal: ctx.signal,
-        });
-        return response.text();
-      },
-      {
-        operation: 'SatelliteService.fetchTle',
-        context: reqCtx,
-        baseDelayMs: 1000,
-        signal: ctx.signal,
-      },
-    );
+        },
+      );
+    } catch (err) {
+      // fetchWithTimeout throws a status-mapped McpError on any non-2xx whose
+      // data carries raw upstream internals (URL, statusCode, responseBody). Map
+      // it into the typed contract with clean data so nothing upstream leaks to
+      // the client. CelesTrak answers a missing object with 404 → NotFound.
+      throw this.classifyFetchError(err, noradId);
+    }
 
     const tle = this.parseTle(text, noradId);
     this.cache.set(noradId, { tle, expiresAt: Date.now() + this.cacheTtlMs });
     return tle;
+  }
+
+  /**
+   * Map a fetch/transport McpError onto the typed contract with leak-free data.
+   * A NotFound (CelesTrak's 404 for an uncatalogued object) becomes tle_not_found;
+   * everything else (5xx, timeout, network) becomes celestrak_unavailable. The
+   * original error rides as `cause` for server-side logs but never reaches the client.
+   */
+  private classifyFetchError(err: unknown, noradId: number): McpError {
+    if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
+      return notFound(`CelesTrak has no current element set for NORAD ID ${noradId}.`, {
+        reason: 'tle_not_found',
+        recovery: {
+          hint: 'Verify the catalog number at celestrak.org; the object may have decayed or never been catalogued.',
+        },
+      });
+    }
+    return serviceUnavailable(
+      `Failed to fetch a TLE for NORAD ID ${noradId} from CelesTrak.`,
+      {
+        reason: 'celestrak_unavailable',
+        recovery: { hint: 'CelesTrak is degraded or timed out; retry in a few minutes.' },
+      },
+      { cause: err instanceof Error ? err : undefined },
+    );
   }
 
   /** Parse a CelesTrak TLE response (optional name line + the two element lines). */

@@ -20,6 +20,8 @@ import { getSatellitePassesTool } from './mcp-server/tools/definitions/get-satel
 import { getSkyPositionTool } from './mcp-server/tools/definitions/get-sky-position.tool.js';
 import { listVisibleTool } from './mcp-server/tools/definitions/list-visible.tool.js';
 import { initEphemerisService } from './services/ephemeris/ephemeris-service.js';
+import { initHorizonsService } from './services/horizons/horizons-service.js';
+import { initSatelliteService } from './services/satellite/satellite-service.js';
 
 const cfg = getServerConfig();
 
@@ -48,6 +50,12 @@ await createApp({
     'Observer location is latitude/longitude in decimal degrees plus optional elevation; times are ISO 8601 UTC and default to now. This server does not geocode — resolve a place name to coordinates upstream (e.g. via openstreetmap) and a timezone via reference-data, then pass `timezone` to receive observer-local times. astronomy_list_visible is the one-call "what is up now" answer. The astronomy_get_ephemeris (small bodies) and astronomy_get_satellite_passes tools are off by default; enable them with ASTRONOMY_ENABLE_HORIZONS / ASTRONOMY_ENABLE_SATELLITES.',
   setup() {
     initEphemerisService();
+    if (cfg.enableHorizons) {
+      initHorizonsService(cfg.horizonsBaseUrl, cfg.requestTimeoutMs);
+    }
+    if (cfg.enableSatellites) {
+      initSatelliteService(cfg.celestrakBaseUrl, cfg.requestTimeoutMs, cfg.tleCacheTtlMs);
+    }
   },
   tools: [...coreTools, ...extensionTools],
   resources: [bodyResource],

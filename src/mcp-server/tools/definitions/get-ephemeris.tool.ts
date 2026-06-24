@@ -9,6 +9,9 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getHorizonsService } from '@/services/horizons/horizons-service.js';
 
+/** Inline ephemeris-row cap disclosed via enrichment — mirrors HorizonsService MAX_ROWS. */
+const INLINE_ROW_CAP = 200;
+
 export const EphemerisOutput = z.object({
   designation: z.string().describe('The body designation echoed from the request.'),
   points: z
@@ -126,13 +129,16 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
       points: result.points.length,
     });
 
+    /**
+     * Emit the truncation enrichment on every call — the declared block requires
+     * `truncated`/`shown`/`cap`, so a non-truncated result must still populate them
+     * or the effective-output parse fails. INLINE_ROW_CAP mirrors the service's MAX_ROWS.
+     */
+    ctx.enrich({ truncated: result.truncated, shown: result.points.length, cap: INLINE_ROW_CAP });
     if (result.truncated) {
-      ctx.enrich.truncated({
-        shown: result.points.length,
-        cap: 200,
-        guidance:
-          'Widen the step (e.g. from "10m" to "1h") or shorten the time span to fit within the inline row cap.',
-      });
+      ctx.enrich.notice(
+        'Widen the step (e.g. from "10m" to "1h") or shorten the time span to fit within the inline row cap.',
+      );
     }
 
     const out: EphemerisOutputType = {

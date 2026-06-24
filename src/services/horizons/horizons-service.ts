@@ -42,20 +42,37 @@ export class HorizonsService {
 
     const url = this.buildUrl(designation, start, stop, step, observer);
 
-    const text = await withRetry(
-      async () => {
-        const response = await fetchWithTimeout(url, this.timeoutMs, reqCtx, {
+    let text: string;
+    try {
+      text = await withRetry(
+        async () => {
+          const response = await fetchWithTimeout(url, this.timeoutMs, reqCtx, {
+            signal: ctx.signal,
+          });
+          return response.text();
+        },
+        {
+          operation: 'HorizonsService.ephemeris',
+          context: reqCtx,
+          baseDelayMs: 2000,
           signal: ctx.signal,
-        });
-        return response.text();
-      },
-      {
-        operation: 'HorizonsService.ephemeris',
-        context: reqCtx,
-        baseDelayMs: 2000,
-        signal: ctx.signal,
-      },
-    );
+        },
+      );
+    } catch (err) {
+      // fetchWithTimeout throws a status-mapped McpError on any non-2xx whose data
+      // carries raw upstream internals (URL, statusCode, responseBody). A transport
+      // failure is always horizons_unavailable here — Horizons signals a genuine
+      // no-match with a 200 body (handled in parse), not an HTTP error status. Map
+      // to the typed contract with clean data so nothing upstream leaks to the client.
+      throw serviceUnavailable(
+        `Failed to fetch an ephemeris for "${designation}" from JPL Horizons.`,
+        {
+          reason: 'horizons_unavailable',
+          recovery: { hint: 'JPL Horizons is degraded or timed out; retry in a few minutes.' },
+        },
+        { cause: err instanceof Error ? err : undefined },
+      );
+    }
 
     return this.parse(designation, text, !!observer);
   }
@@ -196,14 +213,20 @@ export class HorizonsService {
     return point;
   }
 
-  /** Convert a Horizons calendar date (e.g. "2024-Apr-08 18:00:00.0000") to ISO 8601 UTC. */
+  /**
+   * Convert a Horizons calendar date to ISO 8601 UTC. The OBSERVER table emits
+   * "2024-Apr-08 18:00" (HH:MM) at hour/day steps and "…18:00:00.0000" at finer
+   * steps, so seconds are optional. Horizons dates are always UT — parse them as
+   * UTC explicitly; never let a bare string fall to local-time `new Date(...)`.
+   */
   private parseHorizonsDate(raw: string): string | null {
     const cleaned = raw.replace(/^A\.D\.\s*/, '').trim();
     const match = cleaned.match(
-      /^(\d{4})-([A-Za-z]{3})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?/,
+      /^(\d{4})-([A-Za-z]{3})-(\d{2})\s+(\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?/,
     );
     if (!match) {
-      const d = new Date(cleaned);
+      // Append Z so an unzoned fallback string is read as UTC, not host-local time.
+      const d = new Date(/[zZ]|[+-]\d{2}:?\d{2}$/.test(cleaned) ? cleaned : `${cleaned}Z`);
       return Number.isNaN(d.getTime()) ? null : d.toISOString();
     }
     const months: Record<string, string> = {
@@ -223,7 +246,7 @@ export class HorizonsService {
     const [, year, monName, day, hh, mm, ss] = match;
     const monNum = monName ? months[monName] : undefined;
     if (!monNum) return null;
-    const iso = `${year}-${monNum}-${day}T${hh}:${mm}:${ss}Z`;
+    const iso = `${year}-${monNum}-${day}T${hh}:${mm}:${ss ?? '00'}Z`;
     const d = new Date(iso);
     return Number.isNaN(d.getTime()) ? null : d.toISOString();
   }
