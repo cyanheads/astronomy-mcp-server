@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Server:** astronomy-mcp-server
-**Version:** 0.1.0
+**Version:** 0.1.1
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.9`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
@@ -55,36 +55,38 @@ Both extension services carry their own timeout + retry boundary, cache nothing 
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const getMoonPhaseTool = tool('astronomy_get_moon_phase', {
+  title: 'astronomy-mcp-server: get moon phase',
+  description:
+    'Report the Moon phase for an instant: illuminated fraction, phase name, synodic age, phase angle, and the next four quarter phases.',
+  annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    time: z.string().optional().describe('Instant to evaluate as an ISO 8601 UTC string. Defaults to now.'),
+    timezone: z.string().optional().describe('IANA timezone for localized output. UTC-only when omitted.'),
   }),
-  output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
-  }),
-  auth: ['inventory:read'],
+  output: MoonPhaseOutput,
+  errors: [
+    { reason: 'time_out_of_range', code: JsonRpcErrorCode.InvalidParams,
+      when: "The instant is outside the engine's high-accuracy span (≈1900–2100).",
+      recovery: 'Use a date between 1900 and 2100 and retry.' },
+  ],
 
-  async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+  // Core handler is synchronous — astronomy-engine computes in-process, no upstream.
+  handler(input, ctx) {
+    const svc = getEphemerisService();
+    const phase = svc.moonPhase(svc.resolveTime(input.time), svc.resolveTimezone(input.timezone));
+    ctx.log.info('Computed moon phase', { phaseName: phase.phaseName });
+    return toMoonPhaseOutput(phase);
   },
 
   // format() populates content[] — the markdown twin of structuredContent.
   // Different clients read different surfaces (Claude Code → structuredContent,
   // Claude Desktop → content[]); both must carry the same data.
   // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  format: (r) => [{ type: 'text', text: `## Moon — ${r.phase_name}\n**Illuminated:** ${(r.illuminated_fraction * 100).toFixed(1)}%` }],
 });
 ```
 
@@ -92,17 +94,32 @@ export const searchItems = tool('search_items', {
 
 ```ts
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { BODY_META } from '@/services/ephemeris/body-data.js';
+import { BODY_NAMES, type BodyName } from '@/services/ephemeris/types.js';
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
+export const bodyResource = resource('astronomy://body/{body}', {
+  name: 'astronomy-body-reference',
+  title: 'astronomy-mcp-server: body reference card',
+  description: 'Static reference card for a solar-system body: name, type, mean radius (km), and naked-eye visibility.',
+  mimeType: 'application/json',
+  params: z.object({ body: z.string().describe('One of sun, moon, mercury … pluto.') }),
+  output: BodyCardOutput,
+  errors: [
+    { reason: 'unknown_body', code: JsonRpcErrorCode.NotFound,
+      when: 'The {body} segment is not a supported body.',
+      recovery: 'Use one of: sun, moon, mercury … pluto.' },
+  ],
+  handler(params, ctx) {
+    const key = params.body.trim().toLowerCase();
+    if (!(BODY_NAMES as readonly string[]).includes(key)) {
+      throw ctx.fail('unknown_body', `Unknown body "${params.body}".`, { ...ctx.recoveryFor('unknown_body') });
+    }
+    const meta = BODY_META[key as BodyName];
+    return { body: key, name: meta.name, type: meta.type, mean_radius_km: meta.meanRadiusKm, naked_eye: meta.nakedEye };
   },
+
+  list: () => ({ resources: BODY_NAMES.map((b) => ({ uri: `astronomy://body/${b}`, name: BODY_META[b].name })) }),
 });
 ```
 
@@ -111,15 +128,18 @@ export const itemData = resource('inventory://{itemId}', {
 ```ts
 import { prompt, z } from '@cyanheads/mcp-ts-core';
 
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
+export const stargazingPlanPrompt = prompt('astronomy_stargazing_plan', {
+  title: 'astronomy-mcp-server: plan stargazing session',
+  description:
+    'Structure a "plan tonight\'s stargazing from <place>" workflow, chaining the astronomy tools and naming the cross-server geocoding and weather steps.',
   args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
+    location: z.string().describe('The place to stargaze from, e.g. "Mount Rainier".'),
+    date: z.string().optional().describe('Target date (YYYY-MM-DD). Defaults to tonight.'),
   }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
+  generate: (args) => {
+    const when = args.date ? ` on ${args.date}` : ' tonight';
+    return [{ role: 'user', content: { type: 'text', text: `Plan a stargazing session from ${args.location}${when}: resolve coordinates upstream, find the dark-sky window with astronomy_get_rise_set on the sun, check astronomy_get_moon_phase, then astronomy_list_visible just after astronomical dusk.` } }];
+  },
 });
 ```
 
@@ -131,23 +151,31 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
+  enableHorizons: z.stringbool().default(false),
+  enableSatellites: z.stringbool().default(false),
+  horizonsBaseUrl: z.string().default('https://ssd.jpl.nasa.gov/api/horizons.api'),
+  celestrakBaseUrl: z.string().default('https://celestrak.org/NORAD/elements/gp.php'),
+  defaultTimezone: z.string().optional(),
+  requestTimeoutMs: z.coerce.number().default(15000),
+  tleCacheTtlMs: z.coerce.number().default(7200000),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
+    enableHorizons: 'ASTRONOMY_ENABLE_HORIZONS',
+    enableSatellites: 'ASTRONOMY_ENABLE_SATELLITES',
+    horizonsBaseUrl: 'ASTRONOMY_HORIZONS_BASE_URL',
+    celestrakBaseUrl: 'ASTRONOMY_CELESTRAK_BASE_URL',
+    defaultTimezone: 'ASTRONOMY_DEFAULT_TIMEZONE',
+    requestTimeoutMs: 'ASTRONOMY_REQUEST_TIMEOUT_MS',
+    tleCacheTtlMs: 'ASTRONOMY_TLE_CACHE_TTL_MS',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`ASTRONOMY_REQUEST_TIMEOUT_MS`) not the path (`requestTimeoutMs`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
