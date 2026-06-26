@@ -43,9 +43,6 @@ const extensionTools = [
 await createApp({
   name: 'astronomy-mcp-server',
   title: 'astronomy-mcp-server',
-  websiteUrl: 'https://github.com/cyanheads/astronomy-mcp-server',
-  description:
-    "What's in the sky, computed offline — planet and moon positions, rise/set, phases, eclipses, and seasons for any place and time.",
   instructions:
     'Observer location is latitude/longitude in decimal degrees plus optional elevation; times are ISO 8601 UTC and default to now. This server does not geocode — resolve a place name to coordinates upstream (e.g. via openstreetmap) and a timezone via reference-data, then pass `timezone` to receive observer-local times. astronomy_list_visible is the one-call "what is up now" answer. The astronomy_get_ephemeris (small bodies) and astronomy_get_satellite_passes tools are off by default; enable them with ASTRONOMY_ENABLE_HORIZONS / ASTRONOMY_ENABLE_SATELLITES.',
   setup() {
