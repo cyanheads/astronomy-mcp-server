@@ -6,14 +6,14 @@
     "url": "https://github.com/cyanheads/astronomy-mcp-server",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "astronomy-mcp-server",
-      "runtimeHint": "node",
-      "version": "0.1.0",
+      "runtimeHint": "bun",
+      "version": "0.1.1",
       "packageArguments": [
         {
           "type": "positional",
@@ -31,6 +31,26 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "ASTRONOMY_ENABLE_HORIZONS",
+          "description": "Register the astronomy_get_ephemeris tool, which fetches small-body and spacecraft ephemerides from JPL Horizons. Off by default; the core is keyless and offline.",
+          "format": "string",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
+          "name": "ASTRONOMY_ENABLE_SATELLITES",
+          "description": "Register the astronomy_get_satellite_passes tool, which predicts visible satellite passes from CelesTrak TLEs propagated with SGP4. Off by default.",
+          "format": "string",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
+          "name": "ASTRONOMY_DEFAULT_TIMEZONE",
+          "description": "Fallback IANA timezone for observer-local output when a tool call omits `timezone`. Unset means UTC-only output.",
+          "format": "string",
+          "isRequired": false
         }
       ],
       "transport": {
@@ -41,8 +61,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "astronomy-mcp-server",
-      "runtimeHint": "node",
-      "version": "0.1.0",
+      "runtimeHint": "bun",
+      "version": "0.1.1",
       "packageArguments": [
         {
           "type": "positional",
@@ -88,6 +108,26 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "ASTRONOMY_ENABLE_HORIZONS",
+          "description": "Register the astronomy_get_ephemeris tool, which fetches small-body and spacecraft ephemerides from JPL Horizons. Off by default; the core is keyless and offline.",
+          "format": "string",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
+          "name": "ASTRONOMY_ENABLE_SATELLITES",
+          "description": "Register the astronomy_get_satellite_passes tool, which predicts visible satellite passes from CelesTrak TLEs propagated with SGP4. Off by default.",
+          "format": "string",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
+          "name": "ASTRONOMY_DEFAULT_TIMEZONE",
+          "description": "Fallback IANA timezone for observer-local output when a tool call omits `timezone`. Unset means UTC-only output.",
+          "format": "string",
+          "isRequired": false
         }
       ],
       "transport": {
