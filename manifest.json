@@ -1,9 +1,15 @@
 {
   "manifest_version": "0.3",
   "name": "astronomy-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "What's in the sky, computed offline — planet and moon positions, rise/set, phases, eclipses, and seasons for any place and time.",
   "author": { "name": "cyanheads" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cyanheads/astronomy-mcp-server"
+  },
+  "homepage": "https://github.com/cyanheads/astronomy-mcp-server#readme",
+  "license": "Apache-2.0",
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
