@@ -11,7 +11,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { findEventsTool } from '@/mcp-server/tools/definitions/find-events.tool.js';
 import { getMoonPhaseTool } from '@/mcp-server/tools/definitions/get-moon-phase.tool.js';
@@ -360,16 +360,32 @@ describe('astronomy_list_visible — boundaries and validation', () => {
     expect(text).toMatch(/No bodies/i);
   });
 
-  it('sets the sky-condition enrichment even when the body list is empty', async () => {
+  it('returns the sky-condition fields in the output even when the body list is empty', async () => {
     const ctx = createMockContext();
     const input = listVisibleTool.input.parse({
       ...SEATTLE,
       time: '2024-06-21T20:00:00Z',
       min_altitude: 90,
     });
-    await listVisibleTool.handler(input, ctx);
-    // The enrichment carries the sky condition + sun altitude regardless of count.
-    expect(getEnrichment(ctx)).toMatchObject({ skyCondition: 'daylight', totalCount: 0 });
+    const result = await listVisibleTool.handler(input, ctx);
+    // The sky-condition gate now lives in the output (moved off enrichment) so content[]-only
+    // clients see it; it is populated regardless of how many bodies clear the filter.
+    expect(result.sky_condition).toBe('daylight');
+    expect(result.sun_altitude_degrees).toBeGreaterThan(0);
+    expect(result.total_count).toBe(0);
+  });
+
+  it('format() opens with the sky-condition header carrying sun altitude and visible count', async () => {
+    const ctx = createMockContext();
+    const input = listVisibleTool.input.parse({ ...SEATTLE, time: '2024-06-21T20:00:00Z' });
+    const result = await listVisibleTool.handler(input, ctx);
+    const block = listVisibleTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    const header = text.split('\n')[0] ?? '';
+    expect(header).toContain('Sky:');
+    expect(header).toContain(result.sky_condition);
+    expect(header).toContain(`${result.sun_altitude_degrees.toFixed(1)}°`);
+    expect(header).toContain(`${result.total_count} bodies visible`);
   });
 
   it('rejects a min_altitude above 90', () => {

@@ -1,6 +1,6 @@
 /**
  * @fileoverview End-to-end tests for the five core tool handlers — schema conformance,
- *   format() parity at runtime, enrichment, and the validation-gate error paths. The
+ *   format() parity at runtime, output shape, and the validation-gate error paths. The
  *   deep numeric correctness lives in the EphemerisService tests; here we verify the
  *   tool wiring, output shape, and the typed `ctx.fail` contracts.
  * @module tests/tools/core-tools.test
@@ -143,11 +143,15 @@ describe('astronomy_find_events', () => {
 });
 
 describe('astronomy_list_visible', () => {
-  it('returns a ranked list and sets the sky-condition enrichment', async () => {
+  it('returns a ranked list with the sky-condition gate fields in the output', async () => {
     const ctx = createMockContext();
     const input = listVisibleTool.input.parse({ ...SEATTLE, time: '2024-06-21T20:00:00Z' });
     const result = await listVisibleTool.handler(input, ctx);
     expect(result).toEqual(expect.schemaMatching(listVisibleTool.output));
     expect(result.bodies[0]?.rank).toBe(1);
+    // Sky condition, sun altitude, and count ride the output (not enrichment) so
+    // content[]-only clients receive them.
+    expect(result.sky_condition).toBe('daylight');
+    expect(result.total_count).toBe(result.bodies.length);
   });
 });

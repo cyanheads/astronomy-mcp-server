@@ -734,9 +734,11 @@ export class EphemerisService {
 
     const candidates: SkyPosition[] = [];
 
-    // Solar-system bodies (skip the Sun itself from the "what's up" list at night,
-    // but include it so daytime answers are honest).
+    // Naked-eye solar-system bodies only — the tool advertises a naked-eye surface,
+    // so skip telescopic bodies (Uranus, Neptune, Pluto are marked nakedEye:false).
+    // The Sun is nakedEye:true, so daytime answers stay honest.
     for (const body of Object.keys(BODY_META) as BodyName[]) {
+      if (!BODY_META[body].nakedEye) continue;
       const pos = this.position({ kind: 'body', body }, observer, date, opts.timezone);
       if (pos.horizontal.altitudeDegrees >= opts.minAltitude) candidates.push(pos);
     }

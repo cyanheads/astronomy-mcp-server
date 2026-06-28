@@ -283,6 +283,21 @@ describe('listVisible', () => {
       expect(withMag[i]!.magnitude!).toBeGreaterThanOrEqual(withMag[i - 1]!.magnitude!);
     }
   });
+
+  it('excludes non-naked-eye bodies (Uranus, Neptune, Pluto) from the default list', () => {
+    // The tool advertises a naked-eye surface. This instant (the #4 repro) puts Neptune
+    // and Pluto above the horizon, so their absence proves the nakedEye guard excludes
+    // them rather than the altitude filter; naked-eye Saturn must still appear.
+    const result = svc.listVisible(SEATTLE, new Date('2024-08-12T05:30:00Z'), {
+      minAltitude: 0,
+      includeStars: false,
+    });
+    const names = result.bodies.map((b) => b.body);
+    expect(names).not.toContain('neptune');
+    expect(names).not.toContain('pluto');
+    expect(names).not.toContain('uranus');
+    expect(names).toContain('saturn');
+  });
 });
 
 describe('input validation', () => {

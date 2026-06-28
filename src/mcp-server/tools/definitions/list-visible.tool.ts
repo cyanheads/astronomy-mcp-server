@@ -24,6 +24,15 @@ const VisibleBodySchema = SkyPositionOutput.extend({
 );
 
 export const ListVisibleOutput = z.object({
+  sky_condition: z
+    .enum(['daylight', 'civil_twilight', 'nautical_twilight', 'astronomical_twilight', 'dark'])
+    .describe(
+      "Sky condition derived from the Sun's altitude — the gate for whether faint objects are observable.",
+    ),
+  sun_altitude_degrees: z
+    .number()
+    .describe("The Sun's altitude in degrees that produced the sky condition."),
+  total_count: z.number().describe('Number of bodies returned above the minimum-altitude filter.'),
   bodies: z
     .array(VisibleBodySchema)
     .describe(
@@ -79,21 +88,6 @@ export const listVisibleTool = tool('astronomy_list_visible', {
       .describe('Include the bundled bright stars alongside planets. Default false.'),
   }),
   output: ListVisibleOutput,
-  enrichment: {
-    skyCondition: z
-      .enum(['daylight', 'civil_twilight', 'nautical_twilight', 'astronomical_twilight', 'dark'])
-      .describe(
-        "Sky condition derived from the Sun's altitude — the gate for whether faint objects are observable.",
-      ),
-    sunAltitudeDegrees: z
-      .number()
-      .describe("The Sun's altitude in degrees that produced the sky condition."),
-    totalCount: z.number().describe('Number of bodies returned above the minimum-altitude filter.'),
-  },
-  enrichmentTrailer: {
-    skyCondition: { label: 'Sky condition' },
-    sunAltitudeDegrees: { render: (v: number) => `**Sun altitude:** ${v.toFixed(1)}°` },
-  },
   errors: [
     {
       reason: 'time_out_of_range',
@@ -123,13 +117,11 @@ export const listVisibleTool = tool('astronomy_list_visible', {
       count: result.bodies.length,
       skyCondition: result.skyCondition,
     });
-    ctx.enrich({
-      skyCondition: result.skyCondition,
-      sunAltitudeDegrees: result.sunAltitudeDegrees,
-      totalCount: result.bodies.length,
-    });
 
     const out: ListVisibleOutputType = {
+      sky_condition: result.skyCondition,
+      sun_altitude_degrees: result.sunAltitudeDegrees,
+      total_count: result.bodies.length,
       bodies: result.bodies.map((b) => ({
         body: b.body,
         time_utc: b.timeUtc,
@@ -161,7 +153,9 @@ export const listVisibleTool = tool('astronomy_list_visible', {
   },
 
   format: (r) => {
-    const lines: string[] = [];
+    const lines: string[] = [
+      `Sky: ${r.sky_condition} (Sun ${r.sun_altitude_degrees.toFixed(1)}°) — ${r.total_count} bodies visible`,
+    ];
     if (r.bodies.length === 0) {
       lines.push('No bodies above the minimum-altitude filter at this instant.');
     }
