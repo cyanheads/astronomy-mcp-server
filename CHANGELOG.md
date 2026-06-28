@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-06-28
+
+content[] markdown across get_rise_set, find_events, list_visible, and get_satellite_passes now reads as a rounded human report instead of a raw struct dump; astronomy_stargazing_plan delimits user-supplied location and date as data.
+
 ## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-06-27
 
 Bug-fix release: topocentric astronomy_get_ephemeris no longer fails with a NaN distance, both gated extension tools reject invalid start times, astronomy_list_visible defaults to naked-eye bodies only, and its sky-condition gate now appears in content[] text.
