@@ -159,23 +159,27 @@ export const listVisibleTool = tool('astronomy_list_visible', {
     if (r.bodies.length === 0) {
       lines.push('No bodies above the minimum-altitude filter at this instant.');
     }
+    /** Round to `digits` with an optional unit suffix; null reads as "n/a". */
+    const orNa = (v: number | null, digits: number, suffix = '') =>
+      v === null ? 'n/a' : `${v.toFixed(digits)}${suffix}`;
     for (const b of r.bodies) {
+      // The visibility_note is the human headline; the supporting coordinates
+      // follow on one compact, rounded line (full precision rides structuredContent).
       lines.push(`## ${b.rank}. ${b.body} — ${b.visibility_note}`);
-      lines.push(`time_utc: ${b.time_utc}${b.time_local ? ` | time_local: ${b.time_local}` : ''}`);
       lines.push(
-        `equatorial: RA ${b.equatorial.ra_hours} h, Dec ${b.equatorial.dec_degrees}°, distance ${b.equatorial.distance_au} AU`,
+        [
+          `alt ${b.horizontal.altitude_degrees.toFixed(1)}° az ${b.horizontal.azimuth_degrees.toFixed(1)}° (${b.horizontal.above_horizon ? 'above' : 'below'} horizon)`,
+          `RA ${b.equatorial.ra_hours.toFixed(2)}h Dec ${b.equatorial.dec_degrees.toFixed(1)}°`,
+          `${b.equatorial.distance_au.toFixed(3)} AU`,
+          `mag ${orNa(b.magnitude, 1)}`,
+          `⌀ ${orNa(b.angular_diameter_arcsec, 1, '″')}`,
+          `phase ${orNa(b.phase_angle_degrees, 1, '°')}`,
+          `illum ${b.illuminated_fraction === null ? 'n/a' : `${(b.illuminated_fraction * 100).toFixed(0)}%`}`,
+          `ecl lon ${b.ecliptic.longitude_degrees.toFixed(1)}° lat ${b.ecliptic.latitude_degrees.toFixed(1)}°`,
+          `${b.constellation.name} (${b.constellation.abbreviation})`,
+          `${b.time_utc}${b.time_local ? ` (local ${b.time_local})` : ''}`,
+        ].join(' · '),
       );
-      lines.push(
-        `horizontal: altitude ${b.horizontal.altitude_degrees}°, azimuth ${b.horizontal.azimuth_degrees}°, above_horizon ${b.horizontal.above_horizon}`,
-      );
-      lines.push(
-        `ecliptic: longitude ${b.ecliptic.longitude_degrees}°, latitude ${b.ecliptic.latitude_degrees}°`,
-      );
-      lines.push(`magnitude: ${b.magnitude ?? 'unavailable'}`);
-      lines.push(`angular_diameter_arcsec: ${b.angular_diameter_arcsec ?? 'unavailable'}`);
-      lines.push(`phase_angle_degrees: ${b.phase_angle_degrees ?? 'unavailable'}`);
-      lines.push(`illuminated_fraction: ${b.illuminated_fraction ?? 'unavailable'}`);
-      lines.push(`constellation: ${b.constellation.name} (${b.constellation.abbreviation})`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

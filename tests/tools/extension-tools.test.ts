@@ -400,6 +400,32 @@ describe('astronomy_get_satellite_passes — happy path', () => {
       expect(text).toMatch(/rise_utc/);
     }
   });
+
+  it('format() rounds pass azimuths, altitude, and duration to a readable precision', () => {
+    // The issue's exact repro: az 230.26515812203434° must render as az 230.3°.
+    const block = getSatellitePassesTool.format!({
+      norad_id: 25544,
+      satellite_name: 'ISS (ZARYA)',
+      passes: [
+        {
+          rise_utc: '2024-01-01T00:00:00.000Z',
+          peak_utc: '2024-01-01T00:05:00.000Z',
+          set_utc: '2024-01-01T00:10:00.000Z',
+          peak_altitude_degrees: 45.6789012,
+          rise_azimuth_degrees: 230.26515812203434,
+          set_azimuth_degrees: 130.98765,
+          peak_azimuth_degrees: 180.5555,
+          duration_seconds: 372.48,
+          sunlit: true,
+        },
+      ],
+    })[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text).toContain('az 230.3°');
+    expect(text).toContain('alt 45.7°');
+    expect(text).toContain('duration 372s');
+    expect(text).not.toMatch(/\.\d{4,}/);
+  });
 });
 
 describe('astronomy_get_satellite_passes — error contracts', () => {

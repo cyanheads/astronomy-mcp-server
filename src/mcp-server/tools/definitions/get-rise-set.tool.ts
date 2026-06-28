@@ -47,6 +47,7 @@ const TwilightPairSchema = z.object({
 });
 
 export const RiseSetOutput = z.object({
+  body: z.string().describe('The body these rise/set cycles are for, echoed from the request.'),
   events: z
     .array(
       z
@@ -186,6 +187,7 @@ export const getRiseSetTool = tool('astronomy_get_rise_set', {
     ctx.enrich.total(events.length);
 
     const out: RiseSetOutputType = {
+      body: input.body,
       events: events.map((e) => ({
         rise_utc: e.riseUtc,
         set_utc: e.setUtc,
@@ -210,31 +212,31 @@ export const getRiseSetTool = tool('astronomy_get_rise_set', {
   },
 
   format: (r) => {
-    const lines: string[] = [];
-    for (const e of r.events) {
-      lines.push('## Cycle');
+    const count = r.events.length;
+    const lines: string[] = [`## ${r.body} — ${count} rise/set cycle${count === 1 ? '' : 's'}`];
+    const stamp = (utc: string | null, local?: string) =>
+      `${utc ?? 'none'}${local ? ` (local ${local})` : ''}`;
+    r.events.forEach((e, i) => {
+      const alt =
+        e.transit_altitude_degrees === null
+          ? ''
+          : `, max alt ${e.transit_altitude_degrees.toFixed(1)}°`;
       lines.push(
-        `rise_utc: ${e.rise_utc ?? 'none'}${e.rise_local ? ` | rise_local: ${e.rise_local}` : ''}`,
+        `${i + 1}. Rise ${stamp(e.rise_utc, e.rise_local)} · Set ${stamp(e.set_utc, e.set_local)} · Transit ${stamp(e.transit_utc, e.transit_local)}${alt}`,
       );
-      lines.push(
-        `set_utc: ${e.set_utc ?? 'none'}${e.set_local ? ` | set_local: ${e.set_local}` : ''}`,
-      );
-      lines.push(
-        `transit_utc: ${e.transit_utc ?? 'none'}${e.transit_local ? ` | transit_local: ${e.transit_local}` : ''} | transit_altitude_degrees: ${e.transit_altitude_degrees ?? 'none'}`,
-      );
-      if (e.note) lines.push(`note: ${e.note}`);
+      if (e.note) lines.push(`   ${e.note}`);
       if (e.twilight) {
         const fmt = (label: string, p: z.infer<typeof TwilightPairSchema>) => {
-          let line = `${label}: dawn_utc ${p.dawn_utc ?? 'none'}, dusk_utc ${p.dusk_utc ?? 'none'}`;
-          if (p.dawn_local) line += `, dawn_local ${p.dawn_local}`;
-          if (p.dusk_local) line += `, dusk_local ${p.dusk_local}`;
+          let line = `   ${label}: dawn ${p.dawn_utc ?? 'none'}, dusk ${p.dusk_utc ?? 'none'}`;
+          if (p.dawn_local) line += `, dawn local ${p.dawn_local}`;
+          if (p.dusk_local) line += `, dusk local ${p.dusk_local}`;
           return line;
         };
         lines.push(fmt('Civil twilight', e.twilight.civil));
         lines.push(fmt('Nautical twilight', e.twilight.nautical));
         lines.push(fmt('Astronomical twilight', e.twilight.astronomical));
       }
-    }
+    });
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

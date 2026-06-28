@@ -229,6 +229,24 @@ describe('astronomy_get_rise_set — boundaries and contracts', () => {
     expect(text).toContain('Nautical twilight');
     expect(text).toContain('Astronomical twilight');
   });
+
+  it('format() leads with the body name and cycle count and rounds the transit altitude', async () => {
+    const ctx = createMockContext({ errors: getRiseSetTool.errors });
+    const input = getRiseSetTool.input.parse({
+      body: 'moon',
+      ...SEATTLE,
+      start: '2024-06-21T00:00:00Z',
+      count: 3,
+    });
+    const result = await getRiseSetTool.handler(input, ctx);
+    expect(result.body).toBe('moon');
+    const block = getRiseSetTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text).toMatch(/## moon — 3 rise\/set cycles/i);
+    // The full-precision transit altitude (e.g. 21.984839670991263) must not leak —
+    // content[] carries no number with four or more decimal places.
+    expect(text).not.toMatch(/\.\d{4,}/);
+  });
 });
 
 describe('astronomy_find_events — error contracts and validation', () => {
@@ -328,6 +346,19 @@ describe('astronomy_find_events — error contracts and validation', () => {
       expect(text).toMatch(/Obscuration:.*%/);
     }
   });
+
+  it('format() opens with the total event count', async () => {
+    const ctx = createMockContext({ errors: findEventsTool.errors });
+    const input = findEventsTool.input.parse({
+      event: 'equinox',
+      start: '2024-01-01T00:00:00Z',
+      count: 2,
+    });
+    const result = await findEventsTool.handler(input, ctx);
+    const block = findEventsTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text.split('\n')[0]).toMatch(/2 events found/i);
+  });
 });
 
 describe('astronomy_list_visible — boundaries and validation', () => {
@@ -395,5 +426,21 @@ describe('astronomy_list_visible — boundaries and validation', () => {
   it('applies include_stars default of false', () => {
     const input = listVisibleTool.input.parse({ ...SEATTLE });
     expect(input.include_stars).toBe(false);
+  });
+
+  it('format() leads each body with its visibility note and rounds the coordinates', async () => {
+    const ctx = createMockContext();
+    const input = listVisibleTool.input.parse({ ...SEATTLE, time: '2024-06-21T20:00:00Z' });
+    const result = await listVisibleTool.handler(input, ctx);
+    expect(result.bodies.length).toBeGreaterThan(0);
+    const block = listVisibleTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    // The precomputed visibility note is the per-body headline.
+    const body0 = result.bodies[0]!;
+    expect(text).toContain(`${body0.rank}. ${body0.body} — ${body0.visibility_note}`);
+    // No raw full-precision coordinate dump: nothing renders 4+ decimal places, and the
+    // old raw field-name labels are gone.
+    expect(text).not.toMatch(/\.\d{4,}/);
+    expect(text).not.toContain('above_horizon');
   });
 });

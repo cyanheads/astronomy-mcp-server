@@ -250,9 +250,10 @@ export const findEventsTool = tool('astronomy_find_events', {
   },
 
   format: (r) => {
-    const lines: string[] = [];
+    const count = r.events.length;
+    const lines: string[] = [`## ${count} event${count === 1 ? '' : 's'} found`];
     for (const e of r.events) {
-      let headline = `## ${e.event}`;
+      let headline = `### ${e.event}`;
       if (e.which) headline += ` (${e.which})`;
       if (e.quarter) headline += ` (${e.quarter})`;
       if (e.body) headline += ` — ${e.body}`;

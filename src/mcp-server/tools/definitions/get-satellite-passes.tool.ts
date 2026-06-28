@@ -209,7 +209,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       lines.push('No visible passes in the requested window (sunlit satellite over a dark sky).');
     for (const p of r.passes) {
       lines.push(
-        `- rise_utc ${p.rise_utc}${p.rise_local ? ` (local ${p.rise_local})` : ''} az ${p.rise_azimuth_degrees}° → peak_utc ${p.peak_utc}${p.peak_local ? ` (local ${p.peak_local})` : ''} alt ${p.peak_altitude_degrees}° az ${p.peak_azimuth_degrees}° → set_utc ${p.set_utc}${p.set_local ? ` (local ${p.set_local})` : ''} az ${p.set_azimuth_degrees}°, duration ${p.duration_seconds}s, sunlit ${p.sunlit}`,
+        `- rise_utc ${p.rise_utc}${p.rise_local ? ` (local ${p.rise_local})` : ''} az ${p.rise_azimuth_degrees.toFixed(1)}° → peak_utc ${p.peak_utc}${p.peak_local ? ` (local ${p.peak_local})` : ''} alt ${p.peak_altitude_degrees.toFixed(1)}° az ${p.peak_azimuth_degrees.toFixed(1)}° → set_utc ${p.set_utc}${p.set_local ? ` (local ${p.set_local})` : ''} az ${p.set_azimuth_degrees.toFixed(1)}°, duration ${p.duration_seconds.toFixed(0)}s, sunlit ${p.sunlit}`,
       );
     }
     return [{ type: 'text', text: lines.join('\n') }];
