@@ -99,6 +99,13 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
   },
   errors: [
     {
+      reason: 'invalid_time',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The start or stop timestamp is not a parseable ISO 8601 instant.',
+      recovery:
+        'Pass start and stop as ISO 8601 UTC timestamps, e.g. 2024-01-01T00:00:00Z, then retry.',
+    },
+    {
       reason: 'body_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'JPL Horizons has no match for the designation, or the designation is ambiguous (a bare comet name matches multiple apparition records).',
@@ -116,6 +123,26 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
 
   async handler(input, ctx) {
     const svc = getHorizonsService();
+    /**
+     * Validate caller-supplied timestamps before they reach `new Date(...).toISOString()`,
+     * which throws an opaque RangeError on an unparseable string. Deliberately not routed
+     * through the core resolveTime() — JPL Horizons covers historical and future epochs far
+     * outside its 1900–2100 high-accuracy span, so only reject genuinely unparseable input.
+     */
+    if (input.start !== undefined && Number.isNaN(new Date(input.start).getTime())) {
+      throw ctx.fail(
+        'invalid_time',
+        `Invalid start "${input.start}". Expected an ISO 8601 instant, e.g. 2024-01-01T00:00:00Z.`,
+        { ...ctx.recoveryFor('invalid_time') },
+      );
+    }
+    if (input.stop !== undefined && Number.isNaN(new Date(input.stop).getTime())) {
+      throw ctx.fail(
+        'invalid_time',
+        `Invalid stop "${input.stop}". Expected an ISO 8601 instant, e.g. 2024-01-02T00:00:00Z.`,
+        { ...ctx.recoveryFor('invalid_time') },
+      );
+    }
     const start = input.start ?? new Date().toISOString();
     const stop = input.stop ?? new Date(new Date(start).getTime() + 24 * 3600 * 1000).toISOString();
     const observer =

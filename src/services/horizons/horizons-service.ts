@@ -93,7 +93,10 @@ export class HorizonsService {
       START_TIME: `'${start}'`,
       STOP_TIME: `'${stop}'`,
       STEP_SIZE: `'${step}'`,
-      QUANTITIES: "'1,9,20'",
+      // QUANTITIES 1=RA/Dec, 9=APmag/S-brt, 20=delta/deldot. Add 4=azimuth/elevation
+      // for a topocentric observer so the response carries the alt/az columns parseRow
+      // reads when hasObserver — without it the columns shift and delta lands undefined.
+      QUANTITIES: observer ? "'1,4,9,20'" : "'1,9,20'",
       CSV_FORMAT: 'YES',
       ANG_FORMAT: 'DEG',
       EXTRA_PREC: 'YES',
@@ -164,10 +167,12 @@ export class HorizonsService {
   }
 
   /**
-   * Parse one CSV row. With QUANTITIES '1,9,20' and CSV_FORMAT YES, columns are:
-   * date, (solar-presence flag), (lunar/illum flag), RA(deg), DEC(deg),
-   * Azimuth(deg), Elevation(deg), APmag, S-brt, delta(AU), deldot.
-   * When no observer is set, the azimuth/elevation columns are absent.
+   * Parse one CSV row (CSV_FORMAT YES). The column layout depends on whether an
+   * observer was supplied, because buildUrl requests azimuth/elevation (QUANTITIES
+   * '4') only for a topocentric observer:
+   *   geocentric  ('1,9,20'):   date, flag, flag, RA(deg), DEC(deg), APmag, S-brt, delta(AU), deldot
+   *   topocentric ('1,4,9,20'): date, flag, flag, RA(deg), DEC(deg), Azimuth(deg), Elevation(deg), APmag, S-brt, delta(AU), deldot
+   * Columns 1-2 are solar-presence / lunar-illumination flags, often blank.
    */
   private parseRow(row: string, hasObserver: boolean): EphemerisPoint | null {
     const cols = row.split(',').map((c) => c.trim());

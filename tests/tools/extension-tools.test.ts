@@ -129,13 +129,21 @@ describe('astronomy_get_ephemeris — happy path', () => {
     expect(result.points[0]?.altitude_degrees).toBeUndefined();
   });
 
-  it('includes alt/az when an observer is supplied (topocentric)', async () => {
-    // With observer: date,flag,flag,RA,Dec,Az,El,APmag,S-brt,delta,deldot
-    stubFetch(
-      horizonsTopocentric([
-        '2024-Jan-01 00:00:00.0000, , , 45.000000, 12.500000, 180.000000, 30.000000, 9.50, 5.0, 1.500000, 0.0',
-      ]),
+  it('requests az/el (QUANTITIES 4) and returns a finite distance + alt/az for a topocentric observer', async () => {
+    // The #1 repro: an observer call must request QUANTITIES '1,4,9,20' so the response
+    // carries the Az/El columns parseRow reads. Without '4' the columns shift left, delta
+    // lands undefined → distance_au NaN → SerializationError. With observer the layout is
+    // date,flag,flag,RA,Dec,Az,El,APmag,S-brt,delta,deldot.
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          horizonsTopocentric([
+            '2024-Jan-01 00:00:00.0000, , , 45.000000, 12.500000, 180.000000, 30.000000, 9.50, 5.0, 1.500000, 0.0',
+          ]),
+          { status: 200 },
+        ),
     );
+    vi.stubGlobal('fetch', fetchSpy);
     const ctx = createMockContext({ errors: getEphemerisTool.errors });
     const input = getEphemerisTool.input.parse({
       designation: '433 Eros',
@@ -144,8 +152,35 @@ describe('astronomy_get_ephemeris — happy path', () => {
       stop: '2024-01-01T01:00:00Z',
     });
     const result = await getEphemerisTool.handler(input, ctx);
+    expect(decodeURIComponent(String(fetchSpy.mock.calls[0]?.[0]))).toContain(
+      "QUANTITIES='1,4,9,20'",
+    );
+    expect(Number.isFinite(result.points[0]?.distance_au)).toBe(true);
+    expect(result.points[0]?.distance_au).toBeCloseTo(1.5, 5);
     expect(result.points[0]?.altitude_degrees).toBeCloseTo(30, 5);
     expect(result.points[0]?.azimuth_degrees).toBeCloseTo(180, 5);
+  });
+
+  it('omits the az/el quantity for a geocentric call (QUANTITIES 1,9,20)', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          horizonsGeocentric([
+            '2024-Jan-01 00:00:00.0000, , , 45.000000, 12.500000, 9.50, 5.0, 1.500000, 0.0',
+          ]),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433 Eros',
+      start: '2024-01-01T00:00:00Z',
+    });
+    await getEphemerisTool.handler(input, ctx);
+    const url = decodeURIComponent(String(fetchSpy.mock.calls[0]?.[0]));
+    expect(url).toContain("QUANTITIES='1,9,20'");
+    expect(url).not.toContain("QUANTITIES='1,4,9,20'");
   });
 
   it('preserves a null magnitude when Horizons reports "n.a." (sparse payload)', async () => {
@@ -265,6 +300,35 @@ describe('astronomy_get_ephemeris — error contracts', () => {
 
   it('rejects an empty designation at schema validation', () => {
     expect(() => getEphemerisTool.input.parse({ designation: '' })).toThrow();
+  });
+
+  it('rejects an unparseable start with invalid_time before reaching Horizons', async () => {
+    // new Date('not-a-date').toISOString() throws RangeError: Invalid time value, which the
+    // framework maps to a generic SerializationError. The guard must surface a clean
+    // InvalidParams/invalid_time and never touch the network.
+    const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '433;', start: 'not-a-date' });
+    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.data.reason).toBe('invalid_time');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unparseable stop with invalid_time', async () => {
+    const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2024-01-01T00:00:00Z',
+      stop: 'not-a-date',
+    });
+    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.data.reason).toBe('invalid_time');
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -413,5 +477,38 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
 
   it('rejects a non-integer NORAD id', () => {
     expect(() => getSatellitePassesTool.input.parse({ norad_id: 25544.5, ...SEATTLE })).toThrow();
+  });
+
+  it('rejects an unparseable start with invalid_time instead of a false empty result', async () => {
+    // Bare new Date('not-a-date') is an Invalid Date; SGP4 turns it into NaN positions so
+    // every candidate pass fails the elevation/sunlit filters — a silent, falsely-successful
+    // "0 passes". resolveTime() must reject it up front, before any TLE fetch or propagation.
+    const fetchSpy = vi.fn(async () => new Response(ISS_TLE, { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      norad_id: 25544,
+      ...SEATTLE,
+      start: 'not-a-date',
+    });
+    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.data.reason).toBe('invalid_time');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a start outside the 1900–2100 span with time_out_of_range', async () => {
+    const fetchSpy = vi.fn(async () => new Response(ISS_TLE, { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      norad_id: 25544,
+      ...SEATTLE,
+      start: '1850-01-01T00:00:00Z',
+    });
+    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.data.reason).toBe('time_out_of_range');
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

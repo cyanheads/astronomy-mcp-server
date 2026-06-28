@@ -119,6 +119,19 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
   },
   errors: [
     {
+      reason: 'invalid_time',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The start timestamp is not a parseable ISO 8601 instant.',
+      recovery: 'Pass start as an ISO 8601 UTC timestamp, e.g. 2024-01-01T00:00:00Z, then retry.',
+    },
+    {
+      reason: 'time_out_of_range',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The start instant is outside the SGP4 high-accuracy span (≈1900–2100).',
+      recovery:
+        'Use a start date between 1900 and 2100 — TLEs are only accurate within weeks of epoch.',
+    },
+    {
       reason: 'tle_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'CelesTrak has no current element set for the NORAD ID.',
@@ -138,7 +151,12 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
     const satSvc = getSatelliteService();
     const ephSvc = getEphemerisService();
     const timezone = ephSvc.resolveTimezone(input.timezone ?? getServerConfig().defaultTimezone);
-    const start = input.start ? new Date(input.start) : new Date();
+    /**
+     * resolveTime() validates the instant (invalid_time / time_out_of_range) and returns
+     * now when start is omitted — an Invalid Date here would yield NaN SGP4 positions and a
+     * silently empty, falsely-successful pass list.
+     */
+    const start = ephSvc.resolveTime(input.start);
     const observer = {
       latitude: input.latitude,
       longitude: input.longitude,
