@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/astronomy-mcp-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "mcpName": "io.github.cyanheads/astronomy-mcp-server",
   "description": "What's in the sky, computed offline — planet and moon positions, rise/set, phases, eclipses, and seasons for any place and time via MCP. STDIO or Streamable HTTP.",
   "type": "module",

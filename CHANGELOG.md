@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-07-30
+
+astronomy_get_ephemeris dropped its truncation notice and let a lone observer coordinate, backwards time range, or malformed step reach Horizons; astronomy_get_satellite_passes reported a mid-pass start as a false acquisition time and returned an empty pass list for element sets that can't reach the requested window — all fixed.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-30
 
 astronomy_find_events opposition/conjunction times were swapped, moon_phase age_days over-reported by ~29.5d after a new moon, and an unsupported event body leaked raw engine errors — all fixed; perigee_apogee now accepts earth, and conjunction reports inferior/superior for mercury and venus.
