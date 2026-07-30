@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -66,7 +66,8 @@ Forward search across nine event classes under one `event` enum.
 
 - `solar_eclipse`, `lunar_eclipse`, `equinox`, `solstice`, `moon_quarter`, `opposition`, `conjunction`, `max_elongation`, `perigee_apogee`
 - Solar eclipses require an observer (`latitude`/`longitude`) and report local visibility and contact times; lunar eclipses are geocentric and need no location
-- The body-relative events (`opposition`, `conjunction`, `max_elongation`, `perigee_apogee`) require a `body`; `max_elongation` is defined only for mercury and venus
+- The body-relative events (`opposition`, `conjunction`, `max_elongation`, `perigee_apogee`) require a `body`, gated to the bodies each event exists for: `opposition` to the superior planets (mars through pluto), `conjunction` to any planet, `max_elongation` to mercury and venus, `perigee_apogee` to the moon, earth, or a planet
+- `perigee_apogee` on `earth` returns its perihelion and aphelion; `conjunction` on mercury or venus returns both the inferior and superior passes, labelled by `conjunction_kind`
 - Returns the next `count` occurrences (default 1, max 20)
 
 ---

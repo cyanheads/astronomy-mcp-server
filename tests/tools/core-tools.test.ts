@@ -124,9 +124,12 @@ describe('astronomy_find_events', () => {
       body: 'jupiter',
       start: '2024-01-01T00:00:00Z',
     });
-    await expect(Promise.resolve().then(() => findEventsTool.handler(input, ctx))).rejects.toThrow(
-      /mercury|venus/i,
-    );
+    const err = await Promise.resolve()
+      .then(() => findEventsTool.handler(input, ctx))
+      .catch((e: unknown) => e as { data?: { reason?: string; recovery?: { hint?: string } } });
+    expect(err?.data?.reason).toBe('body_not_supported');
+    // The alternatives ride the recovery hint, which is what reaches the agent.
+    expect(err?.data?.recovery?.hint).toMatch(/mercury|venus/i);
   });
 
   it('returns geocentric equinoxes without an observer and conforms to schema', async () => {

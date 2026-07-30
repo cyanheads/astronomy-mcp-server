@@ -50,6 +50,7 @@ import { STAR_CATALOG } from './star-catalog.js';
 import type {
   BodyName,
   CatalogStar,
+  EventBodyName,
   EventName,
   EventRecord,
   ListVisibleResult,
@@ -80,13 +81,35 @@ const ASTRONOMICAL_DEG = -18;
  */
 const RISE_SET_WINDOW_DAYS = 2;
 
-/** Inner planets eligible for greatest-elongation. */
-const INNER_PLANETS = new Set<BodyName>(['mercury', 'venus']);
+/** Longest synodic month, rounded up — the widest a new-moon look-back needs to be. */
+const MAX_SYNODIC_MONTH_DAYS = 29.9;
+
+/** Mean synodic month, for deriving an age from the phase angle. */
+const MEAN_SYNODIC_MONTH_DAYS = 29.530588;
+
+/** The eight planets Earth can be in conjunction or opposition with. */
+const PLANETS = [
+  'mercury',
+  'venus',
+  'mars',
+  'jupiter',
+  'saturn',
+  'uranus',
+  'neptune',
+  'pluto',
+] as const satisfies readonly EventBodyName[];
+
+/** Inner planets — the only ones with a greatest elongation, and the only ones with two conjunctions. */
+const INNER_PLANETS = new Set<EventBodyName>(['mercury', 'venus']);
+
+/** Superior planets — the only ones that reach opposition. */
+const SUPERIOR_PLANETS = new Set<EventBodyName>(PLANETS.filter((p) => !INNER_PLANETS.has(p)));
 
 /** Map a wire body name to the engine's Body enum. */
-const BODY_ENUM: Record<BodyName, Body> = {
+const BODY_ENUM: Record<EventBodyName, Body> = {
   sun: Body.Sun,
   moon: Body.Moon,
+  earth: Body.Earth,
   mercury: Body.Mercury,
   venus: Body.Venus,
   mars: Body.Mars,
@@ -443,15 +466,22 @@ export class EphemerisService {
     return result;
   }
 
-  /** Days since the previous new moon (synodic age). */
+  /** Days since the most recent new moon (synodic age). */
   private moonAgeDays(time: ReturnType<typeof MakeTime>): number {
-    // Search backward up to ~31 days for the most recent new-moon (longitude 0).
-    const prevNew = SearchMoonPhase(0, time.AddDays(-31).date, 35);
-    if (!prevNew || prevNew.ut > time.ut) {
-      // Fallback: derive age from the phase angle if the search overshoots.
-      return (MoonPhase(time) / 360) * 29.530588;
+    // SearchMoonPhase scans forward and returns the FIRST crossing in its window, so
+    // one search over the look-back window yields the new moon *before* the most
+    // recent one whenever the age is under ~1.5 days. A window one synodic month long
+    // holds at most two new moons, so search again past the first and measure from
+    // the later of the two that is still in the past.
+    const window = MAX_SYNODIC_MONTH_DAYS + 1;
+    const first = SearchMoonPhase(0, time.AddDays(-MAX_SYNODIC_MONTH_DAYS).date, window);
+    if (!first || first.ut > time.ut) {
+      // Fallback: derive the age from the phase angle if the search overshoots.
+      return (MoonPhase(time) / 360) * MEAN_SYNODIC_MONTH_DAYS;
     }
-    return time.ut - prevNew.ut;
+    const second = SearchMoonPhase(0, first.AddDays(1).date, window);
+    const latest = second && second.ut <= time.ut ? second : first;
+    return time.ut - latest.ut;
   }
 
   // ---- Events --------------------------------------------------------------
@@ -462,7 +492,7 @@ export class EphemerisService {
     opts: {
       start: Date;
       count: number;
-      body?: BodyName;
+      body?: EventBodyName;
       observer?: ObserverInput;
       timezone?: string;
     },
@@ -481,21 +511,21 @@ export class EphemerisService {
       case 'conjunction':
         return this.relativeLongitudeEvents(
           event,
-          requireBody(opts.body, event),
+          resolveBody(event, opts.body),
           opts.start,
           opts.count,
           opts.timezone,
         );
       case 'max_elongation':
         return this.maxElongationEvents(
-          requireBody(opts.body, event),
+          resolveBody(event, opts.body),
           opts.start,
           opts.count,
           opts.timezone,
         );
       case 'perigee_apogee':
         return this.apsisEvents(
-          requireBody(opts.body, event),
+          resolveBody(event, opts.body),
           opts.start,
           opts.count,
           opts.timezone,
@@ -633,37 +663,57 @@ export class EphemerisService {
 
   private relativeLongitudeEvents(
     event: 'opposition' | 'conjunction',
-    body: BodyName,
+    body: EventBodyName,
     start: Date,
     count: number,
     timezone?: string,
   ): EventRecord[] {
+    // SearchRelativeLongitude takes the body's ecliptic longitude relative to Earth's
+    // as seen from the Sun: 0 puts them on the same side (opposition for a superior
+    // planet, inferior conjunction for an inner one) and 180 puts them across the Sun
+    // from each other (conjunction). Mercury and Venus reach both conjunctions each
+    // synodic period, so interleave the two searches and take whichever comes first.
+    const targets: Array<{ relativeLongitude: number; kind?: 'inferior' | 'superior' }> =
+      event === 'opposition'
+        ? [{ relativeLongitude: 0 }]
+        : INNER_PLANETS.has(body)
+          ? [
+              { relativeLongitude: 0, kind: 'inferior' },
+              { relativeLongitude: 180, kind: 'superior' },
+            ]
+          : [{ relativeLongitude: 180 }];
+
+    /** Earliest occurrence at or after `from` across the target longitudes. */
+    const nextOccurrence = (from: Date) =>
+      targets
+        .map((target) => ({
+          kind: target.kind,
+          time: SearchRelativeLongitude(BODY_ENUM[body], target.relativeLongitude, from),
+        }))
+        .reduce((earliest, candidate) =>
+          candidate.time.ut < earliest.time.ut ? candidate : earliest,
+        );
+
     const out: EventRecord[] = [];
-    const targetLon = event === 'opposition' ? 180 : 0;
     let cursor = start;
     for (let i = 0; i < count; i++) {
-      const t = SearchRelativeLongitude(BODY_ENUM[body], targetLon, cursor);
-      const rec: EventRecord = { event, timeUtc: t.toString(), body };
-      if (timezone) rec.timeLocal = this.formatLocal(t.date, timezone);
+      const next = nextOccurrence(cursor);
+      const rec: EventRecord = { event, timeUtc: next.time.toString(), body };
+      if (next.kind) rec.conjunctionKind = next.kind;
+      if (timezone) rec.timeLocal = this.formatLocal(next.time.date, timezone);
       out.push(rec);
       // Step past this event by a few days to find the next.
-      cursor = t.AddDays(5).date;
+      cursor = next.time.AddDays(5).date;
     }
     return out;
   }
 
   private maxElongationEvents(
-    body: BodyName,
+    body: EventBodyName,
     start: Date,
     count: number,
     timezone?: string,
   ): EventRecord[] {
-    if (!INNER_PLANETS.has(body)) {
-      throw invalidParams(`max_elongation applies only to Mercury and Venus, not ${body}.`, {
-        reason: 'body_not_supported',
-        recovery: { hint: 'Use body "mercury" or "venus" for max_elongation.' },
-      });
-    }
     const out: EventRecord[] = [];
     let cursor = start;
     for (let i = 0; i < count; i++) {
@@ -683,11 +733,13 @@ export class EphemerisService {
   }
 
   private apsisEvents(
-    body: BodyName,
+    body: EventBodyName,
     start: Date,
     count: number,
     timezone?: string,
   ): EventRecord[] {
+    // The Moon orbits Earth (perigee/apogee); every other supported body — Earth
+    // included — orbits the Sun, so its apsides are perihelion/aphelion.
     const out: EventRecord[] = [];
     const isMoon = body === 'moon';
     let apsis: Apsis = isMoon ? SearchLunarApsis(start) : SearchPlanetApsis(BODY_ENUM[body], start);
@@ -877,12 +929,50 @@ function minutesAfter(peak: ReturnType<typeof MakeTime>, minutes: number): strin
   return peak.AddDays(minutes / 1440).toString();
 }
 
-/** Require a body for body-specific event classes; throw with the contract reason. */
-function requireBody(body: BodyName | undefined, event: EventName): BodyName {
+/** The event classes that target a specific body. */
+type BodyEventName = 'opposition' | 'conjunction' | 'max_elongation' | 'perigee_apogee';
+
+/**
+ * Which bodies each body-relative event class is defined for, and the hint that
+ * names the alternatives. Gating here keeps astronomy-engine from being handed a
+ * body it cannot search — it throws raw internal messages for those.
+ */
+const EVENT_BODIES: Record<BodyEventName, { bodies: ReadonlySet<EventBodyName>; hint: string }> = {
+  opposition: {
+    bodies: SUPERIOR_PLANETS,
+    hint: 'Use a superior planet — mars, jupiter, saturn, uranus, neptune, or pluto. Mercury and Venus orbit inside Earth and never reach opposition; try conjunction or max_elongation for them.',
+  },
+  conjunction: {
+    bodies: new Set<EventBodyName>(PLANETS),
+    hint: 'Use a planet — mercury through pluto. Conjunction measures a planet against the Sun, so the Sun, Moon, and Earth have none.',
+  },
+  max_elongation: {
+    bodies: INNER_PLANETS,
+    hint: 'Use body "mercury" or "venus" for max_elongation. Greatest elongation is the widest a body gets from the Sun in the sky, so only a planet orbiting inside Earth reaches one.',
+  },
+  perigee_apogee: {
+    bodies: new Set<EventBodyName>(['moon', 'earth', ...PLANETS]),
+    hint: 'Use "moon" for lunar perigee/apogee, or "earth" or a planet for heliocentric perihelion/aphelion. The Sun sits at the focus of those orbits and has no apsis.',
+  },
+};
+
+/**
+ * Resolve the target body of a body-relative event: require one, and reject a body
+ * the event class is not defined for. Throws with the `body_required` or
+ * `body_not_supported` contract reason.
+ */
+function resolveBody(event: BodyEventName, body: EventBodyName | undefined): EventBodyName {
   if (!body) {
     throw invalidParams(`The "${event}" event requires a target body.`, {
       reason: 'body_required',
       recovery: { hint: 'Add the target body (e.g. "mars" or "jupiter") and retry.' },
+    });
+  }
+  const spec = EVENT_BODIES[event];
+  if (!spec.bodies.has(body)) {
+    throw invalidParams(`The "${event}" event is not defined for ${body}.`, {
+      reason: 'body_not_supported',
+      recovery: { hint: spec.hint },
     });
   }
   return body;

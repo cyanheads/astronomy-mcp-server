@@ -293,6 +293,81 @@ describe('astronomy_find_events — error contracts and validation', () => {
     expect(result.events[0]?.event).toBe('lunar_eclipse');
   });
 
+  it('omits local_visible for a lunar eclipse even when coordinates are supplied', async () => {
+    // A lunar eclipse is the same event for every observer, so the tool advertises
+    // no local visibility for it — supplying coordinates must not conjure the field.
+    const ctx = createMockContext({ errors: findEventsTool.errors });
+    const input = findEventsTool.input.parse({
+      event: 'lunar_eclipse',
+      start: '2024-01-01T00:00:00Z',
+      ...SEATTLE,
+    });
+    const result = await findEventsTool.handler(input, ctx);
+    const e = result.events[0]!;
+    expect(e.local_visible).toBeUndefined();
+    expect(e.contacts?.peak_utc).toBeTruthy();
+    const block = findEventsTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text).not.toContain('Locally visible');
+  });
+
+  it.each([
+    ['opposition', 'sun'],
+    ['opposition', 'venus'],
+    ['conjunction', 'moon'],
+    ['perigee_apogee', 'sun'],
+  ] as const)('fails body_not_supported for %s of %s', (event, body) => {
+    const ctx = createMockContext({ errors: findEventsTool.errors });
+    const input = findEventsTool.input.parse({ event, body, start: '2026-01-01T00:00:00Z' });
+    const err = (() => {
+      try {
+        findEventsTool.handler(input, ctx);
+      } catch (e) {
+        return e as { code?: number; message?: string; data?: { reason?: string } };
+      }
+    })();
+    expect(err?.data?.reason).toBe('body_not_supported');
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    // No astronomy-engine internals reach the client.
+    expect(err?.message).not.toMatch(/OrbitalPeriod|undefined|not a planet/i);
+  });
+
+  it("accepts earth for perigee_apogee and labels the apsides Earth's own", async () => {
+    const ctx = createMockContext({ errors: findEventsTool.errors });
+    const input = findEventsTool.input.parse({
+      event: 'perigee_apogee',
+      body: 'earth',
+      start: '2026-01-01T00:00:00Z',
+      count: 2,
+    });
+    const result = await findEventsTool.handler(input, ctx);
+    expect(result.events.map((e) => e.apsis_kind)).toEqual(['perihelion', 'aphelion']);
+    expect(result.events[0]?.body).toBe('earth');
+    expect(result.events[0]?.distance_au).toBeCloseTo(0.9833, 3);
+  });
+
+  it('rejects earth on the tools with no observer-relative geometry for it', () => {
+    // The wider find_events enum must not leak into the position/rise-set surfaces.
+    expect(() => getSkyPositionTool.input.parse({ body: 'earth', ...SEATTLE })).toThrow();
+    expect(() => getRiseSetTool.input.parse({ body: 'earth', ...SEATTLE })).toThrow();
+  });
+
+  it('format() renders the conjunction kind for an inner planet', async () => {
+    const ctx = createMockContext({ errors: findEventsTool.errors });
+    const input = findEventsTool.input.parse({
+      event: 'conjunction',
+      body: 'venus',
+      start: '2026-06-01T00:00:00Z',
+      count: 2,
+    });
+    const result = await findEventsTool.handler(input, ctx);
+    expect(result.events.map((e) => e.conjunction_kind)).toEqual(['inferior', 'superior']);
+    const block = findEventsTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text).toContain('**Conjunction:** inferior');
+    expect(text).toContain('**Conjunction:** superior');
+  });
+
   it('reports local circumstances for a solar eclipse when an observer is supplied', async () => {
     const ctx = createMockContext({ errors: findEventsTool.errors });
     const input = findEventsTool.input.parse({

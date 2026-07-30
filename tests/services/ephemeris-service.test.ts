@@ -7,8 +7,10 @@
  * @module tests/services/ephemeris-service.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { EphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import type { EventBodyName, EventName } from '@/services/ephemeris/types.js';
 
 let svc: EphemerisService;
 
@@ -35,9 +37,36 @@ describe('moonPhase', () => {
     const result = svc.moonPhase(new Date('2024-04-08T18:21:00Z'));
     expect(result.phaseName).toBe('New Moon');
     expect(result.illuminatedFraction).toBeLessThan(0.01);
-    // At the exact new-moon boundary the synodic age is either ~0 (just after) or
-    // ~29.5 (just before the next new moon); both are valid near-new readings.
-    expect(result.ageDays < 1 || result.ageDays > 28.5).toBe(true);
+    // This instant is a few seconds *before* the 2024-04-08 new moon, so the age is
+    // measured from the 2024-03-10 one and lands at the top of the synodic month.
+    expect(result.ageDays).toBeCloseTo(29.39, 1);
+  });
+
+  it('measures age from the most recent new moon within hours of it', () => {
+    // The 2026-03-19T01:24:06Z new moon, six hours on. A forward search over a
+    // 31-day look-back window returns the *previous* new moon here, which reported
+    // ~29.81 days — an age past the length of a synodic month, next to a 0.1%
+    // illuminated "New Moon".
+    const result = svc.moonPhase(new Date('2026-03-19T07:30:00Z'));
+    expect(result.phaseName).toBe('New Moon');
+    expect(result.ageDays).toBeCloseTo(0.254, 2);
+  });
+
+  it('keeps the age inside one synodic month across a full lunation', () => {
+    // Half-day steps from just after a new moon through the next one. The age must
+    // rise monotonically and reset, never exceeding the longest synodic month.
+    const newMoon = Date.parse('2026-03-19T01:24:06Z');
+    let previous = -1;
+    let resets = 0;
+    for (let halfDays = 1; halfDays <= 62; halfDays++) {
+      const age = svc.moonPhase(new Date(newMoon + halfDays * 12 * 3600 * 1000)).ageDays;
+      expect(age).toBeGreaterThanOrEqual(0);
+      expect(age).toBeLessThan(29.9);
+      if (age < previous) resets++;
+      previous = age;
+    }
+    // Exactly one new moon falls inside a 31-day sweep.
+    expect(resets).toBe(1);
   });
 
   it('returns the four quarter phases in chronological order', () => {
@@ -120,8 +149,32 @@ describe('findEvents — lunar eclipse', () => {
   });
 });
 
+/**
+ * Geocentric elongation of a body from the Sun, in degrees [0, 180]. At opposition
+ * it is ~180°, at conjunction ~0° — the observable that tells the two events apart
+ * regardless of which relative longitude the engine was asked for.
+ */
+function elongationFromSun(body: 'mars' | 'jupiter' | 'venus', timeUtc: string): number {
+  const at = new Date(timeUtc);
+  const origin = { latitude: 0, longitude: 0, elevation: 0 };
+  const target = svc.position({ kind: 'body', body }, origin, at).ecliptic.longitudeDegrees;
+  const sun = svc.position({ kind: 'body', body: 'sun' }, origin, at).ecliptic.longitudeDegrees;
+  return Math.abs(((target - sun + 540) % 360) - 180);
+}
+
+/**
+ * Earth-to-body distance in AU. Elongation is ~0° at both of an inner planet's
+ * conjunctions, so distance is the only observable that separates them: the planet
+ * is on the near side of the Sun at inferior conjunction and the far side at
+ * superior. This is what pins the `conjunctionKind` labels to physical reality.
+ */
+function geocentricDistanceAu(body: 'venus' | 'mercury', timeUtc: string): number {
+  const origin = { latitude: 0, longitude: 0, elevation: 0 };
+  return svc.position({ kind: 'body', body }, origin, new Date(timeUtc)).equatorial.distanceAu;
+}
+
 describe('findEvents — body-relative', () => {
-  it('finds a Jupiter opposition', () => {
+  it('finds a Jupiter opposition with the planet opposite the Sun', () => {
     const events = svc.findEvents('opposition', {
       start: new Date('2024-01-01T00:00:00Z'),
       count: 1,
@@ -129,6 +182,65 @@ describe('findEvents — body-relative', () => {
     });
     expect(events[0]?.event).toBe('opposition');
     expect(events[0]?.body).toBe('jupiter');
+    // Published: Jupiter's 2024 opposition is 2024-12-07.
+    expect(events[0]!.timeUtc.slice(0, 10)).toBe('2024-12-07');
+    expect(elongationFromSun('jupiter', events[0]!.timeUtc)).toBeCloseTo(180, 1);
+  });
+
+  it('puts a superior planet opposite the Sun at opposition and behind it at conjunction', () => {
+    // The two searches were inverted: opposition returned the solar-conjunction date
+    // and vice versa, silently, for every planet. Elongation is the discriminator —
+    // ~180° at opposition, ~0° at conjunction.
+    const start = new Date('2026-01-01T00:00:00Z');
+    const opposition = svc.findEvents('opposition', { start, count: 1, body: 'mars' })[0]!;
+    const conjunction = svc.findEvents('conjunction', { start, count: 1, body: 'mars' })[0]!;
+
+    expect(opposition.timeUtc.slice(0, 10)).toBe('2027-02-19');
+    expect(conjunction.timeUtc.slice(0, 10)).toBe('2026-01-09');
+    expect(elongationFromSun('mars', opposition.timeUtc)).toBeCloseTo(180, 1);
+    expect(elongationFromSun('mars', conjunction.timeUtc)).toBeCloseTo(0, 1);
+  });
+
+  it('returns both conjunctions of an inner planet in chronological order', () => {
+    // Mercury and Venus pass in front of the Sun (inferior) and behind it (superior).
+    // Searching only one relative longitude skips whichever comes first.
+    const events = svc.findEvents('conjunction', {
+      start: new Date('2026-06-01T00:00:00Z'),
+      count: 3,
+      body: 'venus',
+    });
+    expect(events.map((e) => e.conjunctionKind)).toEqual(['inferior', 'superior', 'inferior']);
+    expect(events[0]!.timeUtc.slice(0, 10)).toBe('2026-10-24');
+    for (let i = 1; i < events.length; i++) {
+      expect(Date.parse(events[i]!.timeUtc)).toBeGreaterThan(Date.parse(events[i - 1]!.timeUtc));
+    }
+    // Both kinds put Venus at the Sun's longitude; only the near/far side differs.
+    expect(elongationFromSun('venus', events[0]!.timeUtc)).toBeCloseTo(0, 1);
+    // Which is why distance, not elongation, is what fixes the labels: Venus sits
+    // ~0.27 AU away on the near side and ~1.73 AU away on the far side.
+    expect(geocentricDistanceAu('venus', events[0]!.timeUtc)).toBeLessThan(0.5);
+    expect(geocentricDistanceAu('venus', events[1]!.timeUtc)).toBeGreaterThan(1.5);
+    expect(geocentricDistanceAu('venus', events[2]!.timeUtc)).toBeLessThan(0.5);
+  });
+
+  it('labels a Mercury conjunction by which side of the Sun it passes', () => {
+    const events = svc.findEvents('conjunction', {
+      start: new Date('2026-06-01T00:00:00Z'),
+      count: 2,
+      body: 'mercury',
+    });
+    expect(events.map((e) => e.conjunctionKind)).toEqual(['inferior', 'superior']);
+    expect(geocentricDistanceAu('mercury', events[0]!.timeUtc)).toBeLessThan(0.9);
+    expect(geocentricDistanceAu('mercury', events[1]!.timeUtc)).toBeGreaterThan(1.2);
+  });
+
+  it('omits conjunction_kind for a superior planet, which has only one conjunction', () => {
+    const events = svc.findEvents('conjunction', {
+      start: new Date('2026-01-01T00:00:00Z'),
+      count: 1,
+      body: 'jupiter',
+    });
+    expect(events[0]?.conjunctionKind).toBeUndefined();
   });
 
   it('finds a Venus greatest elongation with a morning/evening apparition', () => {
@@ -150,6 +262,22 @@ describe('findEvents — body-relative', () => {
     const perigee = events.find((e) => e.apsisKind === 'perigee');
     expect(perigee).toBeDefined();
     expect(perigee!.distanceKm).toBeLessThan(370000);
+  });
+
+  it("finds Earth's perihelion and aphelion", () => {
+    const events = svc.findEvents('perigee_apogee', {
+      start: new Date('2024-01-01T00:00:00Z'),
+      count: 2,
+      body: 'earth',
+    });
+    expect(events.map((e) => e.apsisKind)).toEqual(['perihelion', 'aphelion']);
+    // Published: 2024 perihelion 2024-01-03, aphelion 2024-07-05.
+    expect(events[0]!.timeUtc.slice(0, 10)).toBe('2024-01-03');
+    expect(events[1]!.timeUtc.slice(0, 10)).toBe('2024-07-05');
+    // Earth's orbital eccentricity puts the apsides at ~0.983 and ~1.017 AU.
+    expect(events[0]!.distanceAu).toBeCloseTo(0.9833, 3);
+    expect(events[1]!.distanceAu).toBeCloseTo(1.0167, 3);
+    expect(events[0]!.body).toBe('earth');
   });
 });
 
@@ -409,5 +537,73 @@ describe('findEvents — validation reasons', () => {
     });
     expect(events[0]?.event).toBe('conjunction');
     expect(events[0]?.body).toBe('venus');
+    // Published: Venus's 2024 superior conjunction is 2024-06-04.
+    expect(events[0]!.timeUtc.slice(0, 10)).toBe('2024-06-04');
+    expect(events[0]?.conjunctionKind).toBe('superior');
+  });
+
+  // Bodies the engine cannot search for a given event class: SearchRelativeLongitude
+  // rejects non-planets outright, and SearchPlanetApsis reads an internal planet
+  // table that has no Sun entry. Both surfaced as raw internal errors.
+  const unsupported: Array<[EventName, EventBodyName]> = [
+    ['opposition', 'sun'],
+    ['opposition', 'moon'],
+    ['opposition', 'earth'],
+    ['opposition', 'mercury'],
+    ['opposition', 'venus'],
+    ['conjunction', 'sun'],
+    ['conjunction', 'moon'],
+    ['conjunction', 'earth'],
+    ['perigee_apogee', 'sun'],
+    ['max_elongation', 'earth'],
+  ];
+
+  it.each(unsupported)('throws body_not_supported for %s of %s', (event, body) => {
+    const err = (() => {
+      try {
+        svc.findEvents(event, { start: new Date('2026-01-01T00:00:00Z'), count: 1, body });
+      } catch (e) {
+        return e as {
+          code?: number;
+          data?: { reason?: string; recovery?: { hint?: string } };
+          message?: string;
+        };
+      }
+    })();
+    expect(err?.data?.reason).toBe('body_not_supported');
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    // A recovery hint naming the valid bodies, and no engine internals in the message.
+    expect(err?.data?.recovery?.hint?.length).toBeGreaterThan(0);
+    expect(err?.message).not.toMatch(/OrbitalPeriod|relative longitude/i);
+  });
+
+  it('does not call a rejected max_elongation body an outer planet', () => {
+    // find_events accepts earth, sun, and moon, none of which are outer planets, so
+    // the hint has to explain the rule rather than name one class of rejected body.
+    for (const body of ['earth', 'sun', 'moon'] as const) {
+      const err = (() => {
+        try {
+          svc.findEvents('max_elongation', {
+            start: new Date('2026-01-01T00:00:00Z'),
+            count: 1,
+            body,
+          });
+        } catch (e) {
+          return e as { data?: { recovery?: { hint?: string } } };
+        }
+      })();
+      expect(err?.data?.recovery?.hint).toMatch(/mercury/i);
+      expect(err?.data?.recovery?.hint).not.toMatch(/outer planets/i);
+    }
+  });
+
+  it('still accepts the bodies each event class is defined for', () => {
+    const start = new Date('2026-01-01T00:00:00Z');
+    expect(svc.findEvents('opposition', { start, count: 1, body: 'mars' })).toHaveLength(1);
+    expect(svc.findEvents('conjunction', { start, count: 1, body: 'mercury' })).toHaveLength(1);
+    expect(svc.findEvents('max_elongation', { start, count: 1, body: 'venus' })).toHaveLength(1);
+    expect(svc.findEvents('perigee_apogee', { start, count: 1, body: 'moon' })).toHaveLength(1);
+    expect(svc.findEvents('perigee_apogee', { start, count: 1, body: 'earth' })).toHaveLength(1);
+    expect(svc.findEvents('perigee_apogee', { start, count: 1, body: 'mars' })).toHaveLength(1);
   });
 });

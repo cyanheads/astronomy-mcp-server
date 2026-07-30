@@ -22,6 +22,16 @@ export const BODY_NAMES = [
 
 export type BodyName = (typeof BODY_NAMES)[number];
 
+/**
+ * Bodies astronomy_find_events accepts. Earth extends the shared set for the
+ * `perigee_apogee` class only — it has heliocentric apsides (perihelion/aphelion)
+ * but no observer-relative sky position, so position/rise-set/list-visible keep
+ * the narrower `BODY_NAMES` enum and reject `earth` at the schema boundary.
+ */
+export const EVENT_BODY_NAMES = [...BODY_NAMES, 'earth'] as const;
+
+export type EventBodyName = (typeof EVENT_BODY_NAMES)[number];
+
 /** The nine consolidated event classes for astronomy_find_events. */
 export const EVENT_NAMES = [
   'solar_eclipse',
@@ -156,6 +166,8 @@ export interface EventRecord {
   apsisKind?: 'perigee' | 'apogee' | 'perihelion' | 'aphelion';
   /** Body the event pertains to (opposition/conjunction/elongation/apsis). */
   body?: string;
+  /** Which conjunction an inner planet reaches — inferior (near side) or superior (far side). */
+  conjunctionKind?: 'inferior' | 'superior';
   /** Solar/lunar eclipse contact times (ISO 8601 UTC), present per eclipse phase. */
   contacts?: Record<string, string | null>;
   distanceAu?: number;

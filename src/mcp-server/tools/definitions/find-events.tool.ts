@@ -1,8 +1,9 @@
 /**
  * @fileoverview astronomy_find_events — consolidated forward search for nine event
- *   classes under one `event` enum. Eclipses take an observer for local
- *   circumstances; the rest are geocentric. Validation gates fail fast when an
- *   event needs a body or an observer that was not supplied.
+ *   classes under one `event` enum. Solar eclipses take an observer for local
+ *   circumstances; every other class, lunar eclipses included, is geocentric.
+ *   Validation gates fail fast when an event needs a body or an observer that was
+ *   not supplied, or when the body has no such event.
  * @module mcp-server/tools/definitions/find-events.tool
  */
 
@@ -10,7 +11,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
-import { BODY_NAMES, EVENT_NAMES, type EventName } from '@/services/ephemeris/types.js';
+import { EVENT_BODY_NAMES, EVENT_NAMES, type EventName } from '@/services/ephemeris/types.js';
 
 const BODY_EVENTS = new Set<EventName>([
   'opposition',
@@ -49,7 +50,7 @@ export const FindEventsOutput = z.object({
             .boolean()
             .optional()
             .describe(
-              "True when a solar eclipse is above the observer's horizon at peak. Present for solar eclipses.",
+              "True when the eclipsed Sun is above the observer's horizon at peak. Present for solar eclipses only — lunar eclipses are geocentric and report no local visibility.",
             ),
           contacts: z
             .record(z.string(), z.string().nullable())
@@ -70,6 +71,12 @@ export const FindEventsOutput = z.object({
             .optional()
             .describe(
               'The target body. Present for opposition/conjunction/max_elongation/perigee_apogee.',
+            ),
+          conjunction_kind: z
+            .enum(['inferior', 'superior'])
+            .optional()
+            .describe(
+              'Whether the planet passes between Earth and the Sun (inferior) or behind the Sun (superior). Present only for mercury and venus conjunctions, the two bodies that reach both.',
             ),
           elongation_degrees: z
             .number()
@@ -112,7 +119,7 @@ export type FindEventsOutputType = z.infer<typeof FindEventsOutput>;
 export const findEventsTool = tool('astronomy_find_events', {
   title: 'astronomy-mcp-server: find sky events',
   description:
-    'Search forward from a start time for the next occurrences of one sky-event class, selected by the `event` enum: solar_eclipse, lunar_eclipse, equinox, solstice, moon_quarter, opposition, conjunction, max_elongation, or perigee_apogee. Solar and lunar eclipses take an observer location and report local visibility and contact times; equinoxes, solstices, and moon quarters are geocentric and need no location. The body-relative events (opposition, conjunction, max_elongation, perigee_apogee) require a `body` — max_elongation is defined only for mercury and venus, and perigee_apogee accepts the moon or a planet. Returns the next `count` occurrences (default 1). Start defaults to now; pass an IANA `timezone` for observer-local timestamps.',
+    'Search forward from a start time for the next occurrences of one sky-event class, selected by the `event` enum: solar_eclipse, lunar_eclipse, equinox, solstice, moon_quarter, opposition, conjunction, max_elongation, or perigee_apogee. Only solar_eclipse takes an observer: pass latitude and longitude to get local circumstances (contact times plus `local_visible`). Every other class is geocentric and needs no location — a lunar eclipse is the same event everywhere the Moon is up, so it returns contact times and no `local_visible`. The body-relative events (opposition, conjunction, max_elongation, perigee_apogee) require a `body`: opposition applies to the superior planets (mars through pluto), conjunction to any planet, max_elongation to mercury and venus, and perigee_apogee to the moon (perigee/apogee), earth, or a planet (perihelion/aphelion). Returns the next `count` occurrences (default 1). Start defaults to now; pass an IANA `timezone` for observer-local timestamps.',
   annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
     event: z.enum(EVENT_NAMES).describe('Which class of event to search for.'),
@@ -130,10 +137,10 @@ export const findEventsTool = tool('astronomy_find_events', {
       .default(1)
       .describe('Number of forward occurrences to return. Default 1, max 20.'),
     body: z
-      .enum(BODY_NAMES)
+      .enum(EVENT_BODY_NAMES)
       .optional()
       .describe(
-        'Target body — required for opposition, conjunction, max_elongation, and perigee_apogee; ignored otherwise.',
+        'Target body — required for opposition, conjunction, max_elongation, and perigee_apogee; ignored otherwise. "earth" is accepted only for perigee_apogee, which returns its perihelion and aphelion.',
       ),
     latitude: z
       .number()
@@ -141,14 +148,16 @@ export const findEventsTool = tool('astronomy_find_events', {
       .max(90)
       .optional()
       .describe(
-        'Observer latitude in decimal degrees — required for eclipse events to get local circumstances.',
+        'Observer latitude in decimal degrees — required for solar_eclipse to get local circumstances, ignored by every other event.',
       ),
     longitude: z
       .number()
       .min(-180)
       .max(180)
       .optional()
-      .describe('Observer longitude in decimal degrees — required for eclipse events.'),
+      .describe(
+        'Observer longitude in decimal degrees — required for solar_eclipse, ignored by every other event.',
+      ),
     elevation: z
       .number()
       .default(0)
@@ -182,9 +191,9 @@ export const findEventsTool = tool('astronomy_find_events', {
     {
       reason: 'body_not_supported',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'max_elongation was requested for a body other than mercury or venus.',
+      when: 'The body has no such event — opposition for the Sun, Moon, Earth, or an inner planet; conjunction for the Sun, Moon, or Earth; max_elongation for anything but mercury or venus; perigee_apogee for the Sun.',
       recovery:
-        'Use body "mercury" or "venus" for max_elongation; the outer planets have no greatest elongation.',
+        'Pick a body the event is defined for: a superior planet (mars through pluto) for opposition, any planet for conjunction, mercury or venus for max_elongation, and the moon, earth, or a planet for perigee_apogee.',
     },
     {
       reason: 'time_out_of_range',
@@ -239,6 +248,7 @@ export const findEventsTool = tool('astronomy_find_events', {
         ...(r.which ? { which: r.which } : {}),
         ...(r.quarter ? { quarter: r.quarter } : {}),
         ...(r.body ? { body: r.body } : {}),
+        ...(r.conjunctionKind ? { conjunction_kind: r.conjunctionKind } : {}),
         ...(r.elongationDegrees !== undefined ? { elongation_degrees: r.elongationDegrees } : {}),
         ...(r.visibility ? { visibility: r.visibility } : {}),
         ...(r.apsisKind ? { apsis_kind: r.apsisKind } : {}),
@@ -260,6 +270,7 @@ export const findEventsTool = tool('astronomy_find_events', {
       lines.push(headline);
       lines.push(`time_utc: ${e.time_utc}${e.time_local ? ` | time_local: ${e.time_local}` : ''}`);
       if (e.kind) lines.push(`**Kind:** ${e.kind}`);
+      if (e.conjunction_kind) lines.push(`**Conjunction:** ${e.conjunction_kind}`);
       if (e.obscuration !== undefined)
         lines.push(
           `**Obscuration:** ${e.obscuration === null ? 'unavailable' : `${(e.obscuration * 100).toFixed(1)}%`}`,
