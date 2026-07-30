@@ -60,10 +60,12 @@ export class HorizonsService {
       );
     } catch (err) {
       // fetchWithTimeout throws a status-mapped McpError on any non-2xx whose data
-      // carries raw upstream internals (URL, statusCode, responseBody). A transport
-      // failure is always horizons_unavailable here — Horizons signals a genuine
-      // no-match with a 200 body (handled in parse), not an HTTP error status. Map
-      // to the typed contract with clean data so nothing upstream leaks to the client.
+      // carries raw upstream internals (URL, status/body plus the legacy
+      // statusCode/responseBody aliases), and a Timeout McpError when its own
+      // deadline fires. Either way the failure is horizons_unavailable here —
+      // Horizons signals a genuine no-match with a 200 body (handled in parse), not
+      // an HTTP error status. Map to the typed contract with clean data so nothing
+      // upstream leaks to the client.
       throw serviceUnavailable(
         `Failed to fetch an ephemeris for "${designation}" from JPL Horizons.`,
         {

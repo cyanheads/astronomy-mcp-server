@@ -71,6 +71,10 @@ export class SatelliteService {
         async () => {
           const response = await fetchWithTimeout(url, this.timeoutMs, reqCtx, {
             signal: ctx.signal,
+            // CelesTrak answers an uncatalogued object with 404, which is a domain
+            // outcome here (tle_not_found), not a service failure — log it at debug.
+            // The thrown status-mapped McpError is unchanged; only severity drops.
+            expectedStatuses: [404],
           });
           return response.text();
         },
@@ -83,9 +87,10 @@ export class SatelliteService {
       );
     } catch (err) {
       // fetchWithTimeout throws a status-mapped McpError on any non-2xx whose
-      // data carries raw upstream internals (URL, statusCode, responseBody). Map
-      // it into the typed contract with clean data so nothing upstream leaks to
-      // the client. CelesTrak answers a missing object with 404 → NotFound.
+      // data carries raw upstream internals (URL, status/body plus the legacy
+      // statusCode/responseBody aliases). Map it into the typed contract with
+      // clean data so nothing upstream leaks to the client. CelesTrak answers a
+      // missing object with 404 → NotFound.
       throw this.classifyFetchError(err, noradId);
     }
 
@@ -97,7 +102,8 @@ export class SatelliteService {
   /**
    * Map a fetch/transport McpError onto the typed contract with leak-free data.
    * A NotFound (CelesTrak's 404 for an uncatalogued object) becomes tle_not_found;
-   * everything else (5xx, timeout, network) becomes celestrak_unavailable. The
+   * everything else — 5xx (ServiceUnavailable), a fetch deadline (Timeout), or a
+   * network failure — becomes celestrak_unavailable. The
    * original error rides as `cause` for server-side logs but never reaches the client.
    */
   private classifyFetchError(err: unknown, noradId: number): McpError {

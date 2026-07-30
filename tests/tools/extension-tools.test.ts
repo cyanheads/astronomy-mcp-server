@@ -35,11 +35,12 @@ function stubFetch(body: string, ok = true): void {
 /**
  * Stub `fetch` so it throws the exact status-mapped McpError shape
  * `fetchWithTimeout` raises on a non-2xx — its `data` carries the upstream
- * internals the public server must NOT leak (statusCode, responseBody,
- * requestId) and the message carries the request URL. `retryable: false` makes
- * `withRetry` give up on the first attempt so the leak-strip is exercised
- * without burning the backoff schedule. The service's catch must reclassify
- * this into its typed domain error, dropping every internal.
+ * internals the public server must NOT leak, under both the canonical
+ * `status`/`body` names and the legacy `statusCode`/`responseBody` aliases,
+ * plus `requestId`; the message carries the request URL. `retryable: false`
+ * makes `withRetry` give up on the first attempt so the leak-strip is
+ * exercised without burning the backoff schedule. The service's catch must
+ * reclassify this into its typed domain error, dropping every internal.
  */
 function stubFetchThrowsUpstream(): void {
   vi.stubGlobal(
@@ -51,8 +52,10 @@ function stubFetchThrowsUpstream(): void {
         {
           requestId: 'req-internal-abc123',
           operation: 'fetch',
-          statusCode: 503,
+          status: 503,
           statusText: 'Service Unavailable',
+          body: '<html>upstream stack trace and internal host details</html>',
+          statusCode: 503,
           responseBody: '<html>upstream stack trace and internal host details</html>',
           errorSource: 'FetchHttpError',
           retryable: false,
@@ -62,12 +65,37 @@ function stubFetchThrowsUpstream(): void {
   );
 }
 
+/**
+ * Stub `fetch` so it throws the `Timeout` McpError `fetchWithTimeout` raises
+ * when its own deadline fires — a distinct JSON-RPC code from the
+ * `ServiceUnavailable` a 5xx maps to, and one that still carries `requestId`
+ * and `errorSource` internals. Each service catches the whole fetch boundary,
+ * so a timeout must surface as that service's own unavailable contract rather
+ * than bubbling the framework code and its data to the client.
+ */
+function stubFetchThrowsTimeout(): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => {
+      throw new McpError(JsonRpcErrorCode.Timeout, 'Fetch timed out.', {
+        requestId: 'req-internal-abc123',
+        operation: 'fetch',
+        errorSource: 'FetchTimeout',
+        retryable: false,
+      });
+    }),
+  );
+}
+
 /** Assert a client-facing error `data` payload carries none of the upstream internals. */
 function expectNoUpstreamLeak(data: unknown): void {
   const serialized = JSON.stringify(data);
   expect(serialized).not.toContain('statusCode');
   expect(serialized).not.toContain('responseBody');
+  expect(serialized).not.toContain('status');
+  expect(serialized).not.toContain('body');
   expect(serialized).not.toContain('requestId');
+  expect(serialized).not.toContain('errorSource');
   expect(serialized).not.toContain('503');
   expect(serialized).not.toContain('internal.example.test');
   expect(serialized).not.toMatch(/https?:\/\//);
@@ -298,6 +326,19 @@ describe('astronomy_get_ephemeris — error contracts', () => {
     expectNoUpstreamLeak(err.data);
   });
 
+  it('maps a Horizons fetch timeout to horizons_unavailable, not the framework Timeout code', async () => {
+    stubFetchThrowsTimeout();
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '433;' });
+    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toEqual({
+      reason: 'horizons_unavailable',
+      recovery: { hint: expect.stringContaining('retry') },
+    });
+    expectNoUpstreamLeak(err.data);
+  });
+
   it('rejects an empty designation at schema validation', () => {
     expect(() => getEphemerisTool.input.parse({ designation: '' })).toThrow();
   });
@@ -480,6 +521,21 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
     // McpError carrying the URL, statusCode, and raw body. classifyFetchError must map
     // it to the typed contract with leak-free data — internals stay on `cause` only.
     stubFetchThrowsUpstream();
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ norad_id: 25544, ...SEATTLE });
+    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toEqual({
+      reason: 'celestrak_unavailable',
+      recovery: { hint: expect.stringContaining('retry') },
+    });
+    expectNoUpstreamLeak(err.data);
+  });
+
+  it('maps a CelesTrak fetch timeout to celestrak_unavailable, not tle_not_found', async () => {
+    // classifyFetchError branches only on NotFound; a Timeout must fall through to
+    // the unavailable arm rather than being read as "no such object".
+    stubFetchThrowsTimeout();
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({ norad_id: 25544, ...SEATTLE });
     const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
