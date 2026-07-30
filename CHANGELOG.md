@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-30
+
+astronomy_find_events opposition/conjunction times were swapped, moon_phase age_days over-reported by ~29.5d after a new moon, and an unsupported event body leaked raw engine errors — all fixed; perigee_apogee now accepts earth, and conjunction reports inferior/superior for mercury and venus.
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-06-28
 
 content[] markdown across get_rise_set, find_events, list_visible, and get_satellite_passes now reads as a rounded human report instead of a raw struct dump; astronomy_stargazing_plan delimits user-supplied location and date as data.

@@ -1,6 +1,6 @@
 # astronomy-mcp-server - Directory Structure
 
-Generated on: 2026-06-25 23:59:39
+Generated on: 2026-07-30 22:53:37
 
 ```text
 astronomy-mcp-server/
@@ -10,15 +10,18 @@ astronomy-mcp-server/
 │   ├── mcp.json
 │   └── plugin.json
 ├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug_report.yml
-│       ├── config.yml
-│       └── feature_request.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -161,6 +164,8 @@ astronomy-mcp-server/
 │   │   └── stargazing-plan.prompt.test.ts
 │   ├── resources/
 │   │   └── body.resource.test.ts
+│   ├── scripts/
+│   │   └── packaging-regexes.test.ts
 │   ├── services/
 │   │   └── ephemeris-service.test.ts
 │   └── tools/
@@ -169,6 +174,7 @@ astronomy-mcp-server/
 │       └── extension-tools.test.ts
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── AGENTS.md
@@ -176,6 +182,7 @@ astronomy-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
