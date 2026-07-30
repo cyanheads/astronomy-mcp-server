@@ -4,13 +4,18 @@
  *   process per CelesTrak's refetch guidance), propagates with SGP4 via satellite.js
  *   (offline), and returns above-horizon passes. A pass is "visible" only when the
  *   satellite is sunlit at peak AND the observer's sky is dark — the ground-darkness
- *   gate reuses the core sun-altitude logic. Network-touching code carries its own
- *   timeout + retry boundary and degrades loudly; it never substitutes core output.
+ *   gate reuses the core sun-altitude logic. A pass already underway when the window
+ *   opens is omitted rather than reported with the query boundary as its rise, and an
+ *   element set that will not propagate to the window is rejected — naming the object
+ *   or the requested instant, whichever the epoch distance implicates — rather than
+ *   yielding no passes. Network-touching code carries its own timeout + retry boundary
+ *   and degrades loudly; it never substitutes core output.
  * @module services/satellite/satellite-service
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import {
+  invalidParams,
   JsonRpcErrorCode,
   McpError,
   notFound,
@@ -33,6 +38,24 @@ import type { ObserverInput } from '../ephemeris/types.js';
 import type { SatellitePass, SatellitePassResult, Tle } from './types.js';
 
 const DEG = 180 / Math.PI;
+/**
+ * Opt in to satellite.js's community decay check on every propagation. Reference SGP4
+ * already refuses most element sets that no longer describe an orbit (eccentricity out
+ * of range, or its own decay test), and does so before this check would; the check adds
+ * the residual cases where the reference model still returns a numerically well-formed
+ * but physically meaningless position. It deviates from reference SGP4 by design — a
+ * pass prediction from meaningless state vectors is worse than no prediction.
+ */
+const PROPAGATE_OPTIONS = { communityDecayCheckEnabled: true } as const;
+/** Julian date of the Unix epoch — converts `satrec.jdsatepoch` to milliseconds. */
+const JD_UNIX_EPOCH = 2440587.5;
+/**
+ * How far the requested window may sit from the element set's epoch before a refused
+ * propagation is attributed to the request rather than to the object. CelesTrak serves
+ * element sets refreshed within hours and SGP4 stops describing the orbit within weeks
+ * of epoch, so a month comfortably covers any window anchored near the present.
+ */
+const MAX_EPOCH_DISTANCE_DAYS = 30;
 /** Minimum peak elevation (deg) for a pass to count — below this it grazes the horizon. */
 const MIN_PEAK_ELEVATION = 10;
 /** Propagation step in seconds while scanning for passes. */
@@ -158,6 +181,11 @@ export class SatelliteService {
    * Predict visible passes over the next `days` from `start`. Steps the orbit with
    * SGP4, brackets above-horizon intervals, and keeps passes whose peak is sunlit
    * and over a dark-enough ground.
+   *
+   * Throws when the element set will not propagate to the requested window — as
+   * `object_decayed` if the window sits near the element set's epoch, otherwise as
+   * `time_out_of_range`. Without that check either condition reaches the caller as
+   * `passes: []`, which reads identically to "nothing visible tonight".
    */
   predictPasses(
     tle: Tle,
@@ -168,6 +196,15 @@ export class SatelliteService {
     formatLocal?: (d: Date) => string,
   ): SatellitePassResult {
     const satrec = twoline2satrec(tle.line1, tle.line2);
+    /**
+     * Probe the first instant of the window before scanning it. SGP4 refuses an element
+     * set it can no longer turn into an orbit by answering null, and the scan loop would
+     * silently skip every such timestep and return an empty, falsely-successful pass
+     * list. Reject up front instead, naming which of the two causes applies.
+     */
+    if (!propagate(satrec, start, PROPAGATE_OPTIONS)) {
+      throw this.classifyPropagationFailure(satrec, noradId, start);
+    }
     const observerGd = {
       longitude: (observer.longitude * Math.PI) / 180,
       latitude: (observer.latitude * Math.PI) / 180,
@@ -185,6 +222,22 @@ export class SatelliteService {
     let peakAz = 0;
     let peakTime: Date | null = null;
     let lastAz = 0;
+    /**
+     * A rise is a below→above transition. When the window opens with the satellite
+     * already up, the first sample is the query boundary, not an acquisition —
+     * reporting it as `riseUtc` would misstate the rise time, the rise azimuth, and the
+     * duration, so that leading partial pass is omitted and reporting starts at the
+     * first complete one. Deciding that needs the step *before* `start`: a satellite
+     * below the horizon there is rising exactly at `start`, which is a genuine
+     * acquisition, and dropping it would lose the pass for any caller who took a
+     * previously reported `riseUtc` and passed it back as `start`.
+     */
+    const priorLook = this.lookAngles(
+      satrec,
+      new Date(start.getTime() - STEP_SECONDS * 1000),
+      observerGd,
+    );
+    let sawBelowHorizon = priorLook !== null && priorLook.elevation <= 0;
 
     for (let i = 0; i <= totalSteps; i++) {
       const t = new Date(start.getTime() + i * STEP_SECONDS * 1000);
@@ -194,6 +247,7 @@ export class SatelliteService {
       const azimuthDeg = (((look.azimuth * DEG) % 360) + 360) % 360;
 
       if (elevationDeg > 0) {
+        if (!sawBelowHorizon) continue;
         if (!inPass) {
           inPass = true;
           riseTime = t;
@@ -207,7 +261,9 @@ export class SatelliteService {
           peakTime = t;
         }
         lastAz = azimuthDeg;
-      } else if (inPass) {
+      } else {
+        sawBelowHorizon = true;
+        if (!inPass) continue;
         // Pass just ended at the previous step.
         inPass = false;
         if (riseTime && peakTime && peakElevation >= MIN_PEAK_ELEVATION) {
@@ -243,13 +299,46 @@ export class SatelliteService {
     return { noradId, ...(tle.name ? { satelliteName: tle.name } : {}), passes };
   }
 
+  /**
+   * Name the reason SGP4 refused the first instant of the window. The refusal on its own
+   * is ambiguous: a reentered object and a start far from the element set's epoch both
+   * leave the mean elements unable to describe an orbit. Epoch distance separates them —
+   * within the horizon the element set is current, so the object is what changed; beyond
+   * it the request is, and calling a satellite that is still in orbit decayed would be a
+   * false statement with an unfollowable recovery.
+   */
+  private classifyPropagationFailure(satrec: SatRec, noradId: number, start: Date): McpError {
+    const epochMs = (satrec.jdsatepoch - JD_UNIX_EPOCH) * 86400000;
+    const distanceDays = Math.abs(start.getTime() - epochMs) / 86400000;
+    if (distanceDays > MAX_EPOCH_DISTANCE_DAYS) {
+      return invalidParams(
+        `The requested start is ${distanceDays.toFixed(0)} days from the epoch of the current element set for NORAD ID ${noradId}; SGP4 cannot propagate it that far.`,
+        {
+          reason: 'time_out_of_range',
+          recovery: {
+            hint: 'An element set describes the orbit for weeks either side of its epoch — request a start within about a month of today.',
+          },
+        },
+      );
+    }
+    return notFound(
+      `NORAD ID ${noradId} has decayed — SGP4 cannot propagate its current element set to the requested window.`,
+      {
+        reason: 'object_decayed',
+        recovery: {
+          hint: 'Pick an object that is still in orbit; confirm its status at celestrak.org before requesting passes.',
+        },
+      },
+    );
+  }
+
   /** Compute look angles (az/el) of the satellite from the observer at one instant. */
   private lookAngles(
     satrec: SatRec,
     date: Date,
     observerGd: { longitude: number; latitude: number; height: number },
   ): { azimuth: number; elevation: number } | null {
-    const pv = propagate(satrec, date);
+    const pv = propagate(satrec, date, PROPAGATE_OPTIONS);
     if (!pv) return null;
     const gmst = gstime(date);
     const ecf = eciToEcf(pv.position, gmst);
@@ -259,7 +348,7 @@ export class SatelliteService {
 
   /** True when the satellite is in sunlight (not in Earth's umbra) at the given time. */
   private isSunlit(satrec: SatRec, date: Date): boolean {
-    const pv = propagate(satrec, date);
+    const pv = propagate(satrec, date, PROPAGATE_OPTIONS);
     if (!pv) return false;
     const sun = sunPos(jday(date));
     const fraction = shadowFraction(sun.rsun, pv.position);

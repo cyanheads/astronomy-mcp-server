@@ -71,7 +71,7 @@ export type SatellitePassesOutputType = z.infer<typeof SatellitePassesOutput>;
 export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
   title: 'astronomy-mcp-server: get satellite passes',
   description:
-    "Predict visible passes of a satellite (e.g. the ISS, NORAD 25544) over an observer in the next `days`. Fetches the current TLE from CelesTrak, propagates it with SGP4 in-process, and returns each pass's rise, peak, and set times with azimuths and the peak elevation. Only passes that are naked-eye-plausible are returned — the satellite must be sunlit at peak while the observer's sky is dark. NORAD catalog numbers are found at celestrak.org or heavens-above.com. This is a gated, network-backed extension (CelesTrak is keyless but rate-limited; TLEs are cached briefly). Default elevation 0 m; pass an IANA timezone for observer-local pass times.",
+    "Predict visible passes of a satellite (e.g. the ISS, NORAD 25544) over an observer in the next `days`. Fetches the current TLE from CelesTrak, propagates it with SGP4 in-process, and returns each pass's rise, peak, and set times with azimuths and the peak elevation. Only passes that are naked-eye-plausible are returned — the satellite must be sunlit at peak while the observer's sky is dark. Every returned pass rises within the requested window: a pass already underway at `start` is omitted rather than reported with `start` as its rise, so back up `start` to see it. An element set that will not propagate to the window is rejected by name rather than returning an empty list, so an empty `passes` means only that nothing was visible. `start` must be within about a month of today — an element set describes the orbit for weeks around its epoch and cannot be propagated further. NORAD catalog numbers are found at celestrak.org or heavens-above.com. This is a gated, network-backed extension (CelesTrak is keyless but rate-limited; TLEs are cached briefly). Default elevation 0 m; pass an IANA timezone for observer-local pass times.",
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
     norad_id: z
@@ -105,7 +105,9 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
     start: z
       .string()
       .optional()
-      .describe('Search start as an ISO 8601 UTC string. Defaults to now.'),
+      .describe(
+        'Search start as an ISO 8601 UTC string, within about a month of today — the current element set cannot be propagated further. Defaults to now.',
+      ),
     timezone: z
       .string()
       .optional()
@@ -127,9 +129,9 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
     {
       reason: 'time_out_of_range',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'The start instant is outside the SGP4 high-accuracy span (≈1900–2100).',
+      when: 'The start instant is outside the SGP4 high-accuracy span (≈1900–2100), or too far from the epoch of the current element set for SGP4 to reach.',
       recovery:
-        'Use a start date between 1900 and 2100 — TLEs are only accurate within weeks of epoch.',
+        'Request a start within about a month of today — element sets only describe the orbit for weeks around their epoch.',
     },
     {
       reason: 'tle_not_found',
@@ -137,6 +139,13 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       when: 'CelesTrak has no current element set for the NORAD ID.',
       recovery:
         'Verify the catalog number at celestrak.org; the object may have decayed or never been catalogued.',
+    },
+    {
+      reason: 'object_decayed',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'A current element set will not propagate to a window near its own epoch — the signature of an object that has reentered.',
+      recovery:
+        'Pick an object that is still in orbit; confirm its status at celestrak.org before requesting passes.',
     },
     {
       reason: 'celestrak_unavailable',

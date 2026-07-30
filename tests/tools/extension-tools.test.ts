@@ -5,18 +5,27 @@
  *   `fetch`) is stubbed with canned upstream text so no live request is made; the
  *   SGP4 propagation and the Horizons CSV parse run for real against the fixtures.
  *
- *   Covers every declared `ctx.fail` reason (body_not_found, horizons_unavailable,
- *   tle_not_found, celestrak_unavailable), the happy-path parse, a sparse upstream
- *   payload (Horizons "n.a." magnitude → null), the truncation-disclosure
- *   enrichment, observer alt/az inclusion, the TLE cache, and format() completeness
- *   including the empty-result branch.
+ *   Covers every declared `ctx.fail` reason (invalid_time, invalid_time_range,
+ *   incomplete_observer, invalid_step, body_not_found, horizons_unavailable,
+ *   tle_not_found, object_decayed, time_out_of_range, celestrak_unavailable), the
+ *   happy-path parse, a sparse upstream payload (Horizons "n.a." magnitude → null), the
+ *   truncation-disclosure enrichment as it reaches a client (domain payload merged
+ *   with enrichment and parsed against the effective output schema, not the bare
+ *   handler return), pass-boundary detection at all three positions of `start` relative
+ *   to a rise (before, exactly on, mid-pass), the split between a decayed object and a
+ *   start the element set cannot reach, observer alt/az inclusion, the TLE cache, and
+ *   format() completeness including the empty-result branch.
  * @module tests/tools/extension-tools.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getEphemerisTool } from '@/mcp-server/tools/definitions/get-ephemeris.tool.js';
+import {
+  type EphemerisOutputType,
+  getEphemerisTool,
+} from '@/mcp-server/tools/definitions/get-ephemeris.tool.js';
 import { getSatellitePassesTool } from '@/mcp-server/tools/definitions/get-satellite-passes.tool.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { initHorizonsService } from '@/services/horizons/horizons-service.js';
@@ -99,6 +108,20 @@ function expectNoUpstreamLeak(data: unknown): void {
   expect(serialized).not.toContain('503');
   expect(serialized).not.toContain('internal.example.test');
   expect(serialized).not.toMatch(/https?:\/\//);
+}
+
+/**
+ * Reproduce the surface a client actually receives for the ephemeris tool: the domain
+ * payload merged with accumulated enrichment and parsed against
+ * `output.extend(enrichment)`, exactly as the framework's tool handler factory builds
+ * `structuredContent`. Asserting on the raw handler return value instead skips the
+ * merge — and therefore the parse that silently strips any enriched key the definition
+ * never declared.
+ */
+function mergedEphemerisOutput(domain: EphemerisOutputType, ctx: Context) {
+  return getEphemerisTool.output
+    .extend(getEphemerisTool.enrichment)
+    .parse({ ...domain, ...getEnrichment(ctx) });
 }
 
 /** Build a Horizons OBSERVER CSV block. Geocentric layout: date,flag,flag,RA,Dec,APmag,S-brt,delta,deldot. */
@@ -246,7 +269,9 @@ describe('astronomy_get_ephemeris — happy path', () => {
     expect(result.points[0]?.time_utc).toBe('2024-01-01T00:00:00.000Z');
   });
 
-  it('discloses truncation when Horizons returns more rows than the inline cap', async () => {
+  it('discloses truncation with an exact-retrieval notice on the merged client surface', async () => {
+    // The disclosure only exists once enrichment is merged into the effective output;
+    // the handler's own return value carries none of it, so assert on the merged parse.
     const rows: string[] = [];
     for (let i = 0; i < 250; i++) {
       const hh = String(i % 24).padStart(2, '0');
@@ -262,6 +287,33 @@ describe('astronomy_get_ephemeris — happy path', () => {
     const result = await getEphemerisTool.handler(input, ctx);
     // The service caps at 200 inline rows.
     expect(result.points).toHaveLength(200);
+
+    const merged = mergedEphemerisOutput(result, ctx);
+    expect(merged).toMatchObject({ truncated: true, shown: 200, cap: 200 });
+    const resumeFrom = result.points.at(-1)?.time_utc;
+    expect(resumeFrom).toBeTypeOf('string');
+    // The notice must name the instant to resume from — the last row actually returned —
+    // and keep the caller on the same step, since widening it drops samples the original
+    // range asked for instead of retrieving them.
+    expect(merged.notice).toContain(resumeFrom as string);
+    expect(merged.notice).toMatch(/same step/i);
+  });
+
+  it('reports truncated: false with no notice when the whole span fits the cap', async () => {
+    stubFetch(
+      horizonsGeocentric([
+        '2024-Jan-01 00:00:00.0000, , , 45.000000, 12.500000, 9.50, 5.0, 1.500000, 0.0',
+      ]),
+    );
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2024-01-01T00:00:00Z',
+    });
+    const result = await getEphemerisTool.handler(input, ctx);
+    const merged = mergedEphemerisOutput(result, ctx);
+    expect(merged).toMatchObject({ truncated: false, shown: 1, cap: 200 });
+    expect(merged.notice).toBeUndefined();
   });
 
   it('format() renders the designation, point count, and per-point coordinates', async () => {
@@ -371,6 +423,109 @@ describe('astronomy_get_ephemeris — error contracts', () => {
     expect(err.data.reason).toBe('invalid_time');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  it('rejects a latitude without a longitude with incomplete_observer', async () => {
+    // A lone coordinate used to fall through to a geocentric query: the observer the
+    // caller supplied was dropped along with the alt/az columns it would have produced,
+    // and the call still reported success.
+    const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      latitude: SEATTLE.latitude,
+    });
+    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.data.reason).toBe('incomplete_observer');
+    expect(err.data.recovery.hint).toMatch(/latitude and longitude together/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a longitude without a latitude with incomplete_observer', async () => {
+    const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      longitude: SEATTLE.longitude,
+    });
+    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.data.reason).toBe('incomplete_observer');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a stop before start with invalid_time_range, not an upstream outage', async () => {
+    const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2024-01-02T00:00:00Z',
+      stop: '2024-01-01T00:00:00Z',
+    });
+    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.data.reason).toBe('invalid_time_range');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a zero-length span (stop equal to start) with invalid_time_range', async () => {
+    const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2024-01-01T00:00:00Z',
+      stop: '2024-01-01T00:00:00Z',
+    });
+    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
+    expect(err.data.reason).toBe('invalid_time_range');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed step with invalid_step, not an upstream outage', async () => {
+    const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '433;', step: 'nonsense' });
+    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.data.reason).toBe('invalid_step');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each(['0m', '1w', '10', 'm', '1 1h', '1.5h', '1om', '1 mo d'])(
+    'rejects step "%s" with invalid_step',
+    async (step) => {
+      const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
+      vi.stubGlobal('fetch', fetchSpy);
+      const ctx = createMockContext({ errors: getEphemerisTool.errors });
+      const input = getEphemerisTool.input.parse({ designation: '433;', step });
+      const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
+      expect(err.data.reason).toBe('invalid_step');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  // Every unit Horizons accepts for a calendar step. `mo` and `y` are the coarse ones a
+  // multi-year survey needs; rejecting them would force a day step and truncate at 200
+  // rows instead of returning the requested baseline.
+  it.each(['10m', '1h', '1d', '1 d', '30M', '1mo', '1 mo', '1y', '2Y'])(
+    'accepts step "%s"',
+    async (step) => {
+      stubFetch(
+        horizonsGeocentric([
+          '2024-Jan-01 00:00:00.0000, , , 45.000000, 12.500000, 9.50, 5.0, 1.500000, 0.0',
+        ]),
+      );
+      const ctx = createMockContext({ errors: getEphemerisTool.errors });
+      const input = getEphemerisTool.input.parse({ designation: '433;', step });
+      const result = await getEphemerisTool.handler(input, ctx);
+      expect(result.points).toHaveLength(1);
+    },
+  );
 });
 
 /**
@@ -381,6 +536,20 @@ const ISS_TLE = [
   'ISS (ZARYA)',
   '1 25544U 98067A   24001.50000000  .00016717  00000-0  10270-3 0  9006',
   '2 25544  51.6416 247.4627 0006703 130.5360 325.0288 15.49447822  1234',
+].join('\n');
+
+/**
+ * A synthetic element set standing in for a decayed object: an orbit low and draggy
+ * enough that SGP4's mean elements stop describing it about ten days past epoch, well
+ * inside the horizon over which a published element set is meant to hold. That is what
+ * separates a reentry from a start the element set simply cannot reach. Synthetic
+ * rather than a real catalog entry because CelesTrak drops decayed objects from
+ * `gp.php?CATNR=` — what triggers the rejection is the drag term, not the identity.
+ */
+const DECAYED_TLE = [
+  'DECAYED TEST OBJECT',
+  '1 88888U 99001A   20001.50000000  .00016717  00000+0  86870-3 0  9990',
+  '2 88888  51.6000 100.0000 0005000 100.0000 260.0000 16.30000000    10',
 ].join('\n');
 
 describe('astronomy_get_satellite_passes — happy path', () => {
@@ -440,6 +609,104 @@ describe('astronomy_get_satellite_passes — happy path', () => {
     } else {
       expect(text).toMatch(/rise_utc/);
     }
+  });
+
+  it('omits a pass already underway at start rather than reporting start as its rise', async () => {
+    stubFetch(ISS_TLE);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const baseline = await getSatellitePassesTool.handler(
+      getSatellitePassesTool.input.parse({
+        norad_id: 25544,
+        ...SEATTLE,
+        days: 10,
+        start: '2024-01-01T00:00:00Z',
+      }),
+      ctx,
+    );
+    const firstRise = baseline.passes[0]?.rise_utc;
+    const second = baseline.passes[1];
+    expect(firstRise).toBeTypeOf('string');
+    expect(second).toBeDefined();
+
+    // Re-ask from an instant two steps after that first pass's true acquisition, so the
+    // window opens mid-pass. The scan used to treat its first above-horizon sample as a
+    // rise, reporting the query boundary as rise_utc with a clipped duration.
+    const midPassStart = new Date(new Date(firstRise as string).getTime() + 60_000).toISOString();
+    const midCtx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const mid = await getSatellitePassesTool.handler(
+      getSatellitePassesTool.input.parse({
+        norad_id: 25544,
+        ...SEATTLE,
+        days: 10,
+        start: midPassStart,
+      }),
+      midCtx,
+    );
+    // The partial pass is dropped; reporting resumes at the next complete one.
+    expect(mid.passes[0]?.rise_utc).toBe(second?.rise_utc);
+    expect(mid.passes[0]?.duration_seconds).toBe(second?.duration_seconds);
+    for (const p of mid.passes) {
+      expect(new Date(p.rise_utc).getTime()).toBeGreaterThan(new Date(midPassStart).getTime());
+    }
+  });
+
+  it('keeps a pass that rises exactly at start, so a reported rise_utc round-trips', async () => {
+    // Feeding a reported rise_utc back as start is the natural way to narrow a window.
+    // At that instant the satellite is above the horizon but has not been up for a full
+    // step, so it is rising, not underway — dropping it would silently lose the pass the
+    // previous call just advertised.
+    stubFetch(ISS_TLE);
+    const baseline = await getSatellitePassesTool.handler(
+      getSatellitePassesTool.input.parse({
+        norad_id: 25544,
+        ...SEATTLE,
+        days: 10,
+        start: '2024-01-01T00:00:00Z',
+      }),
+      createMockContext({ errors: getSatellitePassesTool.errors }),
+    );
+    const first = baseline.passes[0];
+    expect(first).toBeDefined();
+
+    const resumed = await getSatellitePassesTool.handler(
+      getSatellitePassesTool.input.parse({
+        norad_id: 25544,
+        ...SEATTLE,
+        days: 10,
+        start: first?.rise_utc,
+      }),
+      createMockContext({ errors: getSatellitePassesTool.errors }),
+    );
+    expect(resumed.passes[0]).toEqual(first);
+  });
+
+  it('keeps a pass that rises one step after start', async () => {
+    stubFetch(ISS_TLE);
+    const baseline = await getSatellitePassesTool.handler(
+      getSatellitePassesTool.input.parse({
+        norad_id: 25544,
+        ...SEATTLE,
+        days: 10,
+        start: '2024-01-01T00:00:00Z',
+      }),
+      createMockContext({ errors: getSatellitePassesTool.errors }),
+    );
+    const first = baseline.passes[0];
+    expect(first).toBeDefined();
+    const oneStepBefore = new Date(
+      new Date(first?.rise_utc as string).getTime() - 30_000,
+    ).toISOString();
+
+    const shifted = await getSatellitePassesTool.handler(
+      getSatellitePassesTool.input.parse({
+        norad_id: 25544,
+        ...SEATTLE,
+        days: 10,
+        start: oneStepBefore,
+      }),
+      createMockContext({ errors: getSatellitePassesTool.errors }),
+    );
+    expect(shifted.passes[0]).toEqual(first);
   });
 
   it('format() rounds pass azimuths, altitude, and duration to a readable precision', () => {
@@ -545,6 +812,48 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
       recovery: { hint: expect.stringContaining('retry') },
     });
     expectNoUpstreamLeak(err.data);
+  });
+
+  it('fails object_decayed instead of returning an empty pass list for a decayed object', async () => {
+    // SGP4 refuses an element set that no longer describes an orbit by answering null,
+    // and the scan loop used to swallow that per timestep, so the caller saw
+    // `passes: []`, indistinguishable from "nothing visible in this window". The window
+    // sits inside the element set's own validity horizon, so the object is what changed.
+    stubFetch(DECAYED_TLE);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      norad_id: 88888,
+      ...SEATTLE,
+      days: 3,
+      start: '2020-01-15T00:00:00Z',
+    });
+    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.data.reason).toBe('object_decayed');
+    expect(err.data.recovery.hint).toMatch(/still in orbit/i);
+    expect(err.message).toContain('88888');
+  });
+
+  it('blames the start, not the object, when it lies beyond the element set epoch', async () => {
+    // A start far from the epoch stops SGP4 for a satellite that is plainly still in
+    // orbit, so reporting it as a decay would be a false statement with a recovery the
+    // caller cannot act on — the actionable fact is that the element set does not reach
+    // that far.
+    stubFetch(ISS_TLE);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      norad_id: 25544,
+      ...SEATTLE,
+      days: 3,
+      start: '2040-01-01T00:00:00Z',
+    });
+    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.data.reason).toBe('time_out_of_range');
+    expect(err.message).not.toMatch(/decayed/i);
+    expect(err.data.recovery.hint).toMatch(/epoch/i);
   });
 
   it('rejects a non-positive NORAD id at schema validation', () => {
