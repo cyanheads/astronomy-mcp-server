@@ -34,11 +34,12 @@ export const stargazingPlanPrompt = prompt('astronomy_stargazing_plan', {
       '',
       `1. Resolve the location to latitude/longitude using a geocoding tool (e.g. openstreetmap_geocode), and its IANA timezone (e.g. via reference-data). This astronomy server does not geocode.`,
       `2. Call astronomy_get_rise_set with body "sun" at those coordinates to find sunset and the astronomical-dusk time (the start of the dark window).`,
-      `3. Call astronomy_get_moon_phase for the date. A bright moon washes out faint objects, so note the illuminated fraction and whether the moon is up during the dark window.`,
-      `4. Call astronomy_list_visible at those coordinates with a time just after astronomical dusk to get the ranked list of what is up, including planets and bright objects.`,
-      `5. Check cloud cover and transparency for the location and window using a weather tool (e.g. open-meteo or nws). This server computes only the sky geometry, not the weather.`,
+      `3. Call astronomy_get_moon_phase for the date and note the illuminated fraction — a bright moon washes out faint objects.`,
+      `4. Call astronomy_get_rise_set with body "moon" at those coordinates to get moonrise and moonset, then compare them against the dark window from step 2. Phase alone is geocentric and does not say whether the moon is above the observer's horizon; a full moon that has already set does not interfere.`,
+      `5. Call astronomy_list_visible at those coordinates with a time just after astronomical dusk to get the ranked list of what is up, including planets and bright objects.`,
+      `6. Check cloud cover and transparency for the location and window using a weather tool (e.g. open-meteo or nws). This server computes only the sky geometry, not the weather.`,
       '',
-      `Then summarize: the best viewing window, the standout objects and where to look (altitude/azimuth), the moon's interference, and whether the sky is expected to be clear.`,
+      `Then summarize: the best viewing window, the standout objects and where to look (altitude/azimuth), the moon's interference (both its brightness and the hours it is above the horizon), and whether the sky is expected to be clear.`,
     ].join('\n');
     return [{ role: 'user', content: { type: 'text', text } }];
   },

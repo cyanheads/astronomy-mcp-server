@@ -24,6 +24,29 @@ describe('stargazingPlanPrompt', () => {
     expect(text).toContain('astronomy_get_moon_phase');
   });
 
+  it('checks whether the moon is above the horizon, not just its phase', () => {
+    const args = stargazingPlanPrompt.args!.parse({ location: 'Mount Rainier' });
+    const messages = stargazingPlanPrompt.generate(args);
+    const block = messages[0]?.content;
+    const text = block && block.type === 'text' ? block.text : '';
+    // astronomy_get_moon_phase is geocentric, so the dark-window check needs an
+    // observer-relative rise/set call for the moon — distinct from the sun's.
+    expect(text).toContain('astronomy_get_rise_set with body "sun"');
+    expect(text).toContain('astronomy_get_rise_set with body "moon"');
+  });
+
+  it('numbers the workflow steps consecutively', () => {
+    const args = stargazingPlanPrompt.args!.parse({ location: 'Mount Rainier' });
+    const messages = stargazingPlanPrompt.generate(args);
+    const block = messages[0]?.content;
+    const text = block && block.type === 'text' ? block.text : '';
+    const numbers = text.split('\n').flatMap((l) => {
+      const m = /^(\d+)\. /.exec(l);
+      return m ? [Number(m[1])] : [];
+    });
+    expect(numbers).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
   it('defaults to tonight when no date is supplied', () => {
     const args = stargazingPlanPrompt.args!.parse({ location: 'Seattle, WA' });
     const messages = stargazingPlanPrompt.generate(args);

@@ -43,7 +43,7 @@ those are query-shaped, not URI-addressable.
 
 | Name | Description | Args |
 |---|---|---|
-| `astronomy_stargazing_plan` | Structures a "plan tonight's stargazing from <place>" workflow: resolve coordinates, list visible bodies, check moon phase + twilight windows, and (cross-server) prompt for cloud-cover via a weather server. Emits a message template that chains the tools in order. | `location` (string), `date?` (ISO date) |
+| `astronomy_stargazing_plan` | Structures a "plan tonight's stargazing from <place>" workflow: resolve coordinates, find the twilight window, check moon brightness and whether the moon is above the horizon during it, list visible bodies, and (cross-server) prompt for cloud-cover via a weather server. Emits a message template that chains the tools in order. | `location` (string), `date?` (ISO date) |
 
 One prompt. It encodes the flagship cross-tool + cross-server workflow (see Workflow
 Analysis #4) as a reusable template for clients that surface prompts.
@@ -443,10 +443,11 @@ the idea's "when does the sun set and when is it truly dark" framing.
 | # | Call | Purpose |
 |---|---|---|
 | 1 | `national-parks` *(other server)* | dark-sky park → coordinates |
-| 2 | `astronomy_get_moon_phase(date)` | is the moon up / bright? (washes out faint objects) |
-| 3 | `astronomy_get_rise_set(body="sun", …)` | astronomical-dark window |
-| 4 | `astronomy_list_visible(lat, lon, time=after dusk)` | what's up once it's dark |
-| 5 | `open-meteo` / `nws` *(other server)* | cloud cover + transparency for "good seeing?" |
+| 2 | `astronomy_get_rise_set(body="sun", …)` | astronomical-dark window |
+| 3 | `astronomy_get_moon_phase(date)` | how bright is the moon? (washes out faint objects) |
+| 4 | `astronomy_get_rise_set(body="moon", …)` | is the moon above the horizon during that window? (phase is geocentric and cannot say) |
+| 5 | `astronomy_list_visible(lat, lon, time=after dusk)` | what's up once it's dark |
+| 6 | `open-meteo` / `nws` *(other server)* | cloud cover + transparency for "good seeing?" |
 
 `astronomy_stargazing_plan` ships this chain as a prompt template.
 
@@ -545,7 +546,15 @@ recovery hint naming the valid values. Baseline errors (timeout, generic validat
 - **`format()` is content-complete on every tool.** The markdown twin renders RA/Dec, alt/az,
   magnitude, and the visibility note — not just the body name — so `content[]`-only clients
   (Claude Desktop) see the same picture as `structuredContent` clients (Claude Code). The
-  visibility note is the agent's headline; it always appears in both surfaces.
+  visibility note is the agent's headline; it always appears in both surfaces. Numbers
+  carry the same way: a value renders as a rounded display figure with its exact
+  counterpart in brackets (`RA 4.4116 h [4.411597993526305]`), dropped when the rounded
+  string already round-trips. `astronomy_list_visible` is the exception: tailing all
+  eleven coordinates per body grew that surface by ~1.7x on every call, so its scan line
+  keeps only the distance's tail — the one value whose display cannot stand in for it,
+  spanning 0.0026 AU at the Moon to 1e8 at a catalog star. Any body it lists is
+  addressable by name through `astronomy_get_sky_position`, which returns the same field
+  set with every exact value.
 - **`visibility_note` is server-computed prose, not a fabricated metric.** It's a
   deterministic rendering of real values (magnitude, altitude, compass octant from azimuth) —
   no synthetic "confidence score." The brightness adjective maps from actual magnitude
