@@ -8,10 +8,13 @@
  *   Covers every declared `ctx.fail` reason (invalid_time, invalid_time_range,
  *   incomplete_observer, invalid_step, body_not_found, horizons_unavailable,
  *   tle_not_found, object_decayed, time_out_of_range, celestrak_unavailable), the
- *   happy-path parse, a sparse upstream payload (Horizons "n.a." magnitude → null), the
- *   truncation-disclosure enrichment as it reaches a client (domain payload merged
- *   with enrichment and parsed against the effective output schema, not the bare
- *   handler return), pass-boundary detection at all three positions of `start` relative
+ *   happy-path parse, a sparse upstream payload (Horizons "n.a." magnitude → null),
+ *   rows the parse cannot turn into a point (short layout, "n.a." distance, an
+ *   unparseable position) being dropped and disclosed rather than shipped as a
+ *   schema-invalid NaN that fails the whole call, the drop and truncation caveats
+ *   composing into one notice, the truncation-disclosure enrichment as it reaches a
+ *   client (domain payload merged with enrichment and parsed against the effective
+ *   output schema, not the bare handler return), pass-boundary detection at all three positions of `start` relative
  *   to a rise (before, exactly on, mid-pass), the split between a decayed object and a
  *   start the element set cannot reach, observer alt/az inclusion, the TLE cache, and
  *   format() completeness including the empty-result branch.
@@ -380,6 +383,188 @@ describe('astronomy_get_ephemeris — happy path', () => {
     const p = result.points[0]!;
     expectExactCarried(text, p.altitude_degrees!);
     expectExactCarried(text, p.azimuth_degrees!);
+  });
+});
+
+describe('astronomy_get_ephemeris — unusable rows', () => {
+  /**
+   * A row Horizons returns without a distance is not an ephemeris point. It used to be
+   * kept with `distance_au: NaN`, which the output schema rejects — so one such row
+   * failed the whole call with a serialization error and threw away every row that had
+   * parsed. The parse now discards it the way it already discards a row with no date or
+   * no RA/Dec, and the surrounding rows survive.
+   */
+  const GOOD_ROW_00 =
+    '2024-Jan-01 00:00:00.0000, , , 45.000000, 12.500000, 9.50, 5.0, 1.500000, 0.0';
+  const GOOD_ROW_02 =
+    '2024-Jan-01 02:00:00.0000, , , 45.200000, 12.540000, 9.52, 5.0, 1.502000, 0.0';
+
+  it.each([
+    // Horizons' own layout is fixed-width per requested QUANTITIES, so a row narrower
+    // than the requested layout means the response and the parser disagree.
+    [
+      'a row shorter than the requested layout',
+      '2024-Jan-01 01:00:00.0000, , , 45.100000, 12.520000',
+    ],
+    // "n.a." is what Horizons writes for a quantity it cannot supply for a target.
+    [
+      'a distance column of "n.a."',
+      '2024-Jan-01 01:00:00.0000, , , 45.100000, 12.520000, 9.51, 5.0, n.a., 0.0',
+    ],
+    // Any column that is neither a number nor "n.a." is equally unusable — parseFloat
+    // answers NaN, which reached ra_hours through the same gap that delta reached
+    // distance_au.
+    [
+      'a position column that is neither a number nor "n.a."',
+      '2024-Jan-01 01:00:00.0000, , , ***, 12.520000, 9.51, 5.0, 1.501000, 0.0',
+    ],
+  ])('drops %s and keeps the rows that parsed', async (_label, badRow) => {
+    stubFetch(horizonsGeocentric([GOOD_ROW_00, badRow, GOOD_ROW_02]));
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2024-01-01T00:00:00Z',
+      stop: '2024-01-01T03:00:00Z',
+    });
+    const result = await getEphemerisTool.handler(input, ctx);
+    // The point that could not be built is gone; nothing schema-invalid ships in its place.
+    expect(result).toEqual(expect.schemaMatching(getEphemerisTool.output));
+    expect(result.points).toHaveLength(2);
+    expect(result.points.map((p) => p.time_utc)).toEqual([
+      '2024-01-01T00:00:00.000Z',
+      '2024-01-01T02:00:00.000Z',
+    ]);
+    for (const p of result.points) {
+      expect(Number.isFinite(p.distance_au)).toBe(true);
+      expect(Number.isFinite(p.ra_hours)).toBe(true);
+      expect(Number.isFinite(p.dec_degrees)).toBe(true);
+    }
+  });
+
+  it('discloses the dropped-row count and the resulting gap on the merged client surface', async () => {
+    // A shorter-than-requested series that says nothing reads as a complete answer, so
+    // the count and the reason both have to reach the client — on both surfaces, which
+    // is what the enrichment merge gives.
+    stubFetch(
+      horizonsGeocentric([
+        GOOD_ROW_00,
+        '2024-Jan-01 01:00:00.0000, , , 45.100000, 12.520000',
+        GOOD_ROW_02,
+      ]),
+    );
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2024-01-01T00:00:00Z',
+    });
+    const result = await getEphemerisTool.handler(input, ctx);
+    const merged = mergedEphemerisOutput(result, ctx);
+    expect(merged).toMatchObject({ truncated: false, shown: 2, cap: 200, dropped: 1 });
+    expect(merged.notice).toMatch(/Dropped 1 of the rows/);
+    expect(merged.notice).toMatch(/shorter than the requested step count/i);
+  });
+
+  it('omits dropped entirely, with no notice, when every row parsed', async () => {
+    // Horizons pads rather than shortens, so a clean parse is the overwhelmingly common
+    // case; a `dropped: 0` on every healthy call would be noise on both client surfaces.
+    // Absence is the "nothing was dropped" signal, so the healthy response is byte-for-
+    // byte what it was before the discard path existed.
+    stubFetch(horizonsGeocentric([GOOD_ROW_00, GOOD_ROW_02]));
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2024-01-01T00:00:00Z',
+    });
+    const result = await getEphemerisTool.handler(input, ctx);
+    const merged = mergedEphemerisOutput(result, ctx);
+    expect(merged).toMatchObject({ truncated: false, shown: 2, cap: 200 });
+    expect(merged.notice).toBeUndefined();
+    expect('dropped' in merged).toBe(false);
+    expect('dropped' in getEnrichment(ctx)).toBe(false);
+  });
+
+  it('keeps a row whose magnitude column is unparseable, reporting the magnitude as null', async () => {
+    // Magnitude is already nullable for Horizons' own "n.a.", so an unusable magnitude
+    // token is a hole in an optional field, not a reason to discard a row that carries
+    // a real position and distance — and never a reason to fail the whole call.
+    stubFetch(
+      horizonsGeocentric([
+        '2024-Jan-01 00:00:00.0000, , , 45.000000, 12.500000, ***, 5.0, 1.500000, 0.0',
+      ]),
+    );
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '433;' });
+    const result = await getEphemerisTool.handler(input, ctx);
+    expect(result).toEqual(expect.schemaMatching(getEphemerisTool.output));
+    expect(result.points).toHaveLength(1);
+    expect(result.points[0]?.magnitude).toBeNull();
+    expect(result.points[0]?.distance_au).toBeCloseTo(1.5, 5);
+    expect('dropped' in getEnrichment(ctx)).toBe(false);
+  });
+
+  it('carries both the retrieval loop and the dropped-row caveat in one notice when truncated', async () => {
+    // `notice` is last-wins across enrichment writers, so the two caveats have to be
+    // composed into a single string or the truncation guidance silently erases the
+    // dropped-row disclosure (or the reverse). The counts have to stay mutually
+    // consistent too: `shown` is the cap, `dropped` counts only the rows the cap let
+    // the parse reach, and the two together are the number of rows examined.
+    const rows: string[] = [];
+    for (let i = 0; i < 250; i++) {
+      const hh = String(i % 24).padStart(2, '0');
+      rows.push(`2024-Jan-01 ${hh}:00:00.0000, , , 45.000000, 12.500000, 9.50, 5.0, 1.500000, 0.0`);
+    }
+    rows.splice(5, 0, '2024-Jan-01 05:30:00.0000, , , 45.000000, 12.500000');
+    stubFetch(horizonsGeocentric(rows));
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2024-01-01T00:00:00Z',
+      step: '10m',
+    });
+    const result = await getEphemerisTool.handler(input, ctx);
+    const merged = mergedEphemerisOutput(result, ctx);
+    expect(merged).toMatchObject({ truncated: true, shown: 200, cap: 200, dropped: 1 });
+    expect(result.points).toHaveLength(merged.shown);
+    expect(merged.notice).toMatch(/same step/i);
+    expect(merged.notice).toMatch(/dropped/i);
+  });
+
+  it('fails horizons_unavailable when no row carries a distance, not a serialization error', async () => {
+    // The whole-response failure the caller sees must be the tool's own declared
+    // contract with an actionable hint, not a -32007 from a sentinel that escaped
+    // the parser.
+    stubFetch(
+      horizonsGeocentric([
+        '2024-Jan-01 00:00:00.0000, , , 45.000000, 12.500000',
+        '2024-Jan-01 01:00:00.0000, , , 45.100000, 12.520000',
+      ]),
+    );
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '433;' });
+    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data.reason).toBe('horizons_unavailable');
+    expect(err.data.recovery.hint).toMatch(/distance/i);
+  });
+
+  it('keeps a topocentric row whose az/el is "n.a." — the distance is what makes it a point', async () => {
+    // Horizons pads a quantity it cannot supply with "n.a." rather than dropping the
+    // column, so az/el can be absent on a row that still carries a real position and
+    // distance. Alt/az is optional output; the row is not.
+    stubFetch(
+      horizonsTopocentric([
+        '2024-Jan-01 00:00:00.0000,*,m, 45.000000, 12.500000, n.a., n.a., 9.50, 5.0, 1.500000, 0.0',
+      ]),
+    );
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '433;', ...SEATTLE });
+    const result = await getEphemerisTool.handler(input, ctx);
+    expect(result.points).toHaveLength(1);
+    expect(result.points[0]?.distance_au).toBeCloseTo(1.5, 5);
+    expect(result.points[0]?.altitude_degrees).toBeUndefined();
+    expect(result.points[0]?.azimuth_degrees).toBeUndefined();
+    expect('dropped' in mergedEphemerisOutput(result, ctx)).toBe(false);
   });
 });
 

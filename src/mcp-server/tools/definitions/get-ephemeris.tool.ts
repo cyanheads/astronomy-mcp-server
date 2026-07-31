@@ -114,10 +114,18 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     truncated: z.boolean().describe('True when Horizons returned more rows than the inline cap.'),
     shown: z.number().describe('Number of ephemeris rows returned.'),
     cap: z.number().describe('The inline row cap that was applied.'),
+    dropped: z
+      .number()
+      .optional()
+      .describe(
+        'Rows Horizons returned that carried no usable time, position, or distance and were dropped. Present only when at least one row was dropped, in which case the series has gaps and is shorter than the requested step count.',
+      ),
     notice: z
       .string()
       .optional()
-      .describe('How to retrieve the omitted rows, present only when the result was truncated.'),
+      .describe(
+        'Caveats on the returned series — how to retrieve rows omitted by the cap, and whether any rows were dropped. Absent when the whole span came back intact.',
+      ),
   },
   errors: [
     {
@@ -210,7 +218,7 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     if (!STEP_PATTERN.test(input.step)) {
       throw ctx.fail(
         'invalid_step',
-        `Invalid step "${input.step}". Expected a positive count plus m, h, or d, e.g. "10m".`,
+        `Invalid step "${input.step}". Expected a positive count plus m, h, d, mo, or y, e.g. "10m".`,
         { ...ctx.recoveryFor('invalid_step') },
       );
     }
@@ -226,23 +234,37 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     });
 
     /**
-     * Emit the truncation enrichment on every call — the declared block requires
-     * `truncated`/`shown`/`cap`, so a non-truncated result must still populate them
-     * or the effective-output parse fails. INLINE_ROW_CAP mirrors the service's MAX_ROWS.
-     * The truncated branch goes through `ctx.enrich.truncated`, which writes those
-     * three fields plus the `notice` carrying the retrieval loop.
+     * `truncated`/`shown`/`cap` are required, so every call populates them or the
+     * effective-output parse fails; INLINE_ROW_CAP mirrors the service's MAX_ROWS.
+     * `dropped` rides along only when a row was discarded, which takes a response
+     * whose layout disagrees with the one the parse expects — Horizons pads a
+     * quantity it cannot supply with "n.a." rather than shortening the row — so a
+     * `0` on every healthy call would be noise on the advertised surface.
+     *
+     * Both caveats land in `notice`, which is last-wins across enrichment writers, so
+     * they are joined and written once. Two writers would leave the later one erasing
+     * the earlier.
      */
+    const caveats: string[] = [];
     if (result.truncated) {
       // A truncated result is a full page, so its last row is the exact resume instant.
       const resumeFrom = result.points.at(-1)?.timeUtc;
-      ctx.enrich.truncated({
-        shown: result.points.length,
-        cap: INLINE_ROW_CAP,
-        guidance: `Capped at ${INLINE_ROW_CAP} rows${resumeFrom ? `, ending at ${resumeFrom}` : ''}. To retrieve the omitted samples, re-call with start set to that instant, or split the requested range into smaller adjacent spans; keep the same step either way and repeat until truncated is false. Widening the step is not equivalent — it discards samples the original range asked for.`,
-      });
-    } else {
-      ctx.enrich({ truncated: false, shown: result.points.length, cap: INLINE_ROW_CAP });
+      caveats.push(
+        `Capped at ${INLINE_ROW_CAP} rows${resumeFrom ? `, ending at ${resumeFrom}` : ''}. To retrieve the omitted samples, re-call with start set to that instant, or split the requested range into smaller adjacent spans; keep the same step either way and repeat until truncated is false. Widening the step is not equivalent — it discards samples the original range asked for.`,
+      );
     }
+    if (result.dropped > 0) {
+      caveats.push(
+        `Dropped ${result.dropped} of the rows Horizons returned — no usable time, position, or distance — so this series is shorter than the requested step count and has a gap where each dropped row would have been.`,
+      );
+    }
+    ctx.enrich({
+      truncated: result.truncated,
+      shown: result.points.length,
+      cap: INLINE_ROW_CAP,
+      ...(result.dropped > 0 ? { dropped: result.dropped } : {}),
+    });
+    if (caveats.length > 0) ctx.enrich.notice(caveats.join(' '));
 
     const out: EphemerisOutputType = {
       designation: result.designation,

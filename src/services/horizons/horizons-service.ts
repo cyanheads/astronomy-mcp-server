@@ -147,6 +147,7 @@ export class HorizonsService {
 
     const points: EphemerisPoint[] = [];
     let truncated = false;
+    let dropped = 0;
     for (const row of rows) {
       if (points.length >= MAX_ROWS) {
         truncated = true;
@@ -154,18 +155,19 @@ export class HorizonsService {
       }
       const point = this.parseRow(row, hasObserver);
       if (point) points.push(point);
+      else dropped++;
     }
 
     if (points.length === 0) {
-      throw serviceUnavailable('JPL Horizons returned an ephemeris block with no parsable rows.', {
+      throw serviceUnavailable('JPL Horizons returned an ephemeris block with no usable rows.', {
         reason: 'horizons_unavailable',
         recovery: {
-          hint: 'The step or time span may be invalid; adjust and retry, or retry in a few minutes.',
+          hint: 'No row carried a time, a position, and a distance. Confirm the designation resolves to a single record and that the step and time span are ones Horizons accepts; if they are, retry in a few minutes.',
         },
       });
     }
 
-    return { designation, points, truncated };
+    return { designation, points, truncated, dropped };
   }
 
   /**
@@ -175,6 +177,8 @@ export class HorizonsService {
    *   geocentric  ('1,9,20'):   date, flag, flag, RA(deg), DEC(deg), APmag, S-brt, delta(AU), deldot
    *   topocentric ('1,4,9,20'): date, flag, flag, RA(deg), DEC(deg), Azimuth(deg), Elevation(deg), APmag, S-brt, delta(AU), deldot
    * Columns 1-2 are solar-presence / lunar-illumination flags, often blank.
+   * Returns null for any row that does not carry a time, a position, and a distance —
+   * such a row is not an ephemeris point, and the caller counts the discards.
    */
   private parseRow(row: string, hasObserver: boolean): EphemerisPoint | null {
     const cols = row.split(',').map((c) => c.trim());
@@ -185,10 +189,17 @@ export class HorizonsService {
     const time = this.parseHorizonsDate(dateStr);
     if (!time) return null;
 
-    // After the date + two flag columns, the angular quantities begin.
-    const numeric = cols
-      .slice(3)
-      .map((c) => (c === '' || c === 'n.a.' ? null : Number.parseFloat(c)));
+    /**
+     * After the date + two flag columns, the angular quantities begin. A column is
+     * usable only when it parses to a finite number — Horizons writes "n.a." for a
+     * quantity it cannot supply for this target, and a layout narrower than the
+     * requested one leaves trailing columns absent. Mapping every unusable column to
+     * null keeps NaN, which the output schema rejects, out of the row by construction.
+     */
+    const numeric = cols.slice(3).map((c) => {
+      const value = Number.parseFloat(c);
+      return Number.isFinite(value) ? value : null;
+    });
 
     let idx = 0;
     const ra = numeric[idx++];
@@ -204,13 +215,14 @@ export class HorizonsService {
     idx++; // s-brt column
     const delta = numeric[idx++];
 
-    if (ra == null || dec == null) return null;
+    // Distance is as load-bearing as the position: without it the row is not a point.
+    if (ra == null || dec == null || delta == null) return null;
 
     const point: EphemerisPoint = {
       timeUtc: time,
       raHours: ra / 15, // Horizons RA is in degrees; convert to sidereal hours.
       decDegrees: dec,
-      distanceAu: delta ?? Number.NaN,
+      distanceAu: delta,
       magnitude: apMag ?? null,
     };
     if (hasObserver && altitude !== null && azimuth !== null) {
