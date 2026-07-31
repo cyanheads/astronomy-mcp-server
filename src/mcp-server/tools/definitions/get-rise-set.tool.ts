@@ -8,6 +8,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
+import { num } from '@/mcp-server/tools/format-numbers.js';
 import { getEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { BODY_NAMES, type TwilightPair } from '@/services/ephemeris/types.js';
 
@@ -220,7 +221,7 @@ export const getRiseSetTool = tool('astronomy_get_rise_set', {
       const alt =
         e.transit_altitude_degrees === null
           ? ''
-          : `, max alt ${e.transit_altitude_degrees.toFixed(1)}°`;
+          : `, max alt ${num(e.transit_altitude_degrees, 1, '°')}`;
       lines.push(
         `${i + 1}. Rise ${stamp(e.rise_utc, e.rise_local)} · Set ${stamp(e.set_utc, e.set_local)} · Transit ${stamp(e.transit_utc, e.transit_local)}${alt}`,
       );

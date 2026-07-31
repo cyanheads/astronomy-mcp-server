@@ -9,6 +9,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
+import { sig } from '@/mcp-server/tools/format-numbers.js';
 import { getEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { SkyPositionOutput } from './get-sky-position.tool.js';
 
@@ -152,6 +153,14 @@ export const listVisibleTool = tool('astronomy_list_visible', {
     return out;
   },
 
+  /**
+   * The scan surface, so the one `format()` that does not tail every value with its
+   * exact counterpart: a body carries the whole `SkyPositionOutput` field set, and
+   * eleven seventeen-digit tails per body grew `content[]` by ~1.7x on every call.
+   * The distance keeps its tail, spanning 0.0026 AU at the Moon to 1e8 at a catalog
+   * star; for the rest, `astronomy_get_sky_position` takes any body listed here and
+   * returns the same field set with every exact value.
+   */
   format: (r) => {
     const lines: string[] = [
       `Sky: ${r.sky_condition} (Sun ${r.sun_altitude_degrees.toFixed(1)}°) — ${r.total_count} bodies visible`,
@@ -164,13 +173,15 @@ export const listVisibleTool = tool('astronomy_list_visible', {
       v === null ? 'n/a' : `${v.toFixed(digits)}${suffix}`;
     for (const b of r.bodies) {
       // The visibility_note is the human headline; the supporting coordinates
-      // follow on one compact, rounded line (full precision rides structuredContent).
+      // follow on one compact, rounded line.
       lines.push(`## ${b.rank}. ${b.body} — ${b.visibility_note}`);
       lines.push(
         [
           `alt ${b.horizontal.altitude_degrees.toFixed(1)}° az ${b.horizontal.azimuth_degrees.toFixed(1)}° (${b.horizontal.above_horizon ? 'above' : 'below'} horizon)`,
           `RA ${b.equatorial.ra_hours.toFixed(2)}h Dec ${b.equatorial.dec_degrees.toFixed(1)}°`,
-          `${b.equatorial.distance_au.toFixed(3)} AU`,
+          // Significant figures, not fixed decimals — `toFixed(3)` rendered the Moon
+          // as "0.003 AU", 13% high.
+          sig(b.equatorial.distance_au, 4, ' AU'),
           `mag ${orNa(b.magnitude, 1)}`,
           `⌀ ${orNa(b.angular_diameter_arcsec, 1, '″')}`,
           `phase ${orNa(b.phase_angle_degrees, 1, '°')}`,

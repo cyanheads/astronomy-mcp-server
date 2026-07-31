@@ -14,6 +14,7 @@ import { getRiseSetTool } from '@/mcp-server/tools/definitions/get-rise-set.tool
 import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import { expectExactCarried, expectRoundedDisplay } from '../helpers/content-parity.js';
 
 const SEATTLE = { latitude: 47.6062, longitude: -122.3321 };
 
@@ -56,6 +57,38 @@ describe('astronomy_get_sky_position', () => {
     expect(text).toContain('jupiter');
     expect(text).toContain('Magnitude');
     expect(text).toContain('Constellation');
+  });
+
+  it('format() keeps a rounded report while carrying every exact coordinate', async () => {
+    const ctx = createMockContext();
+    const input = getSkyPositionTool.input.parse({
+      body: 'mars',
+      ...SEATTLE,
+      time: '2024-08-01T08:00:00Z',
+    });
+    const result = await getSkyPositionTool.handler(input, ctx);
+    const block = getSkyPositionTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    // The report a human reads stays rounded at each field's chosen precision…
+    expectRoundedDisplay(text);
+    expect(text).toContain(`RA ${result.equatorial.ra_hours.toFixed(4)} h`);
+    expect(text).toContain(`altitude ${result.horizontal.altitude_degrees.toFixed(2)}°`);
+    // …and a content[]-only client can still recover what structuredContent says.
+    expectExactCarried(text, result.equatorial.ra_hours);
+    expectExactCarried(text, result.equatorial.dec_degrees);
+    expectExactCarried(text, result.equatorial.distance_au);
+    expectExactCarried(text, result.horizontal.altitude_degrees);
+    expectExactCarried(text, result.horizontal.azimuth_degrees);
+    expectExactCarried(text, result.ecliptic.longitude_degrees);
+    expectExactCarried(text, result.ecliptic.latitude_degrees);
+    if (result.magnitude !== null) expectExactCarried(text, result.magnitude);
+    if (result.angular_diameter_arcsec !== null) {
+      expectExactCarried(text, result.angular_diameter_arcsec);
+    }
+    if (result.phase_angle_degrees !== null) expectExactCarried(text, result.phase_angle_degrees);
+    if (result.illuminated_fraction !== null) {
+      expect(text).toContain(`[fraction ${result.illuminated_fraction}]`);
+    }
   });
 });
 

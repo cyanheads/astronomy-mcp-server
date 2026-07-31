@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -145,7 +145,7 @@ Agent-friendly output:
 - Preserves uncertainty — magnitude, angular diameter, phase, and illumination are `null` (not 0, not omitted) when unavailable, and `format()` renders "unavailable" rather than inventing a value
 - Server-computed visibility notes are deterministic prose from real magnitude and altitude — no synthetic confidence scores
 - Typed error contracts with recovery hints (out-of-range time, missing observer/body, unresolved designation) so callers can correct and retry
-- `format()` is content-complete on every tool — `content[]`-only clients see the same data as `structuredContent` clients
+- `format()` is content-complete on every tool — `content[]`-only clients see the same fields as `structuredContent` clients, and the same numbers: a value reads as a rounded display figure followed by its exact counterpart in brackets, e.g. `RA 4.4116 h [4.411597993526305]`, dropped when the rounding already round-trips. `astronomy_list_visible` is the one scan surface, so its per-body line keeps only the distance's exact tail; `astronomy_get_sky_position` takes any body listed there and returns the same field set with every exact value
 
 ## Getting started
 

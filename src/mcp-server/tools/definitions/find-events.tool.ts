@@ -10,6 +10,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
+import { num, pct, sig } from '@/mcp-server/tools/format-numbers.js';
 import { getEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { EVENT_BODY_NAMES, EVENT_NAMES, type EventName } from '@/services/ephemeris/types.js';
 
@@ -273,16 +274,16 @@ export const findEventsTool = tool('astronomy_find_events', {
       if (e.conjunction_kind) lines.push(`**Conjunction:** ${e.conjunction_kind}`);
       if (e.obscuration !== undefined)
         lines.push(
-          `**Obscuration:** ${e.obscuration === null ? 'unavailable' : `${(e.obscuration * 100).toFixed(1)}%`}`,
+          `**Obscuration:** ${e.obscuration === null ? 'unavailable' : pct(e.obscuration, 1)}`,
         );
       if (e.local_visible !== undefined)
         lines.push(`**Locally visible:** ${e.local_visible ? 'yes' : 'no'}`);
       if (e.elongation_degrees !== undefined)
-        lines.push(`**Elongation:** ${e.elongation_degrees.toFixed(1)}°`);
+        lines.push(`**Elongation:** ${num(e.elongation_degrees, 1, '°')}`);
       if (e.visibility) lines.push(`**Apparition:** ${e.visibility}`);
       if (e.apsis_kind) lines.push(`**Apsis:** ${e.apsis_kind}`);
-      if (e.distance_km !== undefined) lines.push(`**Distance:** ${e.distance_km.toFixed(0)} km`);
-      if (e.distance_au !== undefined) lines.push(`**Distance:** ${e.distance_au.toFixed(6)} AU`);
+      if (e.distance_km !== undefined) lines.push(`**Distance:** ${num(e.distance_km, 0, ' km')}`);
+      if (e.distance_au !== undefined) lines.push(`**Distance:** ${sig(e.distance_au, 6, ' AU')}`);
       if (e.contacts) {
         const parts = Object.entries(e.contacts)
           .filter(([, v]) => v !== null)

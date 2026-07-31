@@ -7,6 +7,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
+import { num, pct, sig } from '@/mcp-server/tools/format-numbers.js';
 import { getEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { BODY_NAMES } from '@/services/ephemeris/types.js';
 
@@ -210,23 +211,23 @@ export function formatPosition(r: SkyPositionOutputType): string {
   lines.push(`**Time (UTC):** ${r.time_utc}`);
   if (r.time_local) lines.push(`**Time (local):** ${r.time_local}`);
   lines.push(
-    `**Equatorial:** RA ${r.equatorial.ra_hours.toFixed(4)} h, Dec ${r.equatorial.dec_degrees.toFixed(4)}°, dist ${r.equatorial.distance_au.toFixed(6)} AU`,
+    `**Equatorial:** RA ${num(r.equatorial.ra_hours, 4, ' h')}, Dec ${num(r.equatorial.dec_degrees, 4, '°')}, dist ${sig(r.equatorial.distance_au, 6, ' AU')}`,
   );
   lines.push(
-    `**Horizontal:** altitude ${r.horizontal.altitude_degrees.toFixed(2)}°, azimuth ${r.horizontal.azimuth_degrees.toFixed(2)}° (${r.horizontal.above_horizon ? 'above' : 'below'} horizon)`,
+    `**Horizontal:** altitude ${num(r.horizontal.altitude_degrees, 2, '°')}, azimuth ${num(r.horizontal.azimuth_degrees, 2, '°')} (${r.horizontal.above_horizon ? 'above' : 'below'} horizon)`,
   );
   lines.push(
-    `**Ecliptic:** longitude ${r.ecliptic.longitude_degrees.toFixed(2)}°, latitude ${r.ecliptic.latitude_degrees.toFixed(2)}°`,
+    `**Ecliptic:** longitude ${num(r.ecliptic.longitude_degrees, 2, '°')}, latitude ${num(r.ecliptic.latitude_degrees, 2, '°')}`,
   );
-  lines.push(`**Magnitude:** ${r.magnitude === null ? 'unavailable' : r.magnitude.toFixed(2)}`);
+  lines.push(`**Magnitude:** ${r.magnitude === null ? 'unavailable' : num(r.magnitude, 2)}`);
   lines.push(
-    `**Angular diameter:** ${r.angular_diameter_arcsec === null ? 'unavailable' : `${r.angular_diameter_arcsec.toFixed(2)}″`}`,
-  );
-  lines.push(
-    `**Phase angle:** ${r.phase_angle_degrees === null ? 'unavailable' : `${r.phase_angle_degrees.toFixed(2)}°`}`,
+    `**Angular diameter:** ${r.angular_diameter_arcsec === null ? 'unavailable' : num(r.angular_diameter_arcsec, 2, '″')}`,
   );
   lines.push(
-    `**Illuminated fraction:** ${r.illuminated_fraction === null ? 'unavailable' : `${(r.illuminated_fraction * 100).toFixed(1)}%`}`,
+    `**Phase angle:** ${r.phase_angle_degrees === null ? 'unavailable' : num(r.phase_angle_degrees, 2, '°')}`,
+  );
+  lines.push(
+    `**Illuminated fraction:** ${r.illuminated_fraction === null ? 'unavailable' : pct(r.illuminated_fraction, 1)}`,
   );
   lines.push(`**Constellation:** ${r.constellation.name} (${r.constellation.abbreviation})`);
   return lines.join('\n');

@@ -7,6 +7,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { num, sig } from '@/mcp-server/tools/format-numbers.js';
 import { getHorizonsService } from '@/services/horizons/horizons-service.js';
 
 /** Inline ephemeris-row cap disclosed via enrichment — mirrors HorizonsService MAX_ROWS. */
@@ -263,11 +264,11 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     lines.push(`## ${r.designation} — ${r.points.length} points`);
     for (const p of r.points) {
       const altAz =
-        p.altitude_degrees !== undefined
-          ? `, alt ${p.altitude_degrees.toFixed(1)}°, az ${p.azimuth_degrees?.toFixed(1)}°`
-          : '';
+        p.altitude_degrees === undefined
+          ? ''
+          : `, alt ${num(p.altitude_degrees, 1, '°')}, az ${p.azimuth_degrees === undefined ? 'n/a' : num(p.azimuth_degrees, 1, '°')}`;
       lines.push(
-        `- ${p.time_utc}: RA ${p.ra_hours.toFixed(4)} h, Dec ${p.dec_degrees.toFixed(4)}°, ${p.distance_au.toFixed(4)} AU, mag ${p.magnitude === null ? 'n/a' : p.magnitude.toFixed(1)}${altAz}`,
+        `- ${p.time_utc}: RA ${num(p.ra_hours, 4, ' h')}, Dec ${num(p.dec_degrees, 4, '°')}, ${sig(p.distance_au, 6, ' AU')}, mag ${p.magnitude === null ? 'n/a' : num(p.magnitude, 1)}${altAz}`,
       );
     }
     return [{ type: 'text', text: lines.join('\n') }];

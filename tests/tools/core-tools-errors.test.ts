@@ -19,6 +19,11 @@ import { getRiseSetTool } from '@/mcp-server/tools/definitions/get-rise-set.tool
 import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import {
+  displayValuesOf,
+  expectExactCarried,
+  expectRoundedDisplay,
+} from '../helpers/content-parity.js';
 
 const SEATTLE = { latitude: 47.6062, longitude: -122.3321 };
 const NORTH_POLE = { latitude: 89.9, longitude: 0 };
@@ -161,6 +166,20 @@ describe('astronomy_get_moon_phase', () => {
     // All four quarter labels render.
     expect(text).toMatch(/New Moon|First Quarter|Full Moon|Last Quarter/);
   });
+
+  it('format() shows a rounded report and still carries the exact phase numbers', async () => {
+    const ctx = createMockContext();
+    const input = getMoonPhaseTool.input.parse({ time: '2024-04-23T23:49:00Z' });
+    const result = await getMoonPhaseTool.handler(input, ctx);
+    const block = getMoonPhaseTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(displayValuesOf(text)).not.toMatch(/\.\d{4,}/);
+    expectExactCarried(text, result.phase_angle_degrees);
+    expectExactCarried(text, result.age_days);
+    // Illumination renders as a percentage, so its exact value is labelled a
+    // fraction — the two differ by 100x and must not be confused.
+    expect(text).toContain(`[fraction ${result.illuminated_fraction}]`);
+  });
 });
 
 describe('astronomy_get_rise_set — boundaries and contracts', () => {
@@ -243,9 +262,31 @@ describe('astronomy_get_rise_set — boundaries and contracts', () => {
     const block = getRiseSetTool.format!(result)[0];
     const text = block && block.type === 'text' ? block.text : '';
     expect(text).toMatch(/## moon — 3 rise\/set cycles/i);
-    // The full-precision transit altitude (e.g. 21.984839670991263) must not leak —
-    // content[] carries no number with four or more decimal places.
-    expect(text).not.toMatch(/\.\d{4,}/);
+    // The report a human reads stays rounded: no display value carries four or more
+    // decimal places. Exact values live only in bracketed tails.
+    expect(displayValuesOf(text)).not.toMatch(/\.\d{4,}/);
+  });
+
+  it('format() carries the exact transit altitude alongside the rounded one', async () => {
+    const ctx = createMockContext({ errors: getRiseSetTool.errors });
+    const input = getRiseSetTool.input.parse({
+      body: 'moon',
+      ...SEATTLE,
+      start: '2024-06-21T00:00:00Z',
+      count: 3,
+    });
+    const result = await getRiseSetTool.handler(input, ctx);
+    const block = getRiseSetTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    const lossy = result.events
+      .map((e) => e.transit_altitude_degrees)
+      .filter((v): v is number => v !== null && Number(v.toFixed(1)) !== v);
+    expect(lossy.length).toBeGreaterThan(0);
+    for (const v of lossy) {
+      expect(text).toContain(`max alt ${v.toFixed(1)}°`);
+      // A content[]-only client can recover the structured value, not just the rounding.
+      expect(text).toContain(`[${v}]`);
+    }
   });
 });
 
@@ -434,6 +475,47 @@ describe('astronomy_find_events — error contracts and validation', () => {
     const text = block && block.type === 'text' ? block.text : '';
     expect(text.split('\n')[0]).toMatch(/2 events found/i);
   });
+
+  it('format() carries the exact apsis distances alongside the rounded ones', async () => {
+    const ctx = createMockContext({ errors: findEventsTool.errors });
+    const input = findEventsTool.input.parse({
+      event: 'perigee_apogee',
+      body: 'moon',
+      start: '2024-01-01T00:00:00Z',
+      count: 2,
+    });
+    const result = await findEventsTool.handler(input, ctx);
+    const block = findEventsTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expectRoundedDisplay(text);
+    for (const e of result.events) {
+      if (e.distance_km !== undefined) {
+        expect(text).toContain(`${e.distance_km.toFixed(0)} km`);
+        expectExactCarried(text, e.distance_km);
+      }
+      if (e.distance_au !== undefined) expectExactCarried(text, e.distance_au);
+    }
+  });
+
+  it('format() renders a lunar distance in AU without collapsing it to zero', () => {
+    // A fixed-decimal AU rendering breaks across the range this tool covers: the
+    // Moon sits at ~0.0026 AU while an outer-planet opposition sits near 30.
+    const block = findEventsTool.format!({
+      events: [
+        {
+          event: 'perigee_apogee',
+          time_utc: '2024-01-13T10:57:00.000Z',
+          body: 'moon',
+          apsis_kind: 'perigee',
+          distance_km: 362266.6069,
+          distance_au: 0.0024215706172,
+        },
+      ],
+    })[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text).toContain('0.00242157 AU');
+    expect(text).toContain('[0.0024215706172]');
+  });
 });
 
 describe('astronomy_list_visible — boundaries and validation', () => {
@@ -513,9 +595,57 @@ describe('astronomy_list_visible — boundaries and validation', () => {
     // The precomputed visibility note is the per-body headline.
     const body0 = result.bodies[0]!;
     expect(text).toContain(`${body0.rank}. ${body0.body} — ${body0.visibility_note}`);
-    // No raw full-precision coordinate dump: nothing renders 4+ decimal places, and the
-    // old raw field-name labels are gone.
-    expect(text).not.toMatch(/\.\d{4,}/);
+    // No raw full-precision coordinate dump: the display values are the tool's own
+    // one-decimal rounding, and the old raw field-name labels are gone.
+    expectRoundedDisplay(text);
+    expect(displayValuesOf(text)).toContain(
+      `alt ${body0.horizontal.altitude_degrees.toFixed(1)}° az ${body0.horizontal.azimuth_degrees.toFixed(1)}°`,
+    );
     expect(text).not.toContain('above_horizon');
+  });
+
+  it('format() tails only the distance — the rest of the scan line is display-only', async () => {
+    const ctx = createMockContext();
+    const input = listVisibleTool.input.parse({
+      ...SEATTLE,
+      time: '2024-06-21T09:00:00Z',
+      include_stars: true,
+      min_altitude: -90,
+    });
+    const result = await listVisibleTool.handler(input, ctx);
+    expect(result.bodies.length).toBeGreaterThan(20);
+    const block = listVisibleTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    // Tailing all eleven coordinates per body grew this surface by ~1.7x for digits an
+    // at-a-glance list is never read for. Only the distance keeps its tail, so the
+    // bracket count never exceeds one per body.
+    const tails = text.match(/\[/g) ?? [];
+    expect(tails.length).toBeLessThanOrEqual(result.bodies.length);
+    for (const b of result.bodies) expectExactCarried(text, b.equatorial.distance_au);
+    expect(text).not.toContain('fraction ');
+    expectRoundedDisplay(text);
+  });
+
+  it('astronomy_get_sky_position carries the exact values this scan line rounds', async () => {
+    const ctx = createMockContext();
+    const time = '2024-06-21T09:00:00Z';
+    const listed = await listVisibleTool.handler(
+      listVisibleTool.input.parse({ ...SEATTLE, time, min_altitude: -90 }),
+      ctx,
+    );
+    const body = listed.bodies.find((b) => b.body === 'saturn');
+    expect(body).toBeDefined();
+    const detail = await getSkyPositionTool.handler(
+      getSkyPositionTool.input.parse({ body: 'saturn', ...SEATTLE, time }),
+      ctx,
+    );
+    // Same instant, same observer, same schema — the recovery path a content[]-only
+    // client takes when it needs more than the scan line's rounding.
+    expect(detail.equatorial.ra_hours).toBe(body!.equatorial.ra_hours);
+    const block = getSkyPositionTool.format!(detail)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expectExactCarried(text, body!.equatorial.ra_hours);
+    expectExactCarried(text, body!.horizontal.altitude_degrees);
+    expectExactCarried(text, body!.equatorial.distance_au);
   });
 });

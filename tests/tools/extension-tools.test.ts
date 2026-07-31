@@ -30,6 +30,11 @@ import { getSatellitePassesTool } from '@/mcp-server/tools/definitions/get-satel
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { initHorizonsService } from '@/services/horizons/horizons-service.js';
 import { initSatelliteService } from '@/services/satellite/satellite-service.js';
+import {
+  displayValuesOf,
+  expectExactCarried,
+  expectRoundedDisplay,
+} from '../helpers/content-parity.js';
 
 const SEATTLE = { latitude: 47.6062, longitude: -122.3321 };
 
@@ -330,6 +335,51 @@ describe('astronomy_get_ephemeris — happy path', () => {
     expect(text).toContain('433 Eros');
     expect(text).toMatch(/RA .* h, Dec/);
     expect(text).toMatch(/AU/);
+  });
+
+  it('format() renders a near-Earth distance in AU and carries every exact point value', async () => {
+    // 0.0000352417 AU is ~5,270 km — a spacecraft in low orbit, and the case a fixed
+    // 4-decimal AU rendering collapsed to "0.0000". Significant figures keep it.
+    stubFetch(
+      horizonsGeocentric([
+        '2024-Jan-01 00:00:00.0000, , , 45.123456, 12.987654, 9.53, 5.0, 0.0000352417, 0.0',
+      ]),
+    );
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '-48' });
+    const result = await getEphemerisTool.handler(input, ctx);
+    const block = getEphemerisTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    const p = result.points[0]!;
+    expect(p.distance_au.toFixed(4)).toBe('0.0000');
+    expect(text).toContain('0.0000352417 AU');
+    // The report a human reads stays rounded at each field's chosen precision, and a
+    // content[]-only client can still recover what structuredContent says.
+    expectRoundedDisplay(text);
+    expectExactCarried(text, p.ra_hours);
+    expectExactCarried(text, p.dec_degrees);
+    expectExactCarried(text, p.distance_au);
+    if (p.magnitude !== null) expectExactCarried(text, p.magnitude);
+  });
+
+  it('format() rounds the per-point alt/az of an observer ephemeris', async () => {
+    stubFetch(
+      horizonsTopocentric([
+        '2024-Jan-01 00:00:00.0000, , , 45.123456, 12.987654, 120.345679, 51.111111, 9.53, 5.0, 1.234568, 0.0',
+      ]),
+    );
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '433;', ...SEATTLE });
+    const result = await getEphemerisTool.handler(input, ctx);
+    const block = getEphemerisTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text).toContain('alt 51.1°');
+    expect(text).toContain('az 120.3°');
+    expect(text).not.toContain('undefined');
+    expectRoundedDisplay(text);
+    const p = result.points[0]!;
+    expectExactCarried(text, p.altitude_degrees!);
+    expectExactCarried(text, p.azimuth_degrees!);
   });
 });
 
@@ -709,8 +759,9 @@ describe('astronomy_get_satellite_passes — happy path', () => {
     expect(shifted.passes[0]).toEqual(first);
   });
 
-  it('format() rounds pass azimuths, altitude, and duration to a readable precision', () => {
-    // The issue's exact repro: az 230.26515812203434° must render as az 230.3°.
+  it('format() rounds pass azimuths, altitude, and duration and carries the exact values', () => {
+    // The original repro: az 230.26515812203434° must display as az 230.3°, and the
+    // exact value must still be recoverable from content[] alone.
     const block = getSatellitePassesTool.format!({
       norad_id: 25544,
       satellite_name: 'ISS (ZARYA)',
@@ -732,7 +783,14 @@ describe('astronomy_get_satellite_passes — happy path', () => {
     expect(text).toContain('az 230.3°');
     expect(text).toContain('alt 45.7°');
     expect(text).toContain('duration 372s');
-    expect(text).not.toMatch(/\.\d{4,}/);
+    // No display value carries four or more decimal places…
+    expect(displayValuesOf(text)).not.toMatch(/\.\d{4,}/);
+    // …and every rounded value still names its exact counterpart.
+    expect(text).toContain('az 230.3° [230.26515812203434]');
+    expect(text).toContain('alt 45.7° [45.6789012]');
+    expect(text).toContain('duration 372s [372.48]');
+    expectExactCarried(text, 130.98765);
+    expectExactCarried(text, 180.5555);
   });
 });
 
