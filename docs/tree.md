@@ -1,6 +1,6 @@
 # astronomy-mcp-server - Directory Structure
 
-Generated on: 2026-07-30 22:53:37
+Generated on: 2026-07-31 00:56:05
 
 ```text
 astronomy-mcp-server/
@@ -138,14 +138,15 @@ astronomy-mcp-server/
 │   │   │   └── definitions/
 │   │   │       └── body.resource.ts
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── find-events.tool.ts
-│   │           ├── get-ephemeris.tool.ts
-│   │           ├── get-moon-phase.tool.ts
-│   │           ├── get-rise-set.tool.ts
-│   │           ├── get-satellite-passes.tool.ts
-│   │           ├── get-sky-position.tool.ts
-│   │           └── list-visible.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── find-events.tool.ts
+│   │       │   ├── get-ephemeris.tool.ts
+│   │       │   ├── get-moon-phase.tool.ts
+│   │       │   ├── get-rise-set.tool.ts
+│   │       │   ├── get-satellite-passes.tool.ts
+│   │       │   ├── get-sky-position.tool.ts
+│   │       │   └── list-visible.tool.ts
+│   │       └── format-numbers.ts
 │   ├── services/
 │   │   ├── ephemeris/
 │   │   │   ├── body-data.ts
@@ -160,6 +161,8 @@ astronomy-mcp-server/
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
+│   ├── helpers/
+│   │   └── content-parity.ts
 │   ├── prompts/
 │   │   └── stargazing-plan.prompt.test.ts
 │   ├── resources/

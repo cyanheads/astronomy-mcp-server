@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-07-30
+
+content[] now carries every tool's exact numeric value alongside its rounded display (with one high-volume exception on astronomy_list_visible), and astronomy_stargazing_plan adds the observer-relative moonrise/moonset check its workflow was missing.
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-07-30
 
 astronomy_get_ephemeris dropped its truncation notice and let a lone observer coordinate, backwards time range, or malformed step reach Horizons; astronomy_get_satellite_passes reported a mid-pass start as a false acquisition time and returned an empty pass list for element sets that can't reach the requested window — all fixed.
