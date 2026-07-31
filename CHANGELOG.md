@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.3](changelog/0.2.x/0.2.3.md) — 2026-07-30
+
+astronomy_get_ephemeris no longer fails an entire call over a single Horizons row missing a distance; unusable rows are dropped and disclosed instead.
+
 ## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-07-30
 
 content[] now carries every tool's exact numeric value alongside its rounded display (with one high-volume exception on astronomy_list_visible), and astronomy_stargazing_plan adds the observer-relative moonrise/moonset check its workflow was missing.
