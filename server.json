@@ -7,6 +7,12 @@
     "source": "github"
   },
   "version": "0.2.3",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://astronomy.caseyjhand.com/mcp"
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",

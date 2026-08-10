@@ -19,6 +19,12 @@
 
 </div>
 
+<div align="center">
+
+**Public Hosted Server:** [https://astronomy.caseyjhand.com/mcp](https://astronomy.caseyjhand.com/mcp)
+
+</div>
+
 ---
 
 ## Tools
@@ -148,6 +154,23 @@ Agent-friendly output:
 - `format()` is content-complete on every tool — `content[]`-only clients see the same fields as `structuredContent` clients, and the same numbers: a value reads as a rounded display figure followed by its exact counterpart in brackets, e.g. `RA 4.4116 h [4.411597993526305]`, dropped when the rounding already round-trips. `astronomy_list_visible` is the one scan surface, so its per-body line keeps only the distance's exact tail; `astronomy_get_sky_position` takes any body listed there and returns the same field set with every exact value
 
 ## Getting started
+
+### Public Hosted Instance
+
+A public instance is available at `https://astronomy.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "astronomy-mcp-server": {
+      "type": "streamable-http",
+      "url": "https://astronomy.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file. The five core tools need no configuration; set `ASTRONOMY_ENABLE_HORIZONS` and/or `ASTRONOMY_ENABLE_SATELLITES` to `true` to register the gated extensions.
 
