@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.7](changelog/0.2.x/0.2.7.md) — 2026-08-18
+
+astronomy_get_rise_set no longer reports a set before its own rise, and fixes two related cursor/twilight bugs; astronomy_stargazing_plan anchors to the requested local night and includes stars; zoneless timestamps now resolve as UTC instead of the server's local zone.
+
 ## [0.2.6](changelog/0.2.x/0.2.6.md) — 2026-08-18
 
 astronomy_get_ephemeris now advertises an exclusive resume instant and requests refracted elevation on topocentric queries; astronomy_get_satellite_passes enforces its epoch horizon independently of the SGP4 probe.
