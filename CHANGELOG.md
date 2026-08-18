@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.6](changelog/0.2.x/0.2.6.md) — 2026-08-18
+
+astronomy_get_ephemeris now advertises an exclusive resume instant and requests refracted elevation on topocentric queries; astronomy_get_satellite_passes enforces its epoch horizon independently of the SGP4 probe.
+
 ## [0.2.5](changelog/0.2.x/0.2.5.md) — 2026-08-18
 
 astronomy_get_satellite_passes now fetches CelesTrak element sets as OMM JSON instead of legacy TLE — reaching six-digit catalog numbers — and resolves an optional `name` input to a catalog ID; a malformed GP record is now distinguished from a retryable CelesTrak outage.
