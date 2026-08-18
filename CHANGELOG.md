@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.8](changelog/0.2.x/0.2.8.md) — 2026-08-18
+
+astronomy_list_visible's content[] scan line now tails every number, not just distance, growing responses about 1.5x; astronomy_get_sky_position returns the body card inline for solar-system bodies.
+
 ## [0.2.7](changelog/0.2.x/0.2.7.md) — 2026-08-18
 
 astronomy_get_rise_set no longer reports a set before its own rise, and fixes two related cursor/twilight bugs; astronomy_stargazing_plan anchors to the requested local night and includes stars; zoneless timestamps now resolve as UTC instead of the server's local zone.
