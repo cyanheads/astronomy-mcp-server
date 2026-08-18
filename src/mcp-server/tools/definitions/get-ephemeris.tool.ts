@@ -8,6 +8,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { num, sig } from '@/mcp-server/tools/format-numbers.js';
+import { parseIsoInstant } from '@/services/ephemeris/iso-time.js';
 import { getHorizonsService } from '@/services/horizons/horizons-service.js';
 
 /** Inline ephemeris-row cap disclosed via enrichment — mirrors HorizonsService MAX_ROWS. */
@@ -131,9 +132,9 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     {
       reason: 'invalid_time',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'The start or stop timestamp is not a parseable ISO 8601 instant.',
+      when: 'The start or stop timestamp is not a parseable ISO 8601 instant, or names a calendar date that does not exist (e.g. 2026-02-30).',
       recovery:
-        'Pass start and stop as ISO 8601 UTC timestamps, e.g. 2024-01-01T00:00:00Z, then retry.',
+        'Pass start and stop as ISO 8601 UTC timestamps naming real calendar dates, e.g. 2024-01-01T00:00:00Z, then retry.',
     },
     {
       reason: 'invalid_time_range',
@@ -176,21 +177,23 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     const svc = getHorizonsService();
     /**
      * Validate caller-supplied timestamps before they reach `new Date(...).toISOString()`,
-     * which throws an opaque RangeError on an unparseable string. Deliberately not routed
-     * through the core resolveTime() — JPL Horizons covers historical and future epochs far
-     * outside its 1900–2100 high-accuracy span, so only reject genuinely unparseable input.
+     * which throws an opaque RangeError on an unparseable string, and before a day-of-month
+     * that does not exist rolls silently forward into the next month. Shares the calendar
+     * check with the core resolveTime() but deliberately not the method itself — JPL
+     * Horizons covers historical and future epochs far outside its 1900–2100 high-accuracy
+     * span, so this tool rejects unparseable and impossible dates, never a year.
      */
-    if (input.start !== undefined && Number.isNaN(new Date(input.start).getTime())) {
+    if (input.start !== undefined && parseIsoInstant(input.start) === undefined) {
       throw ctx.fail(
         'invalid_time',
-        `Invalid start "${input.start}". Expected an ISO 8601 instant, e.g. 2024-01-01T00:00:00Z.`,
+        `Invalid start "${input.start}". Expected an ISO 8601 instant naming a real calendar date, e.g. 2024-01-01T00:00:00Z.`,
         { ...ctx.recoveryFor('invalid_time') },
       );
     }
-    if (input.stop !== undefined && Number.isNaN(new Date(input.stop).getTime())) {
+    if (input.stop !== undefined && parseIsoInstant(input.stop) === undefined) {
       throw ctx.fail(
         'invalid_time',
-        `Invalid stop "${input.stop}". Expected an ISO 8601 instant, e.g. 2024-01-02T00:00:00Z.`,
+        `Invalid stop "${input.stop}". Expected an ISO 8601 instant naming a real calendar date, e.g. 2024-01-02T00:00:00Z.`,
         { ...ctx.recoveryFor('invalid_time') },
       );
     }

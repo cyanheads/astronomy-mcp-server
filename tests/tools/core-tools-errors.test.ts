@@ -5,13 +5,16 @@
  *   gates), the Zod validation rejections (out-of-range coordinates, count bounds),
  *   boundary contracts (empty visible list, circumpolar notes, multi-count
  *   pagination), and format() completeness on the tools the happy-path file does
- *   not exercise. The deterministic numeric correctness lives in the
- *   EphemerisService tests; here we assert the tool-layer contracts.
+ *   not exercise. Closes with the contracts EphemerisService raises on all five
+ *   (invalid_time, invalid_timezone, time_out_of_range), asserting each declared
+ *   `recovery` is the same string the resolver throws, and one tool's error
+ *   reaching both client surfaces. The deterministic numeric correctness lives in
+ *   the EphemerisService tests; here we assert the tool-layer contracts.
  * @module tests/tools/core-tools-errors.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { type ErrorContract, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { findEventsTool } from '@/mcp-server/tools/definitions/find-events.tool.js';
 import { getMoonPhaseTool } from '@/mcp-server/tools/definitions/get-moon-phase.tool.js';
@@ -19,6 +22,7 @@ import { getRiseSetTool } from '@/mcp-server/tools/definitions/get-rise-set.tool
 import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import { captureThrown } from '../helpers/capture-thrown.js';
 import {
   displayValuesOf,
   expectExactCarried,
@@ -40,13 +44,9 @@ describe('astronomy_get_sky_position — error contracts', () => {
       ...SEATTLE,
       time: '1850-06-01T00:00:00Z',
     });
-    const err = (() => {
-      try {
-        getSkyPositionTool.handler(input, ctx);
-      } catch (e) {
-        return e as { code?: number; data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      getSkyPositionTool.handler(input, ctx);
+    });
     expect(err?.data?.reason).toBe('time_out_of_range');
     expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
   });
@@ -74,13 +74,9 @@ describe('astronomy_get_sky_position — error contracts', () => {
   it('fails star_not_found for a name not in the catalog', () => {
     const ctx = createMockContext({ errors: getSkyPositionTool.errors });
     const input = getSkyPositionTool.input.parse({ star: 'Nonexistent Star', ...SEATTLE });
-    const err = (() => {
-      try {
-        getSkyPositionTool.handler(input, ctx);
-      } catch (e) {
-        return e as { code?: number; data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      getSkyPositionTool.handler(input, ctx);
+    });
     expect(err?.data?.reason).toBe('star_not_found');
     expect(err?.code).toBe(JsonRpcErrorCode.NotFound);
   });
@@ -131,13 +127,9 @@ describe('astronomy_get_moon_phase', () => {
   it('fails time_out_of_range outside the supported span', () => {
     const ctx = createMockContext({ errors: getMoonPhaseTool.errors });
     const input = getMoonPhaseTool.input.parse({ time: '1700-01-01T00:00:00Z' });
-    const err = (() => {
-      try {
-        getMoonPhaseTool.handler(input, ctx);
-      } catch (e) {
-        return e as { data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      getMoonPhaseTool.handler(input, ctx);
+    });
     expect(err?.data?.reason).toBe('time_out_of_range');
   });
 
@@ -155,7 +147,7 @@ describe('astronomy_get_moon_phase', () => {
   });
 
   it('format() renders the phase, illumination, age, and every quarter', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getMoonPhaseTool.errors });
     const input = getMoonPhaseTool.input.parse({ time: '2024-04-23T23:49:00Z' });
     const result = await getMoonPhaseTool.handler(input, ctx);
     const block = getMoonPhaseTool.format!(result)[0];
@@ -168,7 +160,7 @@ describe('astronomy_get_moon_phase', () => {
   });
 
   it('format() shows a rounded report and still carries the exact phase numbers', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getMoonPhaseTool.errors });
     const input = getMoonPhaseTool.input.parse({ time: '2024-04-23T23:49:00Z' });
     const result = await getMoonPhaseTool.handler(input, ctx);
     const block = getMoonPhaseTool.format!(result)[0];
@@ -190,13 +182,9 @@ describe('astronomy_get_rise_set — boundaries and contracts', () => {
       ...SEATTLE,
       start: '1899-01-01T00:00:00Z',
     });
-    const err = (() => {
-      try {
-        getRiseSetTool.handler(input, ctx);
-      } catch (e) {
-        return e as { data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      getRiseSetTool.handler(input, ctx);
+    });
     expect(err?.data?.reason).toBe('time_out_of_range');
   });
 
@@ -297,13 +285,9 @@ describe('astronomy_find_events — error contracts and validation', () => {
       event: 'solar_eclipse',
       start: '2024-01-01T00:00:00Z',
     });
-    const err = (() => {
-      try {
-        findEventsTool.handler(input, ctx);
-      } catch (e) {
-        return e as { code?: number; data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      findEventsTool.handler(input, ctx);
+    });
     expect(err?.data?.reason).toBe('observer_required');
     expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
   });
@@ -314,13 +298,9 @@ describe('astronomy_find_events — error contracts and validation', () => {
       event: 'equinox',
       start: '1880-01-01T00:00:00Z',
     });
-    const err = (() => {
-      try {
-        findEventsTool.handler(input, ctx);
-      } catch (e) {
-        return e as { data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      findEventsTool.handler(input, ctx);
+    });
     expect(err?.data?.reason).toBe('time_out_of_range');
   });
 
@@ -360,13 +340,9 @@ describe('astronomy_find_events — error contracts and validation', () => {
   ] as const)('fails body_not_supported for %s of %s', (event, body) => {
     const ctx = createMockContext({ errors: findEventsTool.errors });
     const input = findEventsTool.input.parse({ event, body, start: '2026-01-01T00:00:00Z' });
-    const err = (() => {
-      try {
-        findEventsTool.handler(input, ctx);
-      } catch (e) {
-        return e as { code?: number; message?: string; data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      findEventsTool.handler(input, ctx);
+    });
     expect(err?.data?.reason).toBe('body_not_supported');
     expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
     // No astronomy-engine internals reach the client.
@@ -522,18 +498,14 @@ describe('astronomy_list_visible — boundaries and validation', () => {
   it('fails time_out_of_range outside the supported span', () => {
     const ctx = createMockContext({ errors: listVisibleTool.errors });
     const input = listVisibleTool.input.parse({ ...SEATTLE, time: '2200-01-01T00:00:00Z' });
-    const err = (() => {
-      try {
-        listVisibleTool.handler(input, ctx);
-      } catch (e) {
-        return e as { data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      listVisibleTool.handler(input, ctx);
+    });
     expect(err?.data?.reason).toBe('time_out_of_range');
   });
 
   it('returns an empty list and the "no bodies" format when min_altitude excludes everything', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: listVisibleTool.errors });
     // No body is ever at altitude 90° from a fixed point at a single instant for
     // every body at once, so a 90° floor yields an empty above-filter set.
     const input = listVisibleTool.input.parse({
@@ -549,7 +521,7 @@ describe('astronomy_list_visible — boundaries and validation', () => {
   });
 
   it('returns the sky-condition fields in the output even when the body list is empty', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: listVisibleTool.errors });
     const input = listVisibleTool.input.parse({
       ...SEATTLE,
       time: '2024-06-21T20:00:00Z',
@@ -564,7 +536,7 @@ describe('astronomy_list_visible — boundaries and validation', () => {
   });
 
   it('format() opens with the sky-condition header carrying sun altitude and visible count', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: listVisibleTool.errors });
     const input = listVisibleTool.input.parse({ ...SEATTLE, time: '2024-06-21T20:00:00Z' });
     const result = await listVisibleTool.handler(input, ctx);
     const block = listVisibleTool.format!(result)[0];
@@ -586,7 +558,7 @@ describe('astronomy_list_visible — boundaries and validation', () => {
   });
 
   it('format() leads each body with its visibility note and rounds the coordinates', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: listVisibleTool.errors });
     const input = listVisibleTool.input.parse({ ...SEATTLE, time: '2024-06-21T20:00:00Z' });
     const result = await listVisibleTool.handler(input, ctx);
     expect(result.bodies.length).toBeGreaterThan(0);
@@ -605,7 +577,7 @@ describe('astronomy_list_visible — boundaries and validation', () => {
   });
 
   it('format() tails only the distance — the rest of the scan line is display-only', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: listVisibleTool.errors });
     const input = listVisibleTool.input.parse({
       ...SEATTLE,
       time: '2024-06-21T09:00:00Z',
@@ -627,17 +599,16 @@ describe('astronomy_list_visible — boundaries and validation', () => {
   });
 
   it('astronomy_get_sky_position carries the exact values this scan line rounds', async () => {
-    const ctx = createMockContext();
     const time = '2024-06-21T09:00:00Z';
     const listed = await listVisibleTool.handler(
       listVisibleTool.input.parse({ ...SEATTLE, time, min_altitude: -90 }),
-      ctx,
+      createMockContext({ errors: listVisibleTool.errors }),
     );
     const body = listed.bodies.find((b) => b.body === 'saturn');
     expect(body).toBeDefined();
     const detail = await getSkyPositionTool.handler(
       getSkyPositionTool.input.parse({ body: 'saturn', ...SEATTLE, time }),
-      ctx,
+      createMockContext({ errors: getSkyPositionTool.errors }),
     );
     // Same instant, same observer, same schema — the recovery path a content[]-only
     // client takes when it needs more than the scan line's rounding.
@@ -647,5 +618,254 @@ describe('astronomy_list_visible — boundaries and validation', () => {
     expectExactCarried(text, body!.equatorial.ra_hours);
     expectExactCarried(text, body!.horizontal.altitude_degrees);
     expectExactCarried(text, body!.equatorial.distance_au);
+  });
+});
+
+/**
+ * `resolveTime()` is shared by all five core tools, so the calendar-validity check lands
+ * in one place — but each tool reaches it through its own input field (`time` on three,
+ * `start` on two), and a tool that forgot to route through the resolver would not be
+ * caught by a service-level test. One case per tool pins the fan-out.
+ */
+describe('core tools — impossible calendar dates', () => {
+  const IMPOSSIBLE = '2026-02-30T00:00:00Z';
+
+  it('astronomy_get_sky_position rejects an impossible date in time', () => {
+    const ctx = createMockContext({ errors: getSkyPositionTool.errors });
+    const input = getSkyPositionTool.input.parse({ body: 'mars', ...SEATTLE, time: IMPOSSIBLE });
+    const err = captureThrown(() => {
+      getSkyPositionTool.handler(input, ctx);
+    });
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_time');
+    expect(err?.data?.recovery?.hint).toBeTruthy();
+  });
+
+  it('astronomy_get_rise_set rejects an impossible date in start', () => {
+    const ctx = createMockContext({ errors: getRiseSetTool.errors });
+    const input = getRiseSetTool.input.parse({ body: 'sun', ...SEATTLE, start: IMPOSSIBLE });
+    const err = captureThrown(() => {
+      getRiseSetTool.handler(input, ctx);
+    });
+    expect(err?.data?.reason).toBe('invalid_time');
+  });
+
+  it('astronomy_get_moon_phase rejects an impossible date in time', () => {
+    const ctx = createMockContext({ errors: getMoonPhaseTool.errors });
+    const input = getMoonPhaseTool.input.parse({ time: IMPOSSIBLE });
+    const err = captureThrown(() => {
+      getMoonPhaseTool.handler(input, ctx);
+    });
+    expect(err?.data?.reason).toBe('invalid_time');
+  });
+
+  it('astronomy_find_events rejects an impossible date in start', () => {
+    const ctx = createMockContext({ errors: findEventsTool.errors });
+    const input = findEventsTool.input.parse({ event: 'equinox', start: IMPOSSIBLE });
+    const err = captureThrown(() => {
+      findEventsTool.handler(input, ctx);
+    });
+    expect(err?.data?.reason).toBe('invalid_time');
+  });
+
+  it('astronomy_list_visible answers the impossible date it used to normalize away', () => {
+    // The reported defect: this call succeeded and reported time_utc 2026-03-02, two days
+    // after the date the caller asked about.
+    const ctx = createMockContext({ errors: listVisibleTool.errors });
+    const input = listVisibleTool.input.parse({ ...SEATTLE, time: IMPOSSIBLE });
+    const err = captureThrown(() => {
+      listVisibleTool.handler(input, ctx);
+    });
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_time');
+    expect(err?.data?.recovery?.hint).toBeTruthy();
+  });
+
+  it('astronomy_list_visible still answers a real leap day', async () => {
+    const ctx = createMockContext({ errors: listVisibleTool.errors });
+    const input = listVisibleTool.input.parse({
+      ...SEATTLE,
+      time: '2024-02-29T12:00:00Z',
+      min_altitude: -90,
+    });
+    const result = await listVisibleTool.handler(input, ctx);
+    expect(result.bodies.length).toBeGreaterThan(0);
+    expect(result.bodies[0]?.time_utc).toBe('2024-02-29T12:00:00.000Z');
+  });
+});
+
+/** The dual-surface result `runToolContract` returns, without a direct SDK import. */
+type ToolCallResult = Awaited<ReturnType<typeof runToolContract>>;
+
+/** The error envelope a client reads off `structuredContent` on a failed call. */
+interface ToolErrorEnvelope {
+  error?: {
+    code?: number;
+    message?: string;
+    data?: { reason?: string; recovery?: { hint?: string } };
+  };
+}
+
+/** Read the `structuredContent.error` surface of a `CallToolResult`. */
+function errorEnvelope(result: ToolCallResult): ToolErrorEnvelope['error'] {
+  return (result.structuredContent as ToolErrorEnvelope | undefined)?.error;
+}
+
+/** Read the `content[0]` text surface of a `CallToolResult`. */
+function firstText(result: ToolCallResult): string {
+  const block = result.content[0];
+  return block && block.type === 'text' ? block.text : '';
+}
+
+/** The `recovery` string a definition declares for one of its contract reasons. */
+function declaredRecovery(errors: readonly ErrorContract[] | undefined, reason: string): string {
+  const entry = errors?.find((e) => e.reason === reason);
+  if (!entry) throw new Error(`No contract entry declares reason "${reason}".`);
+  return entry.recovery;
+}
+
+/** One core tool, with everything needed to drive its handler through the resolvers. */
+interface CoreToolCase {
+  /** Parse `raw` against this tool's input schema and run its handler on a wired ctx. */
+  call: (raw: Record<string, unknown>) => unknown;
+  errors: readonly ErrorContract[] | undefined;
+  name: string;
+  /** The input field this tool routes into `resolveTime()`. */
+  timeField: 'time' | 'start';
+  /** The smallest input that reaches the resolvers, minus the field under test. */
+  valid: Record<string, unknown>;
+}
+
+const CORE_TOOL_CASES: CoreToolCase[] = [
+  {
+    name: 'astronomy_get_sky_position',
+    errors: getSkyPositionTool.errors,
+    call: (raw) =>
+      getSkyPositionTool.handler(
+        getSkyPositionTool.input.parse(raw),
+        createMockContext({ errors: getSkyPositionTool.errors }),
+      ),
+    valid: { body: 'mars', ...SEATTLE },
+    timeField: 'time',
+  },
+  {
+    name: 'astronomy_get_rise_set',
+    errors: getRiseSetTool.errors,
+    call: (raw) =>
+      getRiseSetTool.handler(
+        getRiseSetTool.input.parse(raw),
+        createMockContext({ errors: getRiseSetTool.errors }),
+      ),
+    valid: { body: 'sun', ...SEATTLE },
+    timeField: 'start',
+  },
+  {
+    name: 'astronomy_get_moon_phase',
+    errors: getMoonPhaseTool.errors,
+    call: (raw) =>
+      getMoonPhaseTool.handler(
+        getMoonPhaseTool.input.parse(raw),
+        createMockContext({ errors: getMoonPhaseTool.errors }),
+      ),
+    valid: {},
+    timeField: 'time',
+  },
+  {
+    name: 'astronomy_find_events',
+    errors: findEventsTool.errors,
+    call: (raw) =>
+      findEventsTool.handler(
+        findEventsTool.input.parse(raw),
+        createMockContext({ errors: findEventsTool.errors }),
+      ),
+    valid: { event: 'equinox' },
+    timeField: 'start',
+  },
+  {
+    name: 'astronomy_list_visible',
+    errors: listVisibleTool.errors,
+    call: (raw) =>
+      listVisibleTool.handler(
+        listVisibleTool.input.parse(raw),
+        createMockContext({ errors: listVisibleTool.errors }),
+      ),
+    valid: { ...SEATTLE },
+    timeField: 'time',
+  },
+];
+
+/**
+ * `resolveTime()` and `resolveTimezone()` take no ctx, so each hint is written at the
+ * throw site rather than resolved from the calling tool's contract. Nothing links the
+ * two, so a declared `recovery` can drift into documenting a next move no client is
+ * ever handed — or, as here, a reachable reason can go undeclared entirely. Each case
+ * asserts the declared string and the thrown hint are the same string.
+ */
+describe.each(CORE_TOOL_CASES)('$name — service-raised contracts', (c) => {
+  it('declares the invalid_time hint resolveTime() throws', () => {
+    const err = captureThrown(() => {
+      c.call({ ...c.valid, [c.timeField]: '2026-02-30T00:00:00Z' });
+    });
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_time');
+    expect(err?.data?.recovery?.hint).toBe(declaredRecovery(c.errors, 'invalid_time'));
+  });
+
+  it('declares the invalid_timezone hint resolveTimezone() throws', () => {
+    const err = captureThrown(() => {
+      c.call({ ...c.valid, timezone: 'Mars/Olympus_Mons' });
+    });
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_timezone');
+    expect(err?.data?.recovery?.hint).toBe(declaredRecovery(c.errors, 'invalid_timezone'));
+  });
+
+  it('leaves time_out_of_range on the wire unchanged', () => {
+    const err = captureThrown(() => {
+      c.call({ ...c.valid, [c.timeField]: '1850-01-01T00:00:00Z' });
+    });
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('time_out_of_range');
+    expect(err?.data?.recovery?.hint).toBe('Use a date between 1900 and 2100.');
+  });
+
+  it('still answers a real instant in a known zone', async () => {
+    const result = await c.call({
+      ...c.valid,
+      [c.timeField]: '2024-04-08T18:00:00Z',
+      timezone: 'America/Los_Angeles',
+    });
+    expect(result).toBeDefined();
+  });
+});
+
+/**
+ * Clients split on which surface they forward: structuredContent-only clients read
+ * `data.recovery.hint`, format()-only clients read the `Recovery:` line. A declared
+ * contract is only worth its words if both surfaces carry it.
+ */
+describe('astronomy_list_visible — invalid_time reaches both client surfaces', () => {
+  it('carries the declared hint in structuredContent and in content[] text', async () => {
+    const result = await runToolContract(listVisibleTool, {
+      ...SEATTLE,
+      time: '2026-02-30T00:00:00Z',
+    });
+    const hint = declaredRecovery(listVisibleTool.errors, 'invalid_time');
+
+    expect(result.isError).toBe(true);
+    expect(errorEnvelope(result)?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(errorEnvelope(result)?.data?.reason).toBe('invalid_time');
+    expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
+    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+  });
+
+  it('answers a real instant without an error envelope', async () => {
+    const result = await runToolContract(listVisibleTool, {
+      ...SEATTLE,
+      time: '2024-04-08T18:00:00Z',
+      min_altitude: -90,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(errorEnvelope(result)).toBeUndefined();
   });
 });

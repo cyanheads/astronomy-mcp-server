@@ -22,8 +22,8 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { type ErrorContract, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   type EphemerisOutputType,
@@ -33,6 +33,7 @@ import { getSatellitePassesTool } from '@/mcp-server/tools/definitions/get-satel
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { initHorizonsService } from '@/services/horizons/horizons-service.js';
 import { initSatelliteService } from '@/services/satellite/satellite-service.js';
+import { captureRejected } from '../helpers/capture-thrown.js';
 import {
   displayValuesOf,
   expectExactCarried,
@@ -128,7 +129,7 @@ function expectNoUpstreamLeak(data: unknown): void {
  */
 function mergedEphemerisOutput(domain: EphemerisOutputType, ctx: Context) {
   return getEphemerisTool.output
-    .extend(getEphemerisTool.enrichment)
+    .extend(getEphemerisTool.enrichment!)
     .parse({ ...domain, ...getEnrichment(ctx) });
 }
 
@@ -194,7 +195,7 @@ describe('astronomy_get_ephemeris — happy path', () => {
     // lands undefined → distance_au NaN → SerializationError. With observer the layout is
     // date,flag,flag,RA,Dec,Az,El,APmag,S-brt,delta,deldot.
     const fetchSpy = vi.fn(
-      async () =>
+      async (_url: string | URL) =>
         new Response(
           horizonsTopocentric([
             '2024-Jan-01 00:00:00.0000, , , 45.000000, 12.500000, 180.000000, 30.000000, 9.50, 5.0, 1.500000, 0.0',
@@ -222,7 +223,7 @@ describe('astronomy_get_ephemeris — happy path', () => {
 
   it('omits the az/el quantity for a geocentric call (QUANTITIES 1,9,20)', async () => {
     const fetchSpy = vi.fn(
-      async () =>
+      async (_url: string | URL) =>
         new Response(
           horizonsGeocentric([
             '2024-Jan-01 00:00:00.0000, , , 45.000000, 12.500000, 9.50, 5.0, 1.500000, 0.0',
@@ -541,11 +542,11 @@ describe('astronomy_get_ephemeris — unusable rows', () => {
     );
     const ctx = createMockContext({ errors: getEphemerisTool.errors });
     const input = getEphemerisTool.input.parse({ designation: '433;' });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
     expect(err).toBeInstanceOf(McpError);
-    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-    expect(err.data.reason).toBe('horizons_unavailable');
-    expect(err.data.recovery.hint).toMatch(/distance/i);
+    expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err?.data?.reason).toBe('horizons_unavailable');
+    expect(err?.data?.recovery?.hint).toMatch(/distance/i);
   });
 
   it('keeps a topocentric row whose az/el is "n.a." — the distance is what makes it a point', async () => {
@@ -573,18 +574,18 @@ describe('astronomy_get_ephemeris — error contracts', () => {
     stubFetch('No matches found for the requested object.');
     const ctx = createMockContext({ errors: getEphemerisTool.errors });
     const input = getEphemerisTool.input.parse({ designation: 'ZZZ Nonexistent' });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-    expect(err.data.reason).toBe('body_not_found');
-    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('body_not_found');
+    expect(err?.code).toBe(JsonRpcErrorCode.NotFound);
   });
 
   it('fails horizons_unavailable when the response has no ephemeris block', async () => {
     stubFetch('Garbled response with no SOE marker and nothing parseable.');
     const ctx = createMockContext({ errors: getEphemerisTool.errors });
     const input = getEphemerisTool.input.parse({ designation: '433 Eros' });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-    expect(err.data.reason).toBe('horizons_unavailable');
-    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('horizons_unavailable');
+    expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
   });
 
   it('fails horizons_unavailable when the block has no parsable rows', async () => {
@@ -592,8 +593,8 @@ describe('astronomy_get_ephemeris — error contracts', () => {
     stubFetch(horizonsGeocentric(['x, y']));
     const ctx = createMockContext({ errors: getEphemerisTool.errors });
     const input = getEphemerisTool.input.parse({ designation: '433 Eros' });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-    expect(err.data.reason).toBe('horizons_unavailable');
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('horizons_unavailable');
   });
 
   it('maps a Horizons HTTP failure to horizons_unavailable without leaking HTTP internals', async () => {
@@ -604,26 +605,26 @@ describe('astronomy_get_ephemeris — error contracts', () => {
     stubFetchThrowsUpstream();
     const ctx = createMockContext({ errors: getEphemerisTool.errors });
     const input = getEphemerisTool.input.parse({ designation: '433;' });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-    expect(err.data).toEqual({
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err?.data).toEqual({
       reason: 'horizons_unavailable',
       recovery: { hint: expect.stringContaining('retry') },
     });
-    expectNoUpstreamLeak(err.data);
+    expectNoUpstreamLeak(err?.data);
   });
 
   it('maps a Horizons fetch timeout to horizons_unavailable, not the framework Timeout code', async () => {
     stubFetchThrowsTimeout();
     const ctx = createMockContext({ errors: getEphemerisTool.errors });
     const input = getEphemerisTool.input.parse({ designation: '433;' });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-    expect(err.data).toEqual({
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err?.data).toEqual({
       reason: 'horizons_unavailable',
       recovery: { hint: expect.stringContaining('retry') },
     });
-    expectNoUpstreamLeak(err.data);
+    expectNoUpstreamLeak(err?.data);
   });
 
   it('rejects an empty designation at schema validation', () => {
@@ -638,9 +639,9 @@ describe('astronomy_get_ephemeris — error contracts', () => {
     vi.stubGlobal('fetch', fetchSpy);
     const ctx = createMockContext({ errors: getEphemerisTool.errors });
     const input = getEphemerisTool.input.parse({ designation: '433;', start: 'not-a-date' });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
-    expect(err.data.reason).toBe('invalid_time');
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_time');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -653,9 +654,9 @@ describe('astronomy_get_ephemeris — error contracts', () => {
       start: '2024-01-01T00:00:00Z',
       stop: 'not-a-date',
     });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
-    expect(err.data.reason).toBe('invalid_time');
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_time');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -670,10 +671,10 @@ describe('astronomy_get_ephemeris — error contracts', () => {
       designation: '433;',
       latitude: SEATTLE.latitude,
     });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
-    expect(err.data.reason).toBe('incomplete_observer');
-    expect(err.data.recovery.hint).toMatch(/latitude and longitude together/i);
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('incomplete_observer');
+    expect(err?.data?.recovery?.hint).toMatch(/latitude and longitude together/i);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -685,9 +686,9 @@ describe('astronomy_get_ephemeris — error contracts', () => {
       designation: '433;',
       longitude: SEATTLE.longitude,
     });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
-    expect(err.data.reason).toBe('incomplete_observer');
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('incomplete_observer');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -700,9 +701,9 @@ describe('astronomy_get_ephemeris — error contracts', () => {
       start: '2024-01-02T00:00:00Z',
       stop: '2024-01-01T00:00:00Z',
     });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
-    expect(err.data.reason).toBe('invalid_time_range');
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_time_range');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -715,8 +716,8 @@ describe('astronomy_get_ephemeris — error contracts', () => {
       start: '2024-01-01T00:00:00Z',
       stop: '2024-01-01T00:00:00Z',
     });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-    expect(err.data.reason).toBe('invalid_time_range');
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('invalid_time_range');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -725,9 +726,9 @@ describe('astronomy_get_ephemeris — error contracts', () => {
     vi.stubGlobal('fetch', fetchSpy);
     const ctx = createMockContext({ errors: getEphemerisTool.errors });
     const input = getEphemerisTool.input.parse({ designation: '433;', step: 'nonsense' });
-    const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
-    expect(err.data.reason).toBe('invalid_step');
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_step');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -738,8 +739,8 @@ describe('astronomy_get_ephemeris — error contracts', () => {
       vi.stubGlobal('fetch', fetchSpy);
       const ctx = createMockContext({ errors: getEphemerisTool.errors });
       const input = getEphemerisTool.input.parse({ designation: '433;', step });
-      const err = await getEphemerisTool.handler(input, ctx).catch((e) => e);
-      expect(err.data.reason).toBe('invalid_step');
+      const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+      expect(err?.data?.reason).toBe('invalid_step');
       expect(fetchSpy).not.toHaveBeenCalled();
     },
   );
@@ -984,17 +985,17 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
     stubFetch('No GP data found');
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({ norad_id: 99999, ...SEATTLE });
-    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
-    expect(err.data.reason).toBe('tle_not_found');
-    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('tle_not_found');
+    expect(err?.code).toBe(JsonRpcErrorCode.NotFound);
   });
 
   it('fails tle_not_found on an empty CelesTrak body', async () => {
     stubFetch('   ');
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({ norad_id: 99999, ...SEATTLE });
-    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
-    expect(err.data.reason).toBe('tle_not_found');
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('tle_not_found');
   });
 
   it('maps a CelesTrak 404 to tle_not_found without leaking HTTP internals', async () => {
@@ -1008,10 +1009,10 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
     );
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({ norad_id: 999999, ...SEATTLE });
-    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
-    expect(err.data.reason).toBe('tle_not_found');
-    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
-    expect(err.data).toEqual({
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('tle_not_found');
+    expect(err?.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err?.data).toEqual({
       reason: 'tle_not_found',
       recovery: { hint: expect.stringContaining('celestrak.org') },
     });
@@ -1021,9 +1022,9 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
     stubFetch('some text that is neither an error sentinel nor a two-line element set');
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({ norad_id: 25544, ...SEATTLE });
-    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
-    expect(err.data.reason).toBe('celestrak_unavailable');
-    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('celestrak_unavailable');
+    expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
   });
 
   it('maps a CelesTrak HTTP failure to celestrak_unavailable without leaking HTTP internals', async () => {
@@ -1033,13 +1034,13 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
     stubFetchThrowsUpstream();
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({ norad_id: 25544, ...SEATTLE });
-    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-    expect(err.data).toEqual({
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err?.data).toEqual({
       reason: 'celestrak_unavailable',
       recovery: { hint: expect.stringContaining('retry') },
     });
-    expectNoUpstreamLeak(err.data);
+    expectNoUpstreamLeak(err?.data);
   });
 
   it('maps a CelesTrak fetch timeout to celestrak_unavailable, not tle_not_found', async () => {
@@ -1048,13 +1049,13 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
     stubFetchThrowsTimeout();
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({ norad_id: 25544, ...SEATTLE });
-    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-    expect(err.data).toEqual({
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err?.data).toEqual({
       reason: 'celestrak_unavailable',
       recovery: { hint: expect.stringContaining('retry') },
     });
-    expectNoUpstreamLeak(err.data);
+    expectNoUpstreamLeak(err?.data);
   });
 
   it('fails object_decayed instead of returning an empty pass list for a decayed object', async () => {
@@ -1070,12 +1071,12 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
       days: 3,
       start: '2020-01-15T00:00:00Z',
     });
-    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
     expect(err).toBeInstanceOf(McpError);
-    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
-    expect(err.data.reason).toBe('object_decayed');
-    expect(err.data.recovery.hint).toMatch(/still in orbit/i);
-    expect(err.message).toContain('88888');
+    expect(err?.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err?.data?.reason).toBe('object_decayed');
+    expect(err?.data?.recovery?.hint).toMatch(/still in orbit/i);
+    expect(err?.message).toContain('88888');
   });
 
   it('blames the start, not the object, when it lies beyond the element set epoch', async () => {
@@ -1091,12 +1092,12 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
       days: 3,
       start: '2040-01-01T00:00:00Z',
     });
-    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
     expect(err).toBeInstanceOf(McpError);
-    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
-    expect(err.data.reason).toBe('time_out_of_range');
-    expect(err.message).not.toMatch(/decayed/i);
-    expect(err.data.recovery.hint).toMatch(/epoch/i);
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('time_out_of_range');
+    expect(err?.message).not.toMatch(/decayed/i);
+    expect(err?.data?.recovery?.hint).toMatch(/epoch/i);
   });
 
   it('rejects a non-positive NORAD id at schema validation', () => {
@@ -1125,9 +1126,9 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
       ...SEATTLE,
       start: 'not-a-date',
     });
-    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
-    expect(err.data.reason).toBe('invalid_time');
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_time');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -1140,9 +1141,170 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
       ...SEATTLE,
       start: '1850-01-01T00:00:00Z',
     });
-    const err = await getSatellitePassesTool.handler(input, ctx).catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
-    expect(err.data.reason).toBe('time_out_of_range');
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('time_out_of_range');
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+/** The dual-surface result `runToolContract` returns, without a direct SDK import. */
+type ToolCallResult = Awaited<ReturnType<typeof runToolContract>>;
+
+/** The error envelope a client reads off `structuredContent` on a failed call. */
+interface ToolErrorEnvelope {
+  error?: {
+    code?: number;
+    message?: string;
+    data?: { reason?: string; recovery?: { hint?: string } };
+  };
+}
+
+/** Read the `structuredContent.error` surface of a `CallToolResult`. */
+function errorEnvelope(result: ToolCallResult): ToolErrorEnvelope['error'] {
+  return (result.structuredContent as ToolErrorEnvelope | undefined)?.error;
+}
+
+/** Read the `content[0]` text surface of a `CallToolResult`. */
+function firstText(result: ToolCallResult): string {
+  const block = result.content[0];
+  return block && block.type === 'text' ? block.text : '';
+}
+
+/** The `recovery` string a definition declares for one of its contract reasons. */
+function declaredRecovery(errors: readonly ErrorContract[] | undefined, reason: string): string {
+  const entry = errors?.find((e) => e.reason === reason);
+  if (!entry) throw new Error(`No contract entry declares reason "${reason}".`);
+  return entry.recovery;
+}
+
+describe('astronomy_get_satellite_passes — invalid_time recovery reaches both surfaces', () => {
+  it('carries the declared hint in structuredContent and in content[] text', async () => {
+    // Clients split on which surface they forward: structuredContent-only clients read
+    // data.recovery.hint, format()-only clients read the Recovery: line. A hint on one
+    // surface and not the other leaves half the clients with no next move.
+    const fetchSpy = vi.fn(async () => new Response(ISS_TLE, { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await runToolContract(getSatellitePassesTool, {
+      norad_id: 25544,
+      ...SEATTLE,
+      start: 'not-a-date',
+    });
+    const hint = declaredRecovery(getSatellitePassesTool.errors, 'invalid_time');
+
+    expect(result.isError).toBe(true);
+    expect(errorEnvelope(result)?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(errorEnvelope(result)?.data?.reason).toBe('invalid_time');
+    expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
+    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps the time_out_of_range hint on both surfaces', async () => {
+    // The branch two lines below invalid_time in the same resolver already carried its
+    // hint; a fix scoped to invalid_time must leave it alone.
+    const fetchSpy = vi.fn(async () => new Response(ISS_TLE, { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await runToolContract(getSatellitePassesTool, {
+      norad_id: 25544,
+      ...SEATTLE,
+      start: '1850-01-01T00:00:00Z',
+    });
+    expect(errorEnvelope(result)?.data?.reason).toBe('time_out_of_range');
+    expect(errorEnvelope(result)?.data?.recovery?.hint).toBe('Use a date between 1900 and 2100.');
+    expect(firstText(result)).toContain('Recovery: Use a date between 1900 and 2100.');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects an impossible calendar date in start before any TLE fetch', async () => {
+    const fetchSpy = vi.fn(async () => new Response(ISS_TLE, { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      norad_id: 25544,
+      ...SEATTLE,
+      start: '2026-02-30T00:00:00Z',
+    });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_time');
+    expect(err?.data?.recovery?.hint).toBeTruthy();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('astronomy_get_ephemeris — calendar validity without a year range', () => {
+  /** A one-row Horizons block, enough for the handler to return a parsed point. */
+  function stubOnePoint(): ReturnType<typeof vi.fn> {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          horizonsGeocentric([
+            '2024-Jan-01 00:00:00.0000, , , 45.000000, 12.500000, 9.50, 5.0, 1.500000, 0.0',
+          ]),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+    return fetchSpy;
+  }
+
+  it.each(['2026-02-30T00:00:00Z', '2023-02-29T00:00:00Z', '2026-04-31T00:00:00Z'])(
+    'rejects the impossible start %s with invalid_time',
+    async (start) => {
+      const fetchSpy = stubOnePoint();
+      const ctx = createMockContext({ errors: getEphemerisTool.errors });
+      const input = getEphemerisTool.input.parse({ designation: '433;', start });
+      const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+      expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err?.data?.reason).toBe('invalid_time');
+      expect(err?.data?.recovery?.hint).toBeTruthy();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects an impossible stop with invalid_time', async () => {
+    const fetchSpy = stubOnePoint();
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2026-02-01T00:00:00Z',
+      stop: '2026-02-30T00:00:00Z',
+    });
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('invalid_time');
+    expect(err?.message).toContain('stop');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Horizons covers epochs far outside the in-process engine's 1900–2100 high-accuracy
+   * span, so this tool deliberately validates parseability and calendar validity only.
+   * Tightening calendar validity must not smuggle in a year range.
+   */
+  it.each([
+    ['1850-01-01T00:00:00Z', '1850-01-02T00:00:00Z'],
+    ['2200-01-01T00:00:00Z', '2200-01-02T00:00:00Z'],
+    ['+002026-01-01T00:00:00Z', '+002026-01-02T00:00:00Z'],
+  ])('accepts the out-of-engine-span span %s → %s', async (start, stop) => {
+    const fetchSpy = stubOnePoint();
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '433;', start, stop });
+    const result = await getEphemerisTool.handler(input, ctx);
+    expect(result.points).toHaveLength(1);
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it('accepts a real leap day on both ends of the span', async () => {
+    const fetchSpy = stubOnePoint();
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2000-02-29T00:00:00Z',
+      stop: '2024-02-29T00:00:00Z',
+    });
+    const result = await getEphemerisTool.handler(input, ctx);
+    expect(result.points).toHaveLength(1);
+    expect(fetchSpy).toHaveBeenCalled();
   });
 });

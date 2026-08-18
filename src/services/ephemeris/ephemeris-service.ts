@@ -46,6 +46,7 @@ import {
   Seasons,
 } from 'astronomy-engine';
 import { BODY_META } from './body-data.js';
+import { parseIsoInstant } from './iso-time.js';
 import { STAR_CATALOG } from './star-catalog.js';
 import type {
   BodyName,
@@ -158,15 +159,25 @@ export class EphemerisService {
   /**
    * Parse an optional ISO 8601 instant (defaults to now) into a JS Date,
    * validating against astronomy-engine's high-accuracy span (≈1900–2100).
-   * Throws `invalidParams` with reason `time_out_of_range` outside it.
+   * Throws `invalidParams` with reason `invalid_time` when the string is not a
+   * strict ISO 8601 instant or names a day that does not exist, and with reason
+   * `time_out_of_range` outside the span.
+   *
+   * Both throws carry their recovery hint inline: this method takes no `ctx`, so
+   * `ctx.recoveryFor()` is unavailable and the hint has to be written at the throw
+   * site to reach `data.recovery.hint` and the `Recovery:` line mirrored into
+   * `content[]`.
    */
   resolveTime(time?: string): Date {
-    const date = time ? new Date(time) : new Date();
-    if (Number.isNaN(date.getTime())) {
+    const date = time ? parseIsoInstant(time) : new Date();
+    if (date === undefined) {
       throw invalidParams(
-        `Invalid time "${time}". Expected an ISO 8601 instant, e.g. 2024-04-08T18:00:00Z.`,
+        `Invalid time "${time}". Expected an ISO 8601 instant naming a real calendar date, e.g. 2024-04-08T18:00:00Z.`,
         {
           reason: 'invalid_time',
+          recovery: {
+            hint: 'Pass the timestamp as an ISO 8601 UTC instant with a real calendar date, e.g. 2024-01-01T00:00:00Z, then retry.',
+          },
         },
       );
     }

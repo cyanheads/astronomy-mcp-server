@@ -11,6 +11,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { EphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import type { EventBodyName, EventName } from '@/services/ephemeris/types.js';
+import { captureThrown } from '../helpers/capture-thrown.js';
 
 let svc: EphemerisService;
 
@@ -448,74 +449,129 @@ describe('input validation', () => {
   });
 
   it('throws time_out_of_range above the high-accuracy span (year > 2100)', () => {
-    const err = (() => {
-      try {
-        svc.resolveTime('2200-01-01T00:00:00Z');
-      } catch (e) {
-        return e as { data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      svc.resolveTime('2200-01-01T00:00:00Z');
+    });
     expect(err?.data?.reason).toBe('time_out_of_range');
   });
 
   it('throws invalid_time (not time_out_of_range) for a malformed instant', () => {
-    const err = (() => {
-      try {
-        svc.resolveTime('the-ides-of-march');
-      } catch (e) {
-        return e as { data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      svc.resolveTime('the-ides-of-march');
+    });
     expect(err?.data?.reason).toBe('invalid_time');
   });
 
+  it('carries a recovery hint on the invalid_time error, not just a reason', () => {
+    const err = captureThrown(() => {
+      svc.resolveTime('the-ides-of-march');
+    });
+    expect(err?.data?.reason).toBe('invalid_time');
+    expect(err?.data?.recovery?.hint).toBeTruthy();
+    expect(err?.data?.recovery?.hint).toMatch(/ISO 8601/i);
+  });
+
+  /**
+   * A day-of-month that does not exist still parses — both engines this project runs on
+   * roll the overflow forward into the next month — so a parseability-only check answered
+   * a different instant than the caller asked for.
+   */
+  it.each([
+    '2026-02-30T00:00:00Z',
+    '2026-04-31T00:00:00Z',
+    '2023-02-29T00:00:00Z',
+    '1900-02-29T00:00:00Z',
+    '2100-02-29T00:00:00Z',
+  ])('rejects the impossible calendar date %s with invalid_time', (time) => {
+    const err = captureThrown(() => {
+      svc.resolveTime(time);
+    });
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_time');
+    expect(err?.data?.recovery?.hint).toBeTruthy();
+  });
+
+  /**
+   * 2000 is a leap year (divisible by 400) and 2100 is not (divisible by 100 but not 400).
+   * A "divisible by 4" shortcut gets both wrong in opposite directions, so the accept case
+   * and the 2100 reject case above have to be asserted together.
+   */
+  it.each(['2024-02-29T00:00:00Z', '2000-02-29T00:00:00Z'])(
+    'accepts the real leap day %s',
+    (time) => {
+      expect(svc.resolveTime(time).toISOString()).toBe(new Date(time).toISOString());
+    },
+  );
+
+  it('accepts an offset-bearing instant and resolves it to the right UTC moment', () => {
+    // The written calendar day (30 June, local) is valid even though the UTC day it
+    // resolves to can differ — validating the parsed UTC fields instead of the written
+    // ones would reject legitimate offsets.
+    expect(svc.resolveTime('2026-06-30T12:00:00+05:00').toISOString()).toBe(
+      '2026-06-30T07:00:00.000Z',
+    );
+    expect(svc.resolveTime('2026-06-30T23:00:00-05:00').toISOString()).toBe(
+      '2026-07-01T04:00:00.000Z',
+    );
+  });
+
+  it('accepts date-only, year-month, and fractional-second instants', () => {
+    expect(svc.resolveTime('2026-06-30').toISOString()).toBe('2026-06-30T00:00:00.000Z');
+    expect(svc.resolveTime('2026-06').toISOString()).toBe('2026-06-01T00:00:00.000Z');
+    expect(svc.resolveTime('2026-06-30T12:00:00.123456Z').toISOString()).toBe(
+      '2026-06-30T12:00:00.123Z',
+    );
+  });
+
+  it.each(['August 11, 2026', 'Tue, 11 Aug 2026 00:00:00 GMT'])(
+    'rejects the non-ISO date form "%s" with invalid_time',
+    (time) => {
+      const err = captureThrown(() => {
+        svc.resolveTime(time);
+      });
+      expect(err?.data?.reason).toBe('invalid_time');
+    },
+  );
+
+  it('keeps the time_out_of_range hint intact for a year outside the span', () => {
+    const err = captureThrown(() => {
+      svc.resolveTime('2200-01-01T00:00:00Z');
+    });
+    expect(err?.data?.reason).toBe('time_out_of_range');
+    expect(err?.data?.recovery?.hint).toBe('Use a date between 1900 and 2100.');
+  });
+
   it('tags the unknown-timezone error with reason invalid_timezone', () => {
-    const err = (() => {
-      try {
-        svc.resolveTimezone('Mars/Olympus_Mons');
-      } catch (e) {
-        return e as { data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      svc.resolveTimezone('Mars/Olympus_Mons');
+    });
     expect(err?.data?.reason).toBe('invalid_timezone');
   });
 
   it('tags the unknown-star error with reason star_not_found', () => {
-    const err = (() => {
-      try {
-        svc.resolveStarTarget('Nonexistent Star');
-      } catch (e) {
-        return e as { data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      svc.resolveStarTarget('Nonexistent Star');
+    });
     expect(err?.data?.reason).toBe('star_not_found');
   });
 });
 
 describe('findEvents — validation reasons', () => {
   it('throws body_not_supported for max_elongation of an outer planet', () => {
-    const err = (() => {
-      try {
-        svc.findEvents('max_elongation', {
-          start: new Date('2024-01-01T00:00:00Z'),
-          count: 1,
-          body: 'jupiter',
-        });
-      } catch (e) {
-        return e as { data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      svc.findEvents('max_elongation', {
+        start: new Date('2024-01-01T00:00:00Z'),
+        count: 1,
+        body: 'jupiter',
+      });
+    });
     expect(err?.data?.reason).toBe('body_not_supported');
   });
 
   it('throws body_required when a conjunction is requested without a body', () => {
-    const err = (() => {
-      try {
-        svc.findEvents('conjunction', { start: new Date('2024-01-01T00:00:00Z'), count: 1 });
-      } catch (e) {
-        return e as { data?: { reason?: string } };
-      }
-    })();
+    const err = captureThrown(() => {
+      svc.findEvents('conjunction', { start: new Date('2024-01-01T00:00:00Z'), count: 1 });
+    });
     expect(err?.data?.reason).toBe('body_required');
   });
 
@@ -559,17 +615,9 @@ describe('findEvents — validation reasons', () => {
   ];
 
   it.each(unsupported)('throws body_not_supported for %s of %s', (event, body) => {
-    const err = (() => {
-      try {
-        svc.findEvents(event, { start: new Date('2026-01-01T00:00:00Z'), count: 1, body });
-      } catch (e) {
-        return e as {
-          code?: number;
-          data?: { reason?: string; recovery?: { hint?: string } };
-          message?: string;
-        };
-      }
-    })();
+    const err = captureThrown(() => {
+      svc.findEvents(event, { start: new Date('2026-01-01T00:00:00Z'), count: 1, body });
+    });
     expect(err?.data?.reason).toBe('body_not_supported');
     expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
     // A recovery hint naming the valid bodies, and no engine internals in the message.
@@ -581,17 +629,13 @@ describe('findEvents — validation reasons', () => {
     // find_events accepts earth, sun, and moon, none of which are outer planets, so
     // the hint has to explain the rule rather than name one class of rejected body.
     for (const body of ['earth', 'sun', 'moon'] as const) {
-      const err = (() => {
-        try {
-          svc.findEvents('max_elongation', {
-            start: new Date('2026-01-01T00:00:00Z'),
-            count: 1,
-            body,
-          });
-        } catch (e) {
-          return e as { data?: { recovery?: { hint?: string } } };
-        }
-      })();
+      const err = captureThrown(() => {
+        svc.findEvents('max_elongation', {
+          start: new Date('2026-01-01T00:00:00Z'),
+          count: 1,
+          body,
+        });
+      });
       expect(err?.data?.recovery?.hint).toMatch(/mercury/i);
       expect(err?.data?.recovery?.hint).not.toMatch(/outer planets/i);
     }

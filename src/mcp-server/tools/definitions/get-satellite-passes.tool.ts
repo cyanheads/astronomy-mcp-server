@@ -124,8 +124,11 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
     {
       reason: 'invalid_time',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'The start timestamp is not a parseable ISO 8601 instant.',
-      recovery: 'Pass start as an ISO 8601 UTC timestamp, e.g. 2024-01-01T00:00:00Z, then retry.',
+      when: 'The start timestamp is not a parseable ISO 8601 instant, or names a calendar date that does not exist (e.g. 2026-02-30).',
+      // Verbatim the hint EphemerisService.resolveTime() throws with, so the contract
+      // documents the same next move the client is handed on the wire.
+      recovery:
+        'Pass the timestamp as an ISO 8601 UTC instant with a real calendar date, e.g. 2024-01-01T00:00:00Z, then retry.',
     },
     {
       reason: 'time_out_of_range',
@@ -133,6 +136,13 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       when: 'The start instant is outside the SGP4 high-accuracy span (≈1900–2100), or too far from the epoch of the current element set for SGP4 to reach.',
       recovery:
         'Request a start within about a month of today — element sets only describe the orbit for weeks around their epoch.',
+    },
+    {
+      reason: 'invalid_timezone',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The `timezone` value is not an IANA zone this runtime knows.',
+      // Verbatim the hint EphemerisService.resolveTimezone() throws with.
+      recovery: 'Pass a valid IANA timezone like America/Los_Angeles or UTC.',
     },
     {
       reason: 'tle_not_found',

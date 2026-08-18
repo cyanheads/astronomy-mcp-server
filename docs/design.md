@@ -506,29 +506,72 @@ service.
 
 ## Error Contract
 
-Most core tools are simple reads where the framework's auto-classification suffices, but
-several have real domain failure modes worth a typed contract (`errors: [{ reason, code,
-when, recovery }]`, thrown via `ctx.fail`):
+Every tool and the one resource ship a typed contract (`errors: [{ reason, code, when,
+recovery }]`, thrown via `ctx.fail`), so a failure names its own next move instead of
+relying on the framework's auto-classification. Baseline errors (timeout, serialization,
+generic validation) bubble undeclared.
+
+Three reasons are shared by every tool that resolves a caller-supplied instant or timezone
+through `EphemerisService`, and each declares them itself — the contract is part of a tool's
+public surface, so it is repeated per tool rather than extracted:
 
 | Tool | reason | code | when |
 |---|---|---|---|
-| `astronomy_get_sky_position` | `time_out_of_range` | `InvalidParams` | Requested instant is outside `astronomy-engine`'s supported span (high accuracy ≈1900–2100). Recovery: use a date between 1900 and 2100. |
-| `astronomy_get_sky_position` | `star_not_found` | `NotFound` | `star` field supplied but the name is not in the bundled catalog. Recovery: check spelling or use a common name / Bayer designation (e.g. "Sirius", "Polaris"). |
-| `astronomy_get_rise_set` | `no_event_in_window` | *(not an error — `null` field + `note`)* | Circumpolar / never-rises: surfaced as `null` rise/set with an explanatory `note`, NOT thrown. The agent needs the fact, not a failure. |
+| `astronomy_get_sky_position` | `invalid_time` | `InvalidParams` | `time` is not a strict ISO 8601 instant, or names a calendar date that does not exist (`2026-02-30`). Recovery: pass an ISO 8601 UTC instant with a real calendar date. |
+| `astronomy_get_sky_position` | `time_out_of_range` | `InvalidParams` | Requested instant is outside `astronomy-engine`'s high-accuracy span (≈1900–2100). Recovery: use a date between 1900 and 2100. |
+| `astronomy_get_sky_position` | `invalid_timezone` | `InvalidParams` | `timezone` is not an IANA zone this runtime knows. Recovery: pass a zone like `America/Los_Angeles` or `UTC`. |
+| `astronomy_get_sky_position` | `star_not_found` | `NotFound` | `star` supplied but the name is not in the bundled catalog. Recovery: check spelling or use a common name / Bayer designation (e.g. "Sirius", "Polaris"). |
+| `astronomy_get_sky_position` | `body_required` | `InvalidParams` | Neither `body` nor `star` was supplied. Recovery: name one of the two. |
+| `astronomy_get_rise_set` | `invalid_time` | `InvalidParams` | As above, on `start`. |
+| `astronomy_get_rise_set` | `time_out_of_range` | `InvalidParams` | As above, on the requested start instant. |
+| `astronomy_get_rise_set` | `invalid_timezone` | `InvalidParams` | As above. |
+| `astronomy_get_moon_phase` | `invalid_time` | `InvalidParams` | As above, on `time`. |
+| `astronomy_get_moon_phase` | `time_out_of_range` | `InvalidParams` | As above. |
+| `astronomy_get_moon_phase` | `invalid_timezone` | `InvalidParams` | As above. |
+| `astronomy_find_events` | `invalid_time` | `InvalidParams` | As above, on `start`. |
+| `astronomy_find_events` | `time_out_of_range` | `InvalidParams` | As above, on the requested start instant. |
+| `astronomy_find_events` | `invalid_timezone` | `InvalidParams` | As above. |
 | `astronomy_find_events` | `observer_required` | `InvalidParams` | `event` is `solar_eclipse` but `latitude`/`longitude` are not supplied (lunar eclipses are geocentric and need no observer). Recovery: add observer coordinates and retry. |
 | `astronomy_find_events` | `body_required` | `InvalidParams` | `event` is one of `opposition`, `conjunction`, `max_elongation`, or `perigee_apogee` but `body` is not supplied. Recovery: add the target body (e.g. `"mars"`) and retry. |
-| `astronomy_find_events` | `body_not_supported` | `InvalidParams` | `event` is `max_elongation` but `body` is not mercury or venus. Recovery: use `"mercury"` or `"venus"` — outer planets have no greatest elongation. |
+| `astronomy_find_events` | `body_not_supported` | `InvalidParams` | The body has no such event — `opposition` for the Sun, Moon, Earth, or an inner planet; `conjunction` for the Sun, Moon, or Earth; `max_elongation` for anything but mercury or venus; `perigee_apogee` for the Sun. |
+| `astronomy_list_visible` | `invalid_time` | `InvalidParams` | As above, on `time`. |
+| `astronomy_list_visible` | `time_out_of_range` | `InvalidParams` | As above. |
+| `astronomy_list_visible` | `invalid_timezone` | `InvalidParams` | As above. |
+| `astronomy_get_ephemeris` | `invalid_time` | `InvalidParams` | `start` or `stop` is not a strict ISO 8601 instant, or names a calendar date that does not exist. Calendar-only — this tool deliberately applies no year-range check, since Horizons covers epochs far outside 1900–2100. |
+| `astronomy_get_ephemeris` | `invalid_time_range` | `InvalidParams` | The resolved `stop` is at or before the resolved `start`. Recovery: pass a later `stop`, or omit it for a 24-hour span. |
+| `astronomy_get_ephemeris` | `incomplete_observer` | `InvalidParams` | Exactly one of `latitude` and `longitude` was supplied. Recovery: supply both for a topocentric ephemeris, or neither for a geocentric one. |
+| `astronomy_get_ephemeris` | `invalid_step` | `InvalidParams` | `step` is not a positive count followed by `m`, `h`, `d`, `mo`, or `y`. Recovery: e.g. `"10m"`, `"1h"`, `"1d"`. |
 | `astronomy_get_ephemeris` | `body_not_found` | `NotFound` | Horizons has no match for the designation, or a bare comet name is ambiguous. Recovery: use a record-resolving form — `"433;"` (numbered asteroid), `"DES=1P;CAP"` (periodic comet), or a negative SPK-ID; verify at ssd.jpl.nasa.gov. |
 | `astronomy_get_ephemeris` | `horizons_unavailable` | `ServiceUnavailable` | Horizons API failed after retries. Retryable. |
+| `astronomy_get_satellite_passes` | `invalid_time` | `InvalidParams` | As above, on `start`. |
+| `astronomy_get_satellite_passes` | `time_out_of_range` | `InvalidParams` | `start` is outside the SGP4 high-accuracy span, or too far from the epoch of the current element set for SGP4 to reach. Recovery: request a start within about a month of today. |
+| `astronomy_get_satellite_passes` | `invalid_timezone` | `InvalidParams` | As above. |
 | `astronomy_get_satellite_passes` | `tle_not_found` | `NotFound` | CelesTrak has no current element set for the NORAD ID. Recovery: verify the catalog number at celestrak.org; the object may have decayed. |
+| `astronomy_get_satellite_passes` | `object_decayed` | `NotFound` | A current element set will not propagate to a window near its own epoch — the signature of an object that has reentered. |
 | `astronomy_get_satellite_passes` | `celestrak_unavailable` | `ServiceUnavailable` | TLE fetch failed after retries. Retryable. |
+| `astronomy://body/{body}` | `unknown_body` | `NotFound` | The `{body}` segment is not one of the supported solar-system bodies. Recovery: use one of `sun`, `moon`, `mercury` … `pluto`. |
 
 Two cross-cutting validation gates: (1) `astronomy_find_events` `observer_required` — a
 `solar_eclipse` needs observer coordinates for its local circumstances and fails fast rather
 than returning data the agent can't use (lunar eclipses are geocentric and skip this gate);
 (2) `astronomy_find_events` `body_required` — body-specific events (`opposition`,
 `conjunction`, `max_elongation`, `perigee_apogee`) require a `body` and fail fast with a clear
-recovery hint naming the valid values. Baseline errors (timeout, generic validation) bubble.
+recovery hint naming the valid values.
+
+**No `no_event_in_window` reason.** A circumpolar or never-rising body is a fact the agent
+needs, not a failure: `astronomy_get_rise_set` returns `null` rise/set fields with an
+explanatory `note` instead of throwing. The same holds for an empty `astronomy_list_visible`
+result — nothing above the horizon is an answer.
+
+**Impossible calendar dates are rejected, not normalized.** `new Date(value)` rolls a
+day-of-month that does not exist forward into the next month (`2026-02-30` → `2026-03-02`),
+which answers a different instant than the caller asked for. `parseIsoInstant()`
+(`src/services/ephemeris/iso-time.ts`) validates the written calendar date — with the full
+proleptic-Gregorian leap rule, so `2000-02-29` is accepted and `2100-02-29` is not — and is
+shared by `resolveTime()` and by `astronomy_get_ephemeris`'s own `start`/`stop` guards. It
+also drops `Date`'s undocumented fallback grammars (`"August 11, 2026"`, RFC 2822), while
+leaving the accepted epoch range to the caller: the in-process engine restricts it to
+1900–2100, Horizons does not.
 
 ## Output Design Notes
 

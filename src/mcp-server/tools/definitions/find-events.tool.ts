@@ -197,10 +197,26 @@ export const findEventsTool = tool('astronomy_find_events', {
         'Pick a body the event is defined for: a superior planet (mars through pluto) for opposition, any planet for conjunction, mercury or venus for max_elongation, and the moon, earth, or a planet for perigee_apogee.',
     },
     {
+      reason: 'invalid_time',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The `start` value is not a parseable ISO 8601 instant, or names a calendar date that does not exist (e.g. 2026-02-30).',
+      // Verbatim the hint EphemerisService.resolveTime() throws with, so the contract
+      // documents the same next move the client is handed on the wire.
+      recovery:
+        'Pass the timestamp as an ISO 8601 UTC instant with a real calendar date, e.g. 2024-01-01T00:00:00Z, then retry.',
+    },
+    {
       reason: 'time_out_of_range',
       code: JsonRpcErrorCode.InvalidParams,
       when: "The requested start instant is outside the engine's high-accuracy span (≈1900–2100).",
       recovery: 'Use a start date between 1900 and 2100 and retry.',
+    },
+    {
+      reason: 'invalid_timezone',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The `timezone` value is not an IANA zone this runtime knows.',
+      // Verbatim the hint EphemerisService.resolveTimezone() throws with.
+      recovery: 'Pass a valid IANA timezone like America/Los_Angeles or UTC.',
     },
   ],
 
