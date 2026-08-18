@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/astronomy-mcp-server",
     "source": "github"
   },
-  "version": "0.2.4",
+  "version": "0.2.5",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/astronomy-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "packageArguments": [
         {
           "type": "positional",
@@ -47,7 +47,7 @@
         },
         {
           "name": "ASTRONOMY_ENABLE_SATELLITES",
-          "description": "Register the astronomy_get_satellite_passes tool, which predicts visible satellite passes from CelesTrak TLEs propagated with SGP4. Off by default.",
+          "description": "Register the astronomy_get_satellite_passes tool, which predicts visible satellite passes from CelesTrak GP element sets propagated with SGP4. Off by default.",
           "format": "string",
           "isRequired": false,
           "default": "false"
@@ -68,7 +68,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/astronomy-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "packageArguments": [
         {
           "type": "positional",
@@ -124,7 +124,7 @@
         },
         {
           "name": "ASTRONOMY_ENABLE_SATELLITES",
-          "description": "Register the astronomy_get_satellite_passes tool, which predicts visible satellite passes from CelesTrak TLEs propagated with SGP4. Off by default.",
+          "description": "Register the astronomy_get_satellite_passes tool, which predicts visible satellite passes from CelesTrak GP element sets propagated with SGP4. Off by default.",
           "format": "string",
           "isRequired": false,
           "default": "false"
