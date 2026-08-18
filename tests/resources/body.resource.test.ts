@@ -9,8 +9,8 @@ import { bodyResource } from '@/mcp-server/resources/definitions/body.resource.j
 
 describe('bodyResource', () => {
   it('returns the reference card for a known body', async () => {
-    const ctx = createMockContext();
-    const params = bodyResource.params.parse({ body: 'jupiter' });
+    const ctx = createMockContext({ errors: bodyResource.errors });
+    const params = bodyResource.params!.parse({ body: 'jupiter' });
     const result = await bodyResource.handler(params, ctx);
     expect(result).toEqual({
       body: 'jupiter',
@@ -22,15 +22,15 @@ describe('bodyResource', () => {
   });
 
   it('is case-insensitive on the body segment', async () => {
-    const ctx = createMockContext();
-    const params = bodyResource.params.parse({ body: 'SUN' });
+    const ctx = createMockContext({ errors: bodyResource.errors });
+    const params = bodyResource.params!.parse({ body: 'SUN' });
     const result = await bodyResource.handler(params, ctx);
     expect(result.name).toBe('Sun');
   });
 
   it('throws unknown_body for an unsupported body', () => {
     const ctx = createMockContext({ errors: bodyResource.errors });
-    const params = bodyResource.params.parse({ body: 'ceres' });
+    const params = bodyResource.params!.parse({ body: 'ceres' });
     expect(() => bodyResource.handler(params, ctx)).toThrow(/ceres|body/i);
   });
 

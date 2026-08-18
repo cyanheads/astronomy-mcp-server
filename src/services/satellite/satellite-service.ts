@@ -21,7 +21,7 @@ import {
   notFound,
   serviceUnavailable,
 } from '@cyanheads/mcp-ts-core/errors';
-import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Body, Equator, Horizon, MakeTime, Observer } from 'astronomy-engine';
 import {
   ecfToLookAngles,
@@ -82,17 +82,13 @@ export class SatelliteService {
     const cached = this.cache.get(noradId);
     if (cached && cached.expiresAt > Date.now()) return cached.tle;
 
-    const reqCtx = requestContextService.createRequestContext({
-      operation: 'SatelliteService.fetchTle',
-      parentContext: { requestId: ctx.requestId, traceId: ctx.traceId },
-    });
     const url = `${this.baseUrl}?CATNR=${noradId}&FORMAT=TLE`;
 
     let text: string;
     try {
       text = await withRetry(
         async () => {
-          const response = await fetchWithTimeout(url, this.timeoutMs, reqCtx, {
+          const response = await fetchWithTimeout(url, this.timeoutMs, ctx, {
             signal: ctx.signal,
             // CelesTrak answers an uncatalogued object with 404, which is a domain
             // outcome here (tle_not_found), not a service failure — log it at debug.
@@ -103,7 +99,7 @@ export class SatelliteService {
         },
         {
           operation: 'SatelliteService.fetchTle',
-          context: reqCtx,
+          context: ctx,
           baseDelayMs: 1000,
           signal: ctx.signal,
         },

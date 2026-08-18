@@ -14,6 +14,7 @@ import { getRiseSetTool } from '@/mcp-server/tools/definitions/get-rise-set.tool
 import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import { captureRejected } from '../helpers/capture-thrown.js';
 import { expectExactCarried, expectRoundedDisplay } from '../helpers/content-parity.js';
 
 const SEATTLE = { latitude: 47.6062, longitude: -122.3321 };
@@ -24,7 +25,7 @@ beforeAll(() => {
 
 describe('astronomy_get_sky_position', () => {
   it('returns a schema-conforming position for Mars', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getSkyPositionTool.errors });
     const input = getSkyPositionTool.input.parse({
       body: 'mars',
       ...SEATTLE,
@@ -36,7 +37,7 @@ describe('astronomy_get_sky_position', () => {
   });
 
   it('resolves a named star and ignores body when star is set', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getSkyPositionTool.errors });
     const input = getSkyPositionTool.input.parse({ star: 'Vega', body: 'mars', ...SEATTLE });
     const result = await getSkyPositionTool.handler(input, ctx);
     expect(result.body).toBe('Vega');
@@ -49,7 +50,7 @@ describe('astronomy_get_sky_position', () => {
   });
 
   it('format() renders every output field at runtime', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getSkyPositionTool.errors });
     const input = getSkyPositionTool.input.parse({ body: 'jupiter', ...SEATTLE });
     const result = await getSkyPositionTool.handler(input, ctx);
     const block = getSkyPositionTool.format!(result)[0];
@@ -60,7 +61,7 @@ describe('astronomy_get_sky_position', () => {
   });
 
   it('format() keeps a rounded report while carrying every exact coordinate', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getSkyPositionTool.errors });
     const input = getSkyPositionTool.input.parse({
       body: 'mars',
       ...SEATTLE,
@@ -94,7 +95,7 @@ describe('astronomy_get_sky_position', () => {
 
 describe('astronomy_get_moon_phase', () => {
   it('returns a schema-conforming phase record', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getMoonPhaseTool.errors });
     const input = getMoonPhaseTool.input.parse({ time: '2024-04-23T23:49:00Z' });
     const result = await getMoonPhaseTool.handler(input, ctx);
     expect(result).toEqual(expect.schemaMatching(getMoonPhaseTool.output));
@@ -104,7 +105,7 @@ describe('astronomy_get_moon_phase', () => {
 
 describe('astronomy_get_rise_set', () => {
   it('returns rise/set with twilight for the sun and conforms to schema', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getRiseSetTool.errors });
     const input = getRiseSetTool.input.parse({
       body: 'sun',
       ...SEATTLE,
@@ -116,7 +117,7 @@ describe('astronomy_get_rise_set', () => {
   });
 
   it('omits twilight for a non-sun body', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getRiseSetTool.errors });
     const input = getRiseSetTool.input.parse({
       body: 'moon',
       ...SEATTLE,
@@ -157,9 +158,7 @@ describe('astronomy_find_events', () => {
       body: 'jupiter',
       start: '2024-01-01T00:00:00Z',
     });
-    const err = await Promise.resolve()
-      .then(() => findEventsTool.handler(input, ctx))
-      .catch((e: unknown) => e as { data?: { reason?: string; recovery?: { hint?: string } } });
+    const err = await captureRejected(() => findEventsTool.handler(input, ctx));
     expect(err?.data?.reason).toBe('body_not_supported');
     // The alternatives ride the recovery hint, which is what reaches the agent.
     expect(err?.data?.recovery?.hint).toMatch(/mercury|venus/i);
@@ -180,7 +179,7 @@ describe('astronomy_find_events', () => {
 
 describe('astronomy_list_visible', () => {
   it('returns a ranked list with the sky-condition gate fields in the output', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: listVisibleTool.errors });
     const input = listVisibleTool.input.parse({ ...SEATTLE, time: '2024-06-21T20:00:00Z' });
     const result = await listVisibleTool.handler(input, ctx);
     expect(result).toEqual(expect.schemaMatching(listVisibleTool.output));

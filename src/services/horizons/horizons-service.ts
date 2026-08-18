@@ -10,7 +10,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import { fetchWithTimeout, requestContextService, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ObserverInput } from '../ephemeris/types.js';
 import type { EphemerisPoint, EphemerisResult } from './types.js';
 
@@ -35,25 +35,20 @@ export class HorizonsService {
     ctx: Context,
     observer?: ObserverInput,
   ): Promise<EphemerisResult> {
-    const reqCtx = requestContextService.createRequestContext({
-      operation: 'HorizonsService.ephemeris',
-      parentContext: { requestId: ctx.requestId, traceId: ctx.traceId },
-    });
-
     const url = this.buildUrl(designation, start, stop, step, observer);
 
     let text: string;
     try {
       text = await withRetry(
         async () => {
-          const response = await fetchWithTimeout(url, this.timeoutMs, reqCtx, {
+          const response = await fetchWithTimeout(url, this.timeoutMs, ctx, {
             signal: ctx.signal,
           });
           return response.text();
         },
         {
           operation: 'HorizonsService.ephemeris',
-          context: reqCtx,
+          context: ctx,
           baseDelayMs: 2000,
           signal: ctx.signal,
         },
