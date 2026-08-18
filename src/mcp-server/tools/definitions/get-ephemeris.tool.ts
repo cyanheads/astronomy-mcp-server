@@ -15,15 +15,69 @@ import { getHorizonsService } from '@/services/horizons/horizons-service.js';
 const INLINE_ROW_CAP = 200;
 
 /**
- * Accepted `step` shape: a positive count followed by one of Horizons' calendar step
- * units — m (minutes), h (hours), d (days), mo (months), y (years). `mo` precedes `m`
- * in the alternation so "1mo" reads as months rather than a minute step with a stray
+ * Accepted `step` shape: a positive count followed by one of Horizons' step units —
+ * m (minutes), h (hours), d (days), mo (months), y (years). `mo` precedes `m` in the
+ * alternation so "1mo" reads as months rather than a minute step with a stray
  * character. An optional single space is tolerated because Horizons itself writes
  * "1 d". Anything else — a bare number, an unsupported unit, or free text — is a
  * caller mistake that would otherwise be spent on an upstream request and come back
- * mislabelled as a Horizons outage.
+ * mislabelled as a Horizons outage. The count and unit are captured because the
+ * truncation notice has to advance the last returned instant by exactly one step.
  */
-const STEP_PATTERN = /^[1-9]\d* ?(?:mo|[mhdy])$/i;
+const STEP_PATTERN = /^([1-9]\d*) ?(mo|[mhdy])$/i;
+
+/** Milliseconds in one unit of each fixed-duration step. */
+const FIXED_STEP_MS = { m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
+
+/**
+ * How many whole steps to try before giving up on a calendar advance. Horizons skips a
+ * calendar period that has no such day of the month rather than rolling into the next
+ * one, so a series on the 31st passes over several periods in a row, and a Feb-29 year
+ * series passes over three — seven when a non-leap century year falls in the run.
+ */
+const MAX_CALENDAR_STEPS = 48;
+
+/** A validated `step`: how many of which unit. */
+interface ParsedStep {
+  count: number;
+  unit: 'm' | 'h' | 'd' | 'mo' | 'y';
+}
+
+/** Split a `step` into its count and unit, or undefined when it is not one this tool accepts. */
+function parseStep(step: string): ParsedStep | undefined {
+  const match = STEP_PATTERN.exec(step);
+  if (!match?.[1] || !match[2]) return undefined;
+  return { count: Number(match[1]), unit: match[2].toLowerCase() as ParsedStep['unit'] };
+}
+
+/**
+ * The instant exactly one `step` after `instant`.
+ *
+ * Minute, hour, and day steps are fixed durations. Month and year steps are calendar
+ * stepping: per Horizons' API documentation the output "will follow the calendar based
+ * on the starting date", and a period that does not carry that day of the month
+ * produces no row at all — "if a start date on the 31st is requested, output will only
+ * occur for months having 31 days". A plain field increment is wrong there twice over,
+ * because JavaScript rolls Jan 31 forward into Mar 3: an instant Horizons would never
+ * print, and one that shifts every later row off the series the caller asked for.
+ * Advancing by whole steps until the day of the month survives applies Horizons' own
+ * rule, so the continuation lands on the next row of the same series.
+ */
+function nextStepInstant(instant: string, step: ParsedStep): string | undefined {
+  const from = new Date(instant);
+  if (Number.isNaN(from.getTime())) return undefined;
+  if (step.unit === 'm' || step.unit === 'h' || step.unit === 'd') {
+    return new Date(from.getTime() + step.count * FIXED_STEP_MS[step.unit]).toISOString();
+  }
+  const dayOfMonth = from.getUTCDate();
+  for (let steps = 1; steps <= MAX_CALENDAR_STEPS; steps++) {
+    const next = new Date(from.getTime());
+    if (step.unit === 'mo') next.setUTCMonth(next.getUTCMonth() + step.count * steps);
+    else next.setUTCFullYear(next.getUTCFullYear() + step.count * steps);
+    if (next.getUTCDate() === dayOfMonth) return next.toISOString();
+  }
+  return undefined;
+}
 
 export const EphemerisOutput = z.object({
   designation: z.string().describe('The body designation echoed from the request.'),
@@ -62,7 +116,7 @@ export type EphemerisOutputType = z.infer<typeof EphemerisOutput>;
 export const getEphemerisTool = tool('astronomy_get_ephemeris', {
   title: 'astronomy-mcp-server: get small-body ephemeris',
   description:
-    'Fetch a time-series ephemeris for a small body (asteroid or comet) or spacecraft from JPL Horizons — RA/Dec, distance, and apparent magnitude over a span, optionally with observer-relative altitude/azimuth. This covers objects the in-process major-body set cannot. The designation is passed to Horizons verbatim, so it must be in a form Horizons resolves to a single record: a numbered asteroid takes a trailing-semicolon record lookup (e.g. "433;" for Eros, "1;" for Ceres), and a periodic comet takes the DES + closest-apparition form (e.g. "DES=1P;CAP" for Halley) — a bare name like "433 Eros" or "1P/Halley" returns no match or an ambiguous record list and is rejected. Spacecraft take their negative SPK-ID. `start` and `stop` are ISO 8601 UTC and `stop` must be after `start`; `step` is a count plus a unit of m, h, d, mo, or y, such as "1d", "1h", or "10m". Supplying observer latitude/longitude yields topocentric coordinates and adds alt/az — supply both or neither. This is a gated, network-backed extension (JPL Horizons is keyless but rate-limited and best-effort); large spans truncate inline at 200 rows, and the truncation notice carries the instant to resume from — re-call from there, or split the range into smaller adjacent spans, keeping the same step so no sample is lost.',
+    'Fetch a time-series ephemeris for a small body (asteroid or comet) or spacecraft from JPL Horizons — RA/Dec, distance, and apparent magnitude over a span, optionally with observer-relative altitude/azimuth. This covers objects the in-process major-body set cannot. The designation is passed to Horizons verbatim, so it must be in a form Horizons resolves to a single record: a numbered asteroid takes a trailing-semicolon record lookup (e.g. "433;" for Eros, "1;" for Ceres), and a periodic comet takes the DES + closest-apparition form (e.g. "DES=1P;CAP" for Halley) — a bare name like "433 Eros" or "1P/Halley" returns no match or an ambiguous record list and is rejected. Spacecraft take their negative SPK-ID. `start` and `stop` are ISO 8601 UTC and `stop` must be after `start`; `step` is a count plus a unit of m, h, d, mo, or y, such as "1d", "1h", or "10m". Supplying observer latitude/longitude yields topocentric coordinates and adds alt/az — supply both or neither. This is a gated, network-backed extension (JPL Horizons is keyless but rate-limited and best-effort); large spans truncate inline at 200 rows, and the truncation notice names the exact `start` to resume from — one step past the last row returned, because Horizons includes the start instant in its output — so re-calling from there continues the series without repeating a sample. Splitting the range into smaller adjacent spans works too; keep the same step either way so no sample is lost.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
     designation: z
@@ -218,7 +272,8 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
         { ...ctx.recoveryFor('incomplete_observer') },
       );
     }
-    if (!STEP_PATTERN.test(input.step)) {
+    const step = parseStep(input.step);
+    if (!step) {
       throw ctx.fail(
         'invalid_step',
         `Invalid step "${input.step}". Expected a positive count plus m, h, d, mo, or y, e.g. "10m".`,
@@ -250,10 +305,17 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
      */
     const caveats: string[] = [];
     if (result.truncated) {
-      // A truncated result is a full page, so its last row is the exact resume instant.
-      const resumeFrom = result.points.at(-1)?.timeUtc;
+      /**
+       * A truncated result is a full page, so its last row is where the returned series
+       * ends. Horizons' START_TIME is inclusive of the first output row, so a caller who
+       * resumes at that last row gets it back a second time and double-counts it when
+       * the pages are concatenated. Advertise the instant one step past it instead, so
+       * the continuation picks up the next sample of the same series.
+       */
+      const endsAt = result.points.at(-1)?.timeUtc;
+      const resumeFrom = endsAt === undefined ? undefined : nextStepInstant(endsAt, step);
       caveats.push(
-        `Capped at ${INLINE_ROW_CAP} rows${resumeFrom ? `, ending at ${resumeFrom}` : ''}. To retrieve the omitted samples, re-call with start set to that instant, or split the requested range into smaller adjacent spans; keep the same step either way and repeat until truncated is false. Widening the step is not equivalent — it discards samples the original range asked for.`,
+        `Capped at ${INLINE_ROW_CAP} rows${endsAt ? `, ending at ${endsAt}` : ''}. To retrieve the omitted samples, re-call with start set to ${resumeFrom ?? 'one step past that instant'} — Horizons includes the start instant in its output, so resuming at the last row returned repeats it — or split the requested range into smaller adjacent spans; keep the same step either way and repeat until truncated is false. Widening the step is not equivalent — it discards samples the original range asked for.`,
       );
     }
     if (result.dropped > 0) {

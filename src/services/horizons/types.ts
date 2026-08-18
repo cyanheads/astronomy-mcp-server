@@ -30,6 +30,11 @@ export interface EphemerisResult {
    */
   dropped: number;
   points: EphemerisPoint[];
-  /** True when Horizons returned more rows than the inline cap; reduce by widening `step`. */
+  /**
+   * True when Horizons returned more rows than the inline cap. The remaining rows are
+   * retrieved by re-calling from the instant one step past the last row returned, never
+   * by widening `step` — a wider step answers a different question, dropping samples the
+   * original range asked for instead of retrieving them.
+   */
   truncated: boolean;
 }

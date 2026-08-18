@@ -282,7 +282,7 @@ include_stars: boolean // include catalog bright stars in the output, default fa
   distance_au: number;        // observer-to-body distance in AU
   magnitude: number | null;   // apparent magnitude, null when Horizons omits it
   // iff observer supplied:
-  altitude_degrees?: number;  // horizontal altitude (refraction-corrected)
+  altitude_degrees?: number;  // horizontal altitude (refraction-corrected — the request sets APPARENT=REFRACTED)
   azimuth_degrees?: number;   // azimuth 0=N 90=E 180=S 270=W
 }
 // envelope:
@@ -292,7 +292,10 @@ include_stars: boolean // include catalog bright stars in the output, default fa
 }
 // Truncation is reported out-of-band via the enrichment block, not in the output object:
 //   enrichment: { truncated: boolean; shown: number; cap: number }   // inline row cap = 200
-//   When truncated, an enrichment notice advises widening `step` or shortening the span.
+//   When truncated, an enrichment notice names the instant the rows end at and the
+//   `start` to resume from — one step past it, since Horizons' START_TIME is inclusive
+//   of the first output row — so pages concatenate without a repeated sample. Widening
+//   `step` is never the advice: it discards samples the original range asked for.
 ```
 
 **SatellitePass** (element of `astronomy_get_satellite_passes` output array):
@@ -545,7 +548,7 @@ public surface, so it is repeated per tool rather than extracted:
 | `astronomy_get_ephemeris` | `body_not_found` | `NotFound` | Horizons has no match for the designation, or a bare comet name is ambiguous. Recovery: use a record-resolving form — `"433;"` (numbered asteroid), `"DES=1P;CAP"` (periodic comet), or a negative SPK-ID; verify at ssd.jpl.nasa.gov. |
 | `astronomy_get_ephemeris` | `horizons_unavailable` | `ServiceUnavailable` | Horizons API failed after retries. Retryable. |
 | `astronomy_get_satellite_passes` | `invalid_time` | `InvalidParams` | As above, on `start`. |
-| `astronomy_get_satellite_passes` | `time_out_of_range` | `InvalidParams` | `start` is outside the SGP4 high-accuracy span, or too far from the epoch of the current element set for SGP4 to reach. Recovery: request a start within about a month of today. |
+| `astronomy_get_satellite_passes` | `time_out_of_range` | `InvalidParams` | `start` is outside the SGP4 high-accuracy span, or more than 30 days from the epoch of the current element set. Checked on the epoch distance alone, before any propagation: SGP4 keeps answering with well-formed positions long past the point where the mean elements describe the orbit, so its own refusal is a sufficient but not a necessary signal. The message names the distance in days. Recovery: request a start within about a month of today. |
 | `astronomy_get_satellite_passes` | `invalid_timezone` | `InvalidParams` | As above. |
 | `astronomy_get_satellite_passes` | `invalid_target` | `InvalidParams` | Neither `norad_id` nor `name` was supplied, or both were. Recovery: supply exactly one. Rejected before any CelesTrak request. |
 | `astronomy_get_satellite_passes` | `tle_not_found` | `NotFound` | CelesTrak has no current element set for the NORAD ID. Recovery: verify the catalog number at celestrak.org; the object may have decayed. |

@@ -9,12 +9,14 @@
  *   only when the satellite is sunlit at peak AND the observer's sky is dark — the
  *   ground-darkness gate reuses the core sun-altitude logic. A pass already underway
  *   when the window opens is omitted rather than reported with the query boundary as its
- *   rise, and an element set that will not propagate to the window is rejected — naming
- *   the object or the requested instant, whichever the epoch distance implicates —
- *   rather than yielding no passes. Network-touching code carries its own timeout +
- *   retry boundary and degrades loudly; it never substitutes core output. A response
- *   that parses but is not an OMM element set is reported apart from an outage — its
- *   shape is a property of the record, so retrying it can only fail again.
+ *   rise. A start beyond the element set's epoch horizon is rejected on that distance
+ *   alone, and inside the horizon an element set that will not propagate at all is
+ *   rejected as a decayed object — neither reaches the caller as a 200-shaped answer,
+ *   which would read as "nothing visible tonight" or as a pass list built from mean
+ *   elements that stopped describing the orbit. Network-touching code carries its own
+ *   timeout + retry boundary and degrades loudly; it never substitutes core output. A
+ *   response that parses but is not an OMM element set is reported apart from an outage
+ *   — its shape is a property of the record, so retrying it can only fail again.
  * @module services/satellite/satellite-service
  */
 
@@ -63,10 +65,12 @@ const PROPAGATE_OPTIONS = { communityDecayCheckEnabled: true } as const;
 /** Julian date of the Unix epoch — converts `satrec.jdsatepoch` to milliseconds. */
 const JD_UNIX_EPOCH = 2440587.5;
 /**
- * How far the requested window may sit from the element set's epoch before a refused
- * propagation is attributed to the request rather than to the object. CelesTrak serves
+ * How far the requested window may sit from the element set's epoch. CelesTrak serves
  * element sets refreshed within hours and SGP4 stops describing the orbit within weeks
- * of epoch, so a month comfortably covers any window anchored near the present.
+ * of epoch, so a month comfortably covers any window anchored near the present. It also
+ * separates the two ways a window can be unreachable: inside the horizon the element set
+ * is current, so a refused propagation is the object having reentered; beyond it the
+ * request is what overreached, whether or not the propagation would have succeeded.
  */
 const MAX_EPOCH_DISTANCE_DAYS = 30;
 /** Minimum peak elevation (deg) for a pass to count — below this it grazes the horizon. */
@@ -357,10 +361,11 @@ export class SatelliteService {
    * SGP4, brackets above-horizon intervals, and keeps passes whose peak is sunlit
    * and over a dark-enough ground.
    *
-   * Throws when the element set will not propagate to the requested window — as
-   * `object_decayed` if the window sits near the element set's epoch, otherwise as
-   * `time_out_of_range`. Without that check either condition reaches the caller as
-   * `passes: []`, which reads identically to "nothing visible tonight".
+   * Throws `time_out_of_range` when `start` lies beyond the element set's epoch horizon,
+   * and `object_decayed` when a window inside that horizon will not propagate at all.
+   * Without those checks either condition reaches the caller as a 200-shaped result —
+   * `passes: []`, which reads identically to "nothing visible tonight", or a pass list
+   * built from elements that stopped describing the orbit weeks earlier.
    */
   predictPasses(
     elements: ElementSet,
@@ -371,13 +376,25 @@ export class SatelliteService {
   ): SatellitePassResult {
     const satrec = json2satrec(elements.omm);
     /**
-     * Probe the first instant of the window before scanning it. SGP4 refuses an element
-     * set it can no longer turn into an orbit by answering null, and the scan loop would
-     * silently skip every such timestep and return an empty, falsely-successful pass
-     * list. Reject up front instead, naming which of the two causes applies.
+     * Reject a start the element set does not reach before propagating anything. SGP4's
+     * own refusal cannot stand in for this: past the horizon it keeps answering with
+     * numerically well-formed positions built from mean elements that no longer describe
+     * the orbit, and whether it refuses at a given distance follows the element set's
+     * drag terms rather than the distance itself. Gating the horizon on that refusal left
+     * it unenforced for exactly the requests it exists to catch.
+     */
+    const epochDistanceDays = this.epochDistanceDays(satrec, start);
+    if (epochDistanceDays > MAX_EPOCH_DISTANCE_DAYS) {
+      throw this.startBeyondEpoch(elements.noradId, epochDistanceDays);
+    }
+    /**
+     * Probe the first instant of the window before scanning it. Inside the horizon the
+     * element set is current, so a refusal is the object having reentered rather than the
+     * request overreaching — and the scan loop would silently skip every such timestep and
+     * return an empty, falsely-successful pass list.
      */
     if (!propagate(satrec, start, PROPAGATE_OPTIONS)) {
-      throw this.classifyPropagationFailure(satrec, elements.noradId, start);
+      throw this.objectDecayed(elements.noradId);
     }
     const observerGd = {
       longitude: (observer.longitude * Math.PI) / 180,
@@ -473,28 +490,36 @@ export class SatelliteService {
     return { noradId: elements.noradId, satelliteName: elements.name, passes };
   }
 
-  /**
-   * Name the reason SGP4 refused the first instant of the window. The refusal on its own
-   * is ambiguous: a reentered object and a start far from the element set's epoch both
-   * leave the mean elements unable to describe an orbit. Epoch distance separates them —
-   * within the horizon the element set is current, so the object is what changed; beyond
-   * it the request is, and calling a satellite that is still in orbit decayed would be a
-   * false statement with an unfollowable recovery.
-   */
-  private classifyPropagationFailure(satrec: SatRec, noradId: number, start: Date): McpError {
+  /** How far an instant sits from the element set's epoch, in days, on either side. */
+  private epochDistanceDays(satrec: SatRec, instant: Date): number {
     const epochMs = (satrec.jdsatepoch - JD_UNIX_EPOCH) * 86400000;
-    const distanceDays = Math.abs(start.getTime() - epochMs) / 86400000;
-    if (distanceDays > MAX_EPOCH_DISTANCE_DAYS) {
-      return invalidParams(
-        `The requested start is ${distanceDays.toFixed(0)} days from the epoch of the current element set for NORAD ID ${noradId}; SGP4 cannot propagate it that far.`,
-        {
-          reason: 'time_out_of_range',
-          recovery: {
-            hint: 'An element set describes the orbit for weeks either side of its epoch — request a start within about a month of today.',
-          },
+    return Math.abs(instant.getTime() - epochMs) / 86400000;
+  }
+
+  /**
+   * Blame the request when it reaches past the element set's validity horizon. Calling a
+   * satellite that is still in orbit decayed would be a false statement with an
+   * unfollowable recovery, so the message names the distance instead — the one fact that
+   * says how far the start has to move.
+   */
+  private startBeyondEpoch(noradId: number, distanceDays: number): McpError {
+    return invalidParams(
+      `The requested start is ${distanceDays.toFixed(0)} days from the epoch of the current element set for NORAD ID ${noradId}; the element set stops describing the orbit well before that.`,
+      {
+        reason: 'time_out_of_range',
+        recovery: {
+          hint: 'An element set describes the orbit for weeks either side of its epoch — request a start within about a month of today.',
         },
-      );
-    }
+      },
+    );
+  }
+
+  /**
+   * Blame the object when a window inside the epoch horizon still will not propagate. The
+   * element set is current there, so mean elements that cannot describe an orbit are the
+   * signature of a reentry rather than of a request that overreached.
+   */
+  private objectDecayed(noradId: number): McpError {
     return notFound(
       `NORAD ID ${noradId} has decayed — SGP4 cannot propagate its current element set to the requested window.`,
       {

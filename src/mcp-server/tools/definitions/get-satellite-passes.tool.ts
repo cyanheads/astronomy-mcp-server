@@ -79,7 +79,7 @@ export type SatellitePassesOutputType = z.infer<typeof SatellitePassesOutput>;
 export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
   title: 'astronomy-mcp-server: get satellite passes',
   description:
-    "Predict visible passes of a satellite (e.g. the ISS, NORAD 25544) over an observer in the next `days`. Identify the satellite by exactly one of `norad_id` or `name` — supplying both, or neither, is rejected. `name` is matched as a case-insensitive substring of CelesTrak's catalog names, so it resolves only when it picks out a single object: a broader query comes back with the matching objects and their catalog numbers to choose from, and the result echoes the query that resolved it as `resolved_from_name`. Fetches the object's current GP element set from CelesTrak, propagates it with SGP4 in-process, and returns each pass's rise, peak, and set times with azimuths and the peak elevation. Only passes that are naked-eye-plausible are returned — the satellite must be sunlit at peak while the observer's sky is dark. Every returned pass rises within the requested window: a pass already underway at `start` is omitted rather than reported with `start` as its rise, so back up `start` to see it. An element set that will not propagate to the window is rejected by name rather than returning an empty list, so an empty `passes` means only that nothing was visible. `start` must be within about a month of today — an element set describes the orbit for weeks around its epoch and cannot be propagated further. NORAD catalog numbers and catalog names are found at celestrak.org or heavens-above.com. This is a gated, network-backed extension (CelesTrak is keyless but rate-limited; element sets are cached briefly). Default elevation 0 m; pass an IANA timezone for observer-local pass times.",
+    "Predict visible passes of a satellite (e.g. the ISS, NORAD 25544) over an observer in the next `days`. Identify the satellite by exactly one of `norad_id` or `name` — supplying both, or neither, is rejected. `name` is matched as a case-insensitive substring of CelesTrak's catalog names, so it resolves only when it picks out a single object: a broader query comes back with the matching objects and their catalog numbers to choose from, and the result echoes the query that resolved it as `resolved_from_name`. Fetches the object's current GP element set from CelesTrak, propagates it with SGP4 in-process, and returns each pass's rise, peak, and set times with azimuths and the peak elevation. Only passes that are naked-eye-plausible are returned — the satellite must be sunlit at peak while the observer's sky is dark. Every returned pass rises within the requested window: a pass already underway at `start` is omitted rather than reported with `start` as its rise, so back up `start` to see it. A `start` further than about a month from the element set's epoch is rejected as out of range on that distance alone, and an element set that will not propagate to a window inside that horizon is rejected as a reentry — so an empty `passes` means only that nothing was visible. CelesTrak publishes only current element sets, so in practice `start` must be within about a month of today. NORAD catalog numbers and catalog names are found at celestrak.org or heavens-above.com. This is a gated, network-backed extension (CelesTrak is keyless but rate-limited; element sets are cached briefly). Default elevation 0 m; pass an IANA timezone for observer-local pass times.",
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z
     .object({
@@ -122,7 +122,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
         .string()
         .optional()
         .describe(
-          'Search start as an ISO 8601 UTC string, within about a month of today — the current element set cannot be propagated further. Defaults to now.',
+          "Search start as an ISO 8601 UTC string, within about a month of the current element set's epoch — for a tracked object that epoch is hours old, so in practice within about a month of today. A start further out is rejected rather than answered from elements that no longer describe the orbit. Defaults to now.",
         ),
       timezone: z
         .string()
@@ -161,7 +161,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
     {
       reason: 'time_out_of_range',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'The start instant is outside the SGP4 high-accuracy span (≈1900–2100), or too far from the epoch of the current element set for SGP4 to reach.',
+      when: 'The start instant is outside the SGP4 high-accuracy span (≈1900–2100), or more than about a month from the epoch of the current element set — checked on the epoch distance itself, since SGP4 keeps returning positions well past the point where the mean elements describe the orbit.',
       recovery:
         'Request a start within about a month of today — element sets only describe the orbit for weeks around their epoch.',
     },

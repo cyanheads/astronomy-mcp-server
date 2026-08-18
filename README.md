@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.6-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -101,8 +101,8 @@ Time-series ephemeris for a small body or spacecraft via the keyless JPL Horizon
   - **Spacecraft** — negative SPK-ID: `"-48"` (Hubble)
   - A bare name like `"433 Eros"` or `"1P/Halley"` returns no match or an ambiguous record list and is rejected. Look up designations at [ssd.jpl.nasa.gov/tools/sbdb_lookup.html](https://ssd.jpl.nasa.gov/tools/sbdb_lookup.html).
 - `start`/`stop` are ISO 8601 UTC and `stop` must be after `start`; `step` is a positive count plus a unit of `m`, `h`, `d`, `mo`, or `y` (`"10m"`, `"1h"`, `"1d"`)
-- Supplying observer `latitude`/`longitude` yields topocentric coordinates and adds alt/az — pass both or neither; one alone is rejected rather than silently downgraded to a geocentric query
-- Large spans truncate inline at 200 rows, and the disclosure carries the instant the returned rows end at. Re-call with `start` at that instant, or split the range into smaller adjacent spans — keep the same `step` and repeat until `truncated` is `false`, which reconstructs every sample. Widening the step discards samples the original range asked for
+- Supplying observer `latitude`/`longitude` yields topocentric coordinates and adds alt/az — pass both or neither; one alone is rejected rather than silently downgraded to a geocentric query. Horizons is asked for refracted elevation on a topocentric request, so `altitude_degrees` carries the same refraction correction the offline core tools report
+- Large spans truncate inline at 200 rows. The disclosure names the instant the returned rows end at and the `start` to resume from — one step past it, because Horizons includes the start instant in its output, so resuming at the last row returned repeats it. Re-call with that `start`, or split the range into smaller adjacent spans — keep the same `step` and repeat until `truncated` is `false`, which concatenates back into the original series with no repeated sample. Widening the step discards samples the original range asked for
 
 ---
 
@@ -116,8 +116,8 @@ Visible passes of a satellite over an observer. Registered only when `ASTRONOMY_
 - Returns each pass's rise, peak, and set times with azimuths and the peak elevation
 - Only naked-eye-plausible passes are returned — the satellite must be sunlit at peak while the observer's sky is dark
 - Every returned pass rises inside the requested window. A pass already underway at `start` is omitted rather than reported with `start` as its `rise_utc`; move `start` earlier to see it. A pass rising exactly at `start` is kept, so feeding a reported `rise_utc` back as `start` never loses it
-- An element set that will not propagate to the window is rejected by name — as a reentry when the window sits near the element set's epoch, otherwise as a `start` too far from it — so an empty `passes` list means only "no visible passes in this window"
-- `start` must be within about a month of today: an element set describes the orbit for weeks around its epoch, and CelesTrak publishes only current ones
+- A `start` further from the element set's epoch than the horizon below is rejected as out of range on that distance alone, and an element set that will not propagate to a window inside the horizon is rejected as a reentry — so an empty `passes` list means only "no visible passes in this window"
+- `start` must be within about a month of the element set's epoch, which for a tracked object is hours old — so in practice within about a month of today. Past that the mean elements no longer describe the orbit, and SGP4 keeps returning positions built from them, which is why the horizon is enforced on the epoch distance rather than on whether the propagation succeeds
 - NORAD catalog numbers and catalog names are found at [celestrak.org](https://celestrak.org) or [heavens-above.com](https://heavens-above.com)
 - Searches the next `days` (default 7, max 10); optional observer-local pass times
 

@@ -105,6 +105,13 @@ export class HorizonsService {
         'SITE_COORD',
         `'${observer.longitude},${observer.latitude},${(observer.elevation / 1000).toFixed(6)}'`,
       );
+      // APPARENT toggles refraction correction and defaults to AIRLESS, so without it
+      // the elevation column is geometric while altitude_degrees is advertised as
+      // refraction-corrected — a gap that widens toward the horizon, where a caller
+      // reads rise and set off that column. Horizons applies the toggle to Earth
+      // topocentric requests only, which is this branch, and the core sky-position
+      // tools already report refracted altitude.
+      params.set('APPARENT', 'REFRACTED');
     }
     return `${this.baseUrl}?${params.toString()}`;
   }
