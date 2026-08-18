@@ -1,6 +1,6 @@
 # astronomy-mcp-server - Directory Structure
 
-Generated on: 2026-07-31 00:56:05
+Generated on: 2026-08-18 13:07:12
 
 ```text
 astronomy-mcp-server/
@@ -14,6 +14,8 @@ astronomy-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
@@ -151,6 +153,7 @@ astronomy-mcp-server/
 │   │   ├── ephemeris/
 │   │   │   ├── body-data.ts
 │   │   │   ├── ephemeris-service.ts
+│   │   │   ├── iso-time.ts
 │   │   │   ├── star-catalog.ts
 │   │   │   └── types.ts
 │   │   ├── horizons/
@@ -162,6 +165,7 @@ astronomy-mcp-server/
 │   └── index.ts
 ├── tests/
 │   ├── helpers/
+│   │   ├── capture-thrown.ts
 │   │   └── content-parity.ts
 │   ├── prompts/
 │   │   └── stargazing-plan.prompt.test.ts

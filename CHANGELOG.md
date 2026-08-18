@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.4](changelog/0.2.x/0.2.4.md) — 2026-08-18
+
+astronomy_get_ephemeris and the five core tools now reject calendar dates that don't exist instead of rolling them forward, invalid_time's recovery hint reaches every surface, and the errors[] contracts round out — plus mcp-ts-core ^0.11.5 and other dependency bumps.
+
 ## [0.2.3](changelog/0.2.x/0.2.3.md) — 2026-07-30
 
 astronomy_get_ephemeris no longer fails an entire call over a single Horizons row missing a distance; unusable rows are dropped and disclosed instead.
