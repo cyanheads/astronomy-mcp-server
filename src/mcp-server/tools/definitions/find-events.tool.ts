@@ -128,7 +128,7 @@ export const findEventsTool = tool('astronomy_find_events', {
       .string()
       .optional()
       .describe(
-        'Search start as an ISO 8601 UTC string, e.g. "2024-01-01T00:00:00Z". Defaults to now.',
+        'Search start as an ISO 8601 UTC string, e.g. "2024-01-01T00:00:00Z". Defaults to now. A value with no zone designator is read as UTC, not the local zone of the server process.',
       ),
     count: z
       .number()

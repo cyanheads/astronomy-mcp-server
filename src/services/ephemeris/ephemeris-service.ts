@@ -367,51 +367,83 @@ export class EphemerisService {
     for (let i = 0; i < count; i++) {
       const rise = SearchRiseSet(BODY_ENUM[body], obs, +1, cursor, RISE_SET_WINDOW_DAYS);
       const set = SearchRiseSet(BODY_ENUM[body], obs, -1, cursor, RISE_SET_WINDOW_DAYS);
+      /**
+       * Both searches run forward from the cursor, so when the body is already up the next
+       * set arrives before the next rise and the two belong to different cycles — pairing
+       * them reports a set hours before its own rise. The interval in progress is the one
+       * the caller is standing in, and its rise is behind the cursor where a forward-only
+       * search cannot reach it, so report that interval as a partial cycle naming the
+       * imminent set. Beginning at the next complete cycle instead would be chronologically
+       * tidy and quietly drop tonight's set, which is the event a caller asking during the
+       * day most needs.
+       */
+      const alreadyUp = set !== null && (rise === null || set.date < rise.date);
+      const cycleRise = alreadyUp ? null : rise;
+
       let transitUtc: string | null = null;
       let transitAlt: number | null = null;
       try {
         const transit = SearchHourAngle(BODY_ENUM[body], obs, 0, cursor, +1);
-        transitUtc = transit.time.toString();
-        transitAlt = transit.hor.altitude;
+        /**
+         * The meridian crossing is found regardless of altitude, so the next one after the
+         * cursor can belong to a neighbouring cycle — before this cycle's rise, or after
+         * its set. Report it only when it falls inside the interval it is attached to.
+         */
+        const at = transit.time.date;
+        if ((cycleRise === null || at > cycleRise.date) && (set === null || at < set.date)) {
+          transitUtc = transit.time.toString();
+          transitAlt = transit.hor.altitude;
+        }
       } catch {
         transitUtc = null;
       }
 
       const event: RiseSetEvent = {
-        riseUtc: rise ? rise.toString() : null,
+        riseUtc: cycleRise ? cycleRise.toString() : null,
         setUtc: set ? set.toString() : null,
         transitUtc,
         transitAltitudeDegrees: transitAlt,
       };
 
-      if (rise === null && set === null) {
+      if (cycleRise === null && set === null) {
         // Circumpolar or never-rises: distinguish by transit altitude.
         event.note =
           transitAlt !== null && transitAlt > 0
             ? 'Circumpolar — never sets at this latitude/date.'
             : 'Never rises above the horizon at this latitude/date.';
-      } else if (rise === null) {
+      } else if (cycleRise === null) {
         event.note = 'Already above the horizon at the search start — no rise in this cycle.';
       } else if (set === null) {
         event.note = 'Does not set before the next rise — circumpolar window.';
       }
 
       if (body === 'sun') {
-        event.twilight = this.twilight(obs, cursor, timezone);
+        /**
+         * Anchor the pair to this cycle's own rise, not the resume cursor: the cursor sits
+         * just past the previous set, which is still short of that evening's dusk, so a
+         * cursor-anchored search hands the next cycle the previous evening's twilight while
+         * its rise and set have already moved on a day.
+         */
+        event.twilight = this.twilight(obs, cycleRise?.date ?? cursor, timezone);
       }
 
       if (timezone) {
-        if (rise) event.riseLocal = this.formatLocal(rise.date, timezone);
+        if (cycleRise) event.riseLocal = this.formatLocal(cycleRise.date, timezone);
         if (set) event.setLocal = this.formatLocal(set.date, timezone);
         if (transitUtc) event.transitLocal = this.formatLocal(new Date(transitUtc), timezone);
       }
 
       events.push(event);
 
-      // Advance the cursor past this cycle to find the next one.
-      const advanceFrom = rise ?? set ?? (transitUtc ? MakeTime(new Date(transitUtc)) : null);
-      cursor = advanceFrom
-        ? advanceFrom.AddDays(1).date
+      /**
+       * Resume just past this cycle's set, so the next search finds the following rise and
+       * the set that closes it. Advancing a whole day from the rise instead overshot the
+       * next day's set for any body that rises earlier each day, dropping a full cycle from
+       * a multi-count call. With no set to resume from the body is circumpolar for this
+       * window, where a day is the only meaningful step.
+       */
+      cursor = set
+        ? new Date(set.date.getTime() + 1000)
         : new Date(cursor.getTime() + 24 * 3600 * 1000);
     }
 

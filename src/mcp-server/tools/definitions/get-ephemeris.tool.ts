@@ -149,13 +149,13 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
       .string()
       .optional()
       .describe(
-        'Ephemeris start as an ISO 8601 UTC string, e.g. "2024-01-01T00:00:00Z". Defaults to now.',
+        'Ephemeris start as an ISO 8601 UTC string, e.g. "2024-01-01T00:00:00Z". Defaults to now. A value with no zone designator is read as UTC, not the local zone of the server process.',
       ),
     stop: z
       .string()
       .optional()
       .describe(
-        'Ephemeris stop as an ISO 8601 UTC string, and must be later than start. Defaults to 24 hours after start.',
+        'Ephemeris stop as an ISO 8601 UTC string, and must be later than start. Defaults to 24 hours after start. A value with no zone designator is read as UTC, not the local zone of the server process.',
       ),
     step: z
       .string()
@@ -237,23 +237,35 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
      * Horizons covers historical and future epochs far outside its 1900–2100 high-accuracy
      * span, so this tool rejects unparseable and impossible dates, never a year.
      */
-    if (input.start !== undefined && parseIsoInstant(input.start) === undefined) {
+    const startInstant = input.start === undefined ? new Date() : parseIsoInstant(input.start);
+    if (startInstant === undefined) {
       throw ctx.fail(
         'invalid_time',
         `Invalid start "${input.start}". Expected an ISO 8601 instant naming a real calendar date, e.g. 2024-01-01T00:00:00Z.`,
         { ...ctx.recoveryFor('invalid_time') },
       );
     }
-    if (input.stop !== undefined && parseIsoInstant(input.stop) === undefined) {
+    /**
+     * Derive the default span and order the range from the parsed instants, never from a
+     * second `new Date()` on the caller's string. `parseIsoInstant` anchors a zoneless
+     * timestamp to UTC, which is the frame Horizons reads a zoneless `START_TIME` in; a
+     * raw re-parse read it in the host's zone instead, so the generated `STOP_TIME` moved
+     * with the deployment and landed in a different frame than the start it came from.
+     */
+    const stopInstant =
+      input.stop === undefined
+        ? new Date(startInstant.getTime() + 24 * 3600 * 1000)
+        : parseIsoInstant(input.stop);
+    if (stopInstant === undefined) {
       throw ctx.fail(
         'invalid_time',
         `Invalid stop "${input.stop}". Expected an ISO 8601 instant naming a real calendar date, e.g. 2024-01-02T00:00:00Z.`,
         { ...ctx.recoveryFor('invalid_time') },
       );
     }
-    const start = input.start ?? new Date().toISOString();
-    const stop = input.stop ?? new Date(new Date(start).getTime() + 24 * 3600 * 1000).toISOString();
-    if (new Date(stop).getTime() <= new Date(start).getTime()) {
+    const start = input.start ?? startInstant.toISOString();
+    const stop = input.stop ?? stopInstant.toISOString();
+    if (stopInstant.getTime() <= startInstant.getTime()) {
       throw ctx.fail('invalid_time_range', `stop "${stop}" is not after start "${start}".`, {
         ...ctx.recoveryFor('invalid_time_range'),
       });

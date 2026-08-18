@@ -57,7 +57,7 @@ export const RiseSetOutput = z.object({
             .string()
             .nullable()
             .describe(
-              'Rise time in ISO 8601 UTC, or null when the body does not rise in this cycle (e.g. circumpolar).',
+              'Rise time in ISO 8601 UTC, or null when the body does not rise in this cycle — because it is circumpolar, or because it was already above the horizon at the search start, whose rise precedes the search. The accompanying note says which.',
             ),
           set_utc: z
             .string()
@@ -120,7 +120,7 @@ export type RiseSetOutputType = z.infer<typeof RiseSetOutput>;
 export const getRiseSetTool = tool('astronomy_get_rise_set', {
   title: 'astronomy-mcp-server: get rise/set times',
   description:
-    'Compute rise, set, and culmination (transit) times for a body at an observer location, plus the maximum altitude at culmination. For the Sun, also returns the three twilight pairs (civil −6°, nautical −12°, astronomical −18°) so a single call answers "when does the sun set and when is it truly dark." Searches forward from `start` (default today) and returns the next `count` cycles (default 1). Circumpolar or never-rises situations are reported as null rise/set fields with an explanatory note rather than an error — the fact is the answer. Default elevation is 0 m; pass an IANA `timezone` for observer-local times. This server does not geocode — resolve coordinates upstream first.',
+    'Compute rise, set, and culmination (transit) times for a body at an observer location, plus the maximum altitude at culmination. For the Sun, also returns the three twilight pairs (civil −6°, nautical −12°, astronomical −18°) so a single call answers "when does the sun set and when is it truly dark." Searches forward from `start` (default today) and returns the next `count` cycles (default 1). When the body is already above the horizon at `start`, the first cycle is the interval in progress: its `set` is the imminent one and its `rise` is null, since that rise precedes the search — so a set is never reported earlier than the rise beside it. Circumpolar or never-rises situations are reported as null rise/set fields with an explanatory note rather than an error — the fact is the answer. Default elevation is 0 m; pass an IANA `timezone` for observer-local times. This server does not geocode — resolve coordinates upstream first.',
   annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
     body: z
@@ -144,7 +144,7 @@ export const getRiseSetTool = tool('astronomy_get_rise_set', {
       .string()
       .optional()
       .describe(
-        'Search start as an ISO 8601 UTC string, e.g. "2024-06-21T00:00:00Z". Defaults to now.',
+        'Search start as an ISO 8601 UTC string, e.g. "2024-06-21T00:00:00Z". Defaults to now. A value with no zone designator is read as UTC, not the local zone of the server process.',
       ),
     count: z
       .number()

@@ -5,8 +5,12 @@
  *   by rolling forward into the next month, so a parseability-only check answers a
  *   different instant than the caller asked for, and the implementation-defined
  *   fallback grammars ("August 11, 2026") parse even though no tool documents them.
- *   This module rejects both while leaving the accepted epoch range to the caller —
- *   the in-process engine restricts it to 1900–2100, JPL Horizons does not.
+ *   A time of day carrying no zone designator is read in the host's zone, so the same
+ *   request resolves to a different instant on a differently-configured deployment;
+ *   this module reads it as UTC, which is what every tool here documents its times to
+ *   be. It rejects the first two and normalizes the third, while leaving the accepted
+ *   epoch range to the caller — the in-process engine restricts it to 1900–2100, JPL
+ *   Horizons does not.
  * @module services/ephemeris/iso-time
  */
 
@@ -22,7 +26,14 @@
  * outside the four-digit range, and a grammar that only knew `\d{4}` would newly
  * reject a valid deep-past or deep-future request.
  */
-const ISO_CALENDAR_HEAD = /^([+-]\d{6}|\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:[Tt ].*)?$/;
+const ISO_CALENDAR_HEAD = /^([+-]\d{6}|\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:[Tt ](.*))?$/;
+
+/**
+ * A zone designator closing a time of day: `Z`, or a numeric UTC offset with or without
+ * its colon. Anchored at the end so the sign of an expanded year cannot be mistaken for
+ * an offset.
+ */
+const ZONE_DESIGNATOR = /(?:[Zz]|[+-]\d{2}(?::?\d{2})?)$/;
 
 /** Days in each month of a common year, indexed from January. */
 const MONTH_LENGTHS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as const;
@@ -49,6 +60,9 @@ function daysInMonth(year: number, month: number): number {
  * parsed UTC fields, so an offset-bearing instant that lands on a different UTC
  * day (`2026-06-30T23:00:00-05:00`) is still accepted — its written date is real.
  *
+ * A time of day with no zone designator is read as UTC rather than in the host's
+ * zone, so the returned instant does not depend on how the deployment is configured.
+ *
  * @param value - The caller-supplied timestamp.
  * @returns The parsed instant, or `undefined` when the string is not a strict ISO
  *   8601 instant or names a day that does not exist.
@@ -56,12 +70,20 @@ function daysInMonth(year: number, month: number): number {
 export function parseIsoInstant(value: string): Date | undefined {
   const match = ISO_CALENDAR_HEAD.exec(value);
   if (!match) return undefined;
-  const [, yearText, monthText, dayText] = match;
+  const [, yearText, monthText, dayText, timeOfDay] = match;
   const year = Number(yearText);
   const month = monthText === undefined ? 1 : Number(monthText);
   const day = dayText === undefined ? 1 : Number(dayText);
   if (month < 1 || month > 12) return undefined;
   if (day < 1 || day > daysInMonth(year, month)) return undefined;
-  const date = new Date(value);
+  /**
+   * Anchor a zoneless time of day to UTC. `Date` would otherwise read it in the host's
+   * zone, so the same timestamp names a different instant per deployment — the defect
+   * this normalization closes. A date with no time of day is already UTC by
+   * specification, and an explicit `Z` or offset is left exactly as the caller wrote it.
+   */
+  const anchored =
+    timeOfDay !== undefined && !ZONE_DESIGNATOR.test(timeOfDay) ? `${value}Z` : value;
+  const date = new Date(anchored);
   return Number.isNaN(date.getTime()) ? undefined : date;
 }

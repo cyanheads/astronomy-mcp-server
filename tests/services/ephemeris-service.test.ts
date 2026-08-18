@@ -8,7 +8,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { EphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import type { EventBodyName, EventName } from '@/services/ephemeris/types.js';
 import { captureThrown } from '../helpers/capture-thrown.js';
@@ -344,11 +344,16 @@ describe('position', () => {
 
 describe('riseSet', () => {
   it('computes a sunrise before a sunset for Seattle on the summer solstice', () => {
-    const events = svc.riseSet('sun', SEATTLE, new Date('2024-06-21T00:00:00Z'), 1);
+    // 09:00Z is 02:00 local, while the Sun is still down, so this cycle is a complete
+    // rise-then-set. The original 00:00Z start is 17:00 local with the Sun already up,
+    // where the returned pair was tomorrow's rise beside tonight's set — the test passed
+    // while contradicting its own name. The already-up case is covered on its own below.
+    const events = svc.riseSet('sun', SEATTLE, new Date('2024-06-21T09:00:00Z'), 1);
     expect(events).toHaveLength(1);
     const e = events[0]!;
     expect(e.riseUtc).toBeTruthy();
     expect(e.setUtc).toBeTruthy();
+    expect(Date.parse(e.riseUtc as string)).toBeLessThan(Date.parse(e.setUtc as string));
     // Seattle sunrise on the solstice is ~05:11 local (12:11 UTC); set ~21:11 local (04:11 UTC next day).
     const rise = new Date(e.riseUtc as string);
     expect(rise.getUTCHours()).toBeGreaterThanOrEqual(11);
@@ -356,6 +361,80 @@ describe('riseSet', () => {
     // The Sun branch carries twilight.
     expect(e.twilight).toBeDefined();
     expect(e.twilight?.astronomical).toBeDefined();
+  });
+
+  /**
+   * 20:00Z is 13:00 local in Seattle, with the Sun well up. Searching for the next rise
+   * and the next set independently from that instant pairs tonight's set with tomorrow's
+   * rise, so the cycle reads as a set nine and a half hours before its own rise.
+   */
+  const SUN_UP_START = new Date('2026-08-11T20:00:00Z');
+
+  it('reports the interval in progress rather than pairing tonight_s set with tomorrow_s rise', () => {
+    const [cycle] = svc.riseSet('sun', SEATTLE, SUN_UP_START, 1);
+    // The rise that opened this interval is behind `start`, and riseSet only searches
+    // forward, so the honest answer is a partial cycle that names the imminent set.
+    expect(cycle?.riseUtc).toBeNull();
+    expect(cycle?.setUtc).toBeTruthy();
+    expect(cycle?.note).toMatch(/[Aa]lready above the horizon/);
+    // Tonight's set, not tomorrow's: within a day of the start rather than beyond it.
+    const set = Date.parse(cycle?.setUtc as string);
+    expect(set).toBeGreaterThan(SUN_UP_START.getTime());
+    expect(set - SUN_UP_START.getTime()).toBeLessThan(24 * 3600 * 1000);
+  });
+
+  it('never reports a set before its own rise, for any body or cycle', () => {
+    for (const body of ['sun', 'moon', 'mars'] as const) {
+      for (const start of [SUN_UP_START, new Date('2026-08-11T09:00:00Z')]) {
+        for (const cycle of svc.riseSet(body, SEATTLE, start, 4)) {
+          if (!cycle.riseUtc || !cycle.setUtc) continue;
+          expect(
+            Date.parse(cycle.setUtc),
+            `${body} from ${start.toISOString()}: set ${cycle.setUtc} precedes rise ${cycle.riseUtc}`,
+          ).toBeGreaterThan(Date.parse(cycle.riseUtc));
+        }
+      }
+    }
+  });
+
+  it('advances one cycle at a time instead of skipping a day', () => {
+    // The cursor used to advance a full day past the cycle's rise, which lands beyond the
+    // following day's set — so a multi-count call silently dropped an entire day's set.
+    const sets = svc
+      .riseSet('sun', SEATTLE, SUN_UP_START, 4)
+      .map((c) => c.setUtc)
+      .filter((s): s is string => s !== null)
+      .map((s) => Date.parse(s));
+    expect(sets.length).toBeGreaterThanOrEqual(3);
+    for (let i = 1; i < sets.length; i++) {
+      const gapHours = ((sets[i] as number) - (sets[i - 1] as number)) / 3600000;
+      expect(gapHours, `sets ${i - 1}->${i} are ${gapHours.toFixed(1)}h apart`).toBeLessThan(30);
+    }
+  });
+
+  it('keeps the transit inside the cycle it is reported with', () => {
+    for (const cycle of svc.riseSet('sun', SEATTLE, SUN_UP_START, 3)) {
+      if (!cycle.transitUtc) continue;
+      const transit = Date.parse(cycle.transitUtc);
+      if (cycle.riseUtc) expect(transit).toBeGreaterThan(Date.parse(cycle.riseUtc));
+      if (cycle.setUtc) expect(transit).toBeLessThan(Date.parse(cycle.setUtc));
+    }
+  });
+
+  it('anchors each cycle_s twilight to that cycle_s own evening', () => {
+    // The twilight pair used to be searched from the resume cursor, which sits between
+    // sunset and civil dusk — so the following cycle came back carrying the previous
+    // evening's twilight while its own rise and set had moved on a day.
+    for (const cycle of svc.riseSet('sun', SEATTLE, SUN_UP_START, 3)) {
+      const dusk = cycle.twilight?.civil.duskUtc;
+      if (!dusk || !cycle.setUtc) continue;
+      const afterSetMinutes = (Date.parse(dusk) - Date.parse(cycle.setUtc)) / 60000;
+      expect(
+        afterSetMinutes,
+        `civil dusk ${dusk} should follow this cycle's set ${cycle.setUtc}`,
+      ).toBeGreaterThan(0);
+      expect(afterSetMinutes).toBeLessThan(120);
+    }
   });
 
   it('reports the Sun as circumpolar at the North Pole in June', () => {
@@ -369,6 +448,54 @@ describe('riseSet', () => {
     expect(e.riseUtc).toBeNull();
     expect(e.setUtc).toBeNull();
     expect(e.note).toMatch(/[Cc]ircumpolar/);
+  });
+});
+
+/**
+ * A zoneless timestamp has no zone designator, so `new Date` reads it in the host's zone
+ * and the same request resolves to a different instant on a differently-configured
+ * deployment. The tools document their times as UTC, so UTC is what a zoneless value has
+ * to mean — and the invariance across zones, not any single value, is the property.
+ */
+describe('resolveTime — zoneless timestamps resolve identically in every host zone', () => {
+  const originalTz = process.env.TZ;
+  afterEach(() => {
+    process.env.TZ = originalTz;
+  });
+
+  /** The instant `value` resolves to with the host configured for `tz`. */
+  function resolvedUnder(tz: string, value: string): string {
+    process.env.TZ = tz;
+    return svc.resolveTime(value).toISOString();
+  }
+
+  it.each([
+    ['T separator', '2026-06-30T12:00:00', '2026-06-30T12:00:00.000Z'],
+    ['space separator', '2026-06-30 12:00:00', '2026-06-30T12:00:00.000Z'],
+    ['no seconds', '2026-06-30T12:00', '2026-06-30T12:00:00.000Z'],
+    ['fractional seconds', '2026-06-30T12:00:00.500', '2026-06-30T12:00:00.500Z'],
+    ['date only', '2026-06-30', '2026-06-30T00:00:00.000Z'],
+  ])('reads a %s form as UTC in either host zone', (_label, value, expected) => {
+    expect(resolvedUnder('UTC', value)).toBe(expected);
+    expect(resolvedUnder('America/Los_Angeles', value)).toBe(expected);
+    expect(resolvedUnder('Asia/Tokyo', value)).toBe(expected);
+  });
+
+  it.each([
+    ['Z', '2026-06-30T12:00:00Z', '2026-06-30T12:00:00.000Z'],
+    ['positive offset', '2026-06-30T12:00:00+05:00', '2026-06-30T07:00:00.000Z'],
+    ['negative offset', '2026-06-30T12:00:00-07:00', '2026-06-30T19:00:00.000Z'],
+    ['offset without a colon', '2026-06-30T12:00:00+0500', '2026-06-30T07:00:00.000Z'],
+  ])('leaves an explicit %s zone alone', (_label, value, expected) => {
+    expect(resolvedUnder('UTC', value)).toBe(expected);
+    expect(resolvedUnder('America/Los_Angeles', value)).toBe(expected);
+  });
+
+  it('still rejects an impossible calendar date in a non-UTC host zone', () => {
+    // The zone normalization must not become a way past the #23 calendar check.
+    process.env.TZ = 'America/Los_Angeles';
+    expect(() => svc.resolveTime('2026-02-30T12:00:00')).toThrow(/Invalid time/);
+    expect(() => svc.resolveTime('2026-06-31')).toThrow(/Invalid time/);
   });
 });
 

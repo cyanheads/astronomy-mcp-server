@@ -122,7 +122,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
         .string()
         .optional()
         .describe(
-          "Search start as an ISO 8601 UTC string, within about a month of the current element set's epoch — for a tracked object that epoch is hours old, so in practice within about a month of today. A start further out is rejected rather than answered from elements that no longer describe the orbit. Defaults to now.",
+          "Search start as an ISO 8601 UTC string, within about a month of the current element set's epoch — for a tracked object that epoch is hours old, so in practice within about a month of today. A start further out is rejected rather than answered from elements that no longer describe the orbit. Defaults to now. A value with no zone designator is read as UTC, not the local zone of the server process.",
         ),
       timezone: z
         .string()

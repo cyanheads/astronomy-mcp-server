@@ -67,7 +67,7 @@ export const listVisibleTool = tool('astronomy_list_visible', {
       .string()
       .optional()
       .describe(
-        'Evaluation instant as an ISO 8601 UTC string, e.g. "2024-08-12T05:00:00Z". Defaults to now. A single instant, not a window.',
+        'Evaluation instant as an ISO 8601 UTC string, e.g. "2024-08-12T05:00:00Z". Defaults to now. A single instant, not a window. A value with no zone designator is read as UTC, not the local zone of the server process.',
       ),
     timezone: z
       .string()

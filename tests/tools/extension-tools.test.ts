@@ -425,6 +425,36 @@ describe('astronomy_get_ephemeris — the Horizons request behind the advertised
   /** The span both requests below ask for, kept explicit so START/STOP are assertable. */
   const SPAN = { start: '2024-01-01T00:00:00Z', stop: '2024-01-02T00:00:00Z', step: '1h' };
 
+  /**
+   * A zoneless `start` carries no zone designator, so reading it with `new Date` resolved
+   * it in the host's zone — and the default `stop`, derived from it, moved with the
+   * deployment. Horizons reads a zoneless `START_TIME` as UTC, so a host-zone reading also
+   * put the two ends of the span in different frames.
+   */
+  it('derives the default stop from a zoneless start read as UTC, in any host zone', async () => {
+    const originalTz = process.env.TZ;
+    async function stopTimeUnder(tz: string): Promise<string | null> {
+      process.env.TZ = tz;
+      const fetchSpy = stubOneRow(true);
+      const ctx = createMockContext({ errors: getEphemerisTool.errors });
+      const input = getEphemerisTool.input.parse({
+        designation: '433;',
+        ...SEATTLE,
+        start: '2026-06-30T12:00:00',
+        step: '1h',
+      });
+      await getEphemerisTool.handler(input, ctx);
+      return paramsOf(fetchSpy.mock.calls[0]?.[0]).get('STOP_TIME');
+    }
+    try {
+      expect(await stopTimeUnder('UTC')).toBe("'2026-07-01T12:00:00.000Z'");
+      expect(await stopTimeUnder('America/Los_Angeles')).toBe("'2026-07-01T12:00:00.000Z'");
+      expect(await stopTimeUnder('Asia/Tokyo')).toBe("'2026-07-01T12:00:00.000Z'");
+    } finally {
+      process.env.TZ = originalTz;
+    }
+  });
+
   it('keeps every documented query parameter of a topocentric request at its current value', async () => {
     const fetchSpy = stubOneRow(true);
     const ctx = createMockContext({ errors: getEphemerisTool.errors });

@@ -112,7 +112,7 @@ export const getSkyPositionTool = tool('astronomy_get_sky_position', {
       .string()
       .optional()
       .describe(
-        'Instant of observation as an ISO 8601 UTC string, e.g. "2024-04-08T18:00:00Z". Defaults to now.',
+        'Instant of observation as an ISO 8601 UTC string, e.g. "2024-04-08T18:00:00Z". Defaults to now. A value with no zone designator is read as UTC, not the local zone of the server process.',
       ),
     timezone: z
       .string()

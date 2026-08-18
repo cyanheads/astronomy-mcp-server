@@ -126,7 +126,7 @@ Visible passes of a satellite over an observer. Registered only when `ASTRONOMY_
 | Type | Name | Description |
 |:---|:---|:---|
 | Resource | `astronomy://body/{body}` | Static reference card for a solar-system body — canonical name, type, mean radius (km), and naked-eye visibility. `{body}` is one of `sun`, `moon`, `mercury` … `pluto`. |
-| Prompt | `astronomy_stargazing_plan` | Structures a "plan tonight's stargazing from \<place\>" workflow, chaining the tools in order and naming the cross-server geocoding and weather steps. |
+| Prompt | `astronomy_stargazing_plan` | Structures a "plan tonight's stargazing from \<place\>" workflow, chaining the tools in order and naming the cross-server geocoding and weather steps. Anchors every step to the requested night in the observer timezone, and opts into the bright-star catalog. |
 
 All resource data is also reachable via tools — `astronomy_get_sky_position` returns the same body metadata inline — so tool-only clients lose nothing. Design reference: [`docs/design.md`](./docs/design.md).
 

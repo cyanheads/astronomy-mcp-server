@@ -69,7 +69,7 @@ export const getMoonPhaseTool = tool('astronomy_get_moon_phase', {
       .string()
       .optional()
       .describe(
-        'Instant to evaluate as an ISO 8601 UTC string, e.g. "2024-12-15T00:00:00Z". Defaults to now.',
+        'Instant to evaluate as an ISO 8601 UTC string, e.g. "2024-12-15T00:00:00Z". Defaults to now. A value with no zone designator is read as UTC, not the local zone of the server process.',
       ),
     timezone: z
       .string()

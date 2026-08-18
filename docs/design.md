@@ -18,7 +18,7 @@ idea sketch — not renamed, added, or dropped.
 | Tool | Summary | readOnlyHint | openWorldHint | Key inputs | Output shape |
 |---|---|---|---|---|---|
 | `astronomy_get_sky_position` | Apparent position of one body for an observer + time: equatorial (RA/Dec), horizontal (alt/az), ecliptic lon/lat, distance, magnitude, angular diameter, phase angle/fraction, constellation. The atomic "where is X right now." Topocentric by default. | `true` | `false` | `body`, `star?`, `latitude`, `longitude`, `elevation?`, `time?`, `timezone?` | single position record |
-| `astronomy_get_rise_set` | Rise, set, and culmination (transit) times for a body at a location/date, plus max altitude at transit. For the Sun, also the three twilight pairs (civil/nautical/astronomical). Searches forward from `start`; returns the next `count` cycles (default 1). | `true` | `false` | `body`, `latitude`, `longitude`, `elevation?`, `start?`, `count?`, `timezone?` | array of rise/set/transit events |
+| `astronomy_get_rise_set` | Rise, set, and culmination (transit) times for a body at a location/date, plus max altitude at transit. For the Sun, also the three twilight pairs (civil/nautical/astronomical). Searches forward from `start`; returns the next `count` cycles (default 1). A body already above the horizon at `start` yields a partial first cycle (null `rise`, the imminent `set`) rather than a set paired with the following day's rise. | `true` | `false` | `body`, `latitude`, `longitude`, `elevation?`, `start?`, `count?`, `timezone?` | array of rise/set/transit events |
 | `astronomy_get_moon_phase` | Moon phase for a date: illuminated fraction, phase name, age (days since new), phase angle, and the next four quarter phases (new/first/full/last) with timestamps. | `true` | `false` | `time?`, `timezone?` | phase record + next 4 quarters |
 | `astronomy_find_events` | Search upcoming sky events from a start time, consolidated by an `event` enum. For eclipses takes an observer location and reports local visibility + contact times; the rest are geocentric. Returns the next `count` occurrences (default 1). `body` is required for `opposition`, `conjunction`, `max_elongation`, and `perigee_apogee`. | `true` | `false` | `event`, `start?`, `count?`, `body?`, `latitude?`, `longitude?`, `elevation?`, `timezone?` | array of event records |
 | `astronomy_list_visible` | Workflow flagship. For a location + instant, iterate every naked-eye body (sun, moon, planets; optional bundled bright stars), compute alt/az, filter to above-horizon, return a ranked "what's up" list with a visibility note. Sun-altitude gate flags daylight/twilight/dark. `time` is a single evaluation instant, not a window — for "tonight" pick a time after astronomical dusk. | `true` | `false` | `latitude`, `longitude`, `elevation?`, `time?`, `timezone?`, `min_altitude?`, `include_stars?` | ranked visible-body list + sky condition |
@@ -43,7 +43,7 @@ those are query-shaped, not URI-addressable.
 
 | Name | Description | Args |
 |---|---|---|
-| `astronomy_stargazing_plan` | Structures a "plan tonight's stargazing from <place>" workflow: resolve coordinates, find the twilight window, check moon brightness and whether the moon is above the horizon during it, list visible bodies, and (cross-server) prompt for cloud-cover via a weather server. Emits a message template that chains the tools in order. | `location` (string), `date?` (ISO date) |
+| `astronomy_stargazing_plan` | Structures a "plan tonight's stargazing from <place>" workflow: resolve coordinates, find the twilight window, check moon brightness and whether the moon is above the horizon during it, list visible bodies, and (cross-server) prompt for cloud-cover via a weather server. Emits a message template that chains the tools in order. Each step that picks a time is anchored to the requested date in the observer resolved IANA zone rather than UTC midnight, and the visibility step sets `include_stars` so the bundled bright stars are not silently omitted. | `location` (string), `date?` (ISO date) |
 
 One prompt. It encodes the flagship cross-tool + cross-server workflow (see Workflow
 Analysis #4) as a reusable template for clients that surface prompts.
@@ -580,6 +580,38 @@ shared by `resolveTime()` and by `astronomy_get_ephemeris`'s own `start`/`stop` 
 also drops `Date`'s undocumented fallback grammars (`"August 11, 2026"`, RFC 2822), while
 leaving the accepted epoch range to the caller: the in-process engine restricts it to
 1900–2100, Horizons does not.
+
+**A zoneless timestamp means UTC, not the host zone.** `new Date('2026-06-30T12:00:00')`
+reads a timestamp carrying no zone designator in the running process's zone, so the same
+request resolved to a different instant on every differently-configured deployment — under
+`TZ=America/Los_Angeles` that value became `2026-06-30T19:00:00Z`. Every time field on this
+server documents itself as ISO 8601 UTC, so UTC is what a zoneless value has to mean;
+`parseIsoInstant()` anchors one by appending `Z`. A date with no time of day is already UTC
+by specification, and an explicit `Z` or numeric offset is left exactly as written. The
+decision was interpretation rather than rejection because the documented contract already
+said UTC and the hosted deployment already runs UTC — so anchoring changes nothing there,
+while rejection would have withdrawn inputs that were being answered correctly.
+
+`astronomy_get_ephemeris` needed the same fix in two places of its own: it uses
+`parseIsoInstant()` only as a parseability gate and forwards the caller's raw string to
+Horizons, so its default-`stop` computation and its range-order guard each re-parsed that
+string with a bare `new Date(...)`. A zoneless `start` therefore produced a `STOP_TIME` that
+moved with the deployment — and in a different frame than the `START_TIME` beside it, since
+Horizons reads a zoneless `START_TIME` as UTC. Both now derive from the parsed instants.
+
+**A cycle never reports a set before its own rise.** `astronomy_get_rise_set` searched for
+the next rise and the next set independently, both forward from the cursor, so a call made
+while the body was up paired tonight's set with tomorrow's rise — a cycle whose set preceded
+its rise by hours. The interval in progress is reported instead, as a partial cycle whose
+`rise` is null (that rise precedes the search) carrying the imminent `set`. Beginning at the
+next complete cycle would also have been chronologically tidy, but it would quietly drop
+tonight's set, which is the event a caller asking during the day most needs. Two related
+defects fell out of the same code path: the cursor advanced a full day past the cycle's
+rise, overshooting the next day's set for any body that rises earlier each day and dropping
+a whole cycle from a multi-`count` call; and the Sun's twilight pair was searched from that
+resume cursor, which sits between sunset and dusk, so each cycle carried the previous
+evening's twilight. The cursor now resumes just past the cycle's set, and the twilight is
+anchored to the cycle's own rise.
 
 ## Output Design Notes
 
