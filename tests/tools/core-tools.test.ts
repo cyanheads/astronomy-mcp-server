@@ -13,6 +13,7 @@ import { getMoonPhaseTool } from '@/mcp-server/tools/definitions/get-moon-phase.
 import { getRiseSetTool } from '@/mcp-server/tools/definitions/get-rise-set.tool.js';
 import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
+import { BODY_META } from '@/services/ephemeris/body-data.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { captureRejected } from '../helpers/capture-thrown.js';
 import { expectExactCarried, expectRoundedDisplay } from '../helpers/content-parity.js';
@@ -34,6 +35,65 @@ describe('astronomy_get_sky_position', () => {
     const result = await getSkyPositionTool.handler(input, ctx);
     expect(result).toEqual(expect.schemaMatching(getSkyPositionTool.output));
     expect(result.body).toBe('mars');
+  });
+
+  /**
+   * The body card at `astronomy://body/{body}` carries classification, size, and
+   * naked-eye visibility, but a client with no resource support could not reach any of
+   * it — and the README already described the tool as carrying it. These pin the tool's
+   * copy against the resource itself, so the two cannot drift apart.
+   */
+  it('carries the body card metadata a resource-less client cannot otherwise reach', async () => {
+    const ctx = createMockContext({ errors: getSkyPositionTool.errors });
+    const input = getSkyPositionTool.input.parse({
+      body: 'jupiter',
+      ...SEATTLE,
+      time: '2024-08-01T08:00:00Z',
+    });
+    const result = await getSkyPositionTool.handler(input, ctx);
+    expect(result.body_metadata).toEqual({
+      type: 'planet',
+      mean_radius_km: 69911,
+      naked_eye: true,
+    });
+  });
+
+  it('agrees with the body resource on every field it copies', async () => {
+    // The tool must not become a second, drifting source for these values.
+    const ctx = createMockContext({ errors: getSkyPositionTool.errors });
+    for (const body of ['sun', 'moon', 'uranus', 'pluto'] as const) {
+      const input = getSkyPositionTool.input.parse({ body, ...SEATTLE });
+      const result = await getSkyPositionTool.handler(input, ctx);
+      const card = BODY_META[body];
+      expect(result.body_metadata, `${body} metadata`).toEqual({
+        type: card.type,
+        mean_radius_km: card.meanRadiusKm,
+        naked_eye: card.nakedEye,
+      });
+    }
+  });
+
+  it('omits the metadata for a star, which has no body card', async () => {
+    // BODY_META covers the ten solar-system bodies only; a catalog star has no card, and
+    // an absent field is the honest answer rather than a fabricated one.
+    const ctx = createMockContext({ errors: getSkyPositionTool.errors });
+    const input = getSkyPositionTool.input.parse({ star: 'Vega', ...SEATTLE });
+    const result = await getSkyPositionTool.handler(input, ctx);
+    expect(result.body).toBe('Vega');
+    expect(result.body_metadata).toBeUndefined();
+  });
+
+  it('carries the metadata on content[] as well as structuredContent', async () => {
+    const ctx = createMockContext({ errors: getSkyPositionTool.errors });
+    const input = getSkyPositionTool.input.parse({ body: 'uranus', ...SEATTLE });
+    const result = await getSkyPositionTool.handler(input, ctx);
+    const [block] = getSkyPositionTool.format!(result);
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text).toContain('planet');
+    expect(text).toContain('25362');
+    // Uranus is the naked-eye:false case — the flag has to read as false, not be omitted.
+    expect(text).toMatch(/naked[- ]eye/i);
+    expect(text.toLowerCase()).toContain('no');
   });
 
   it('resolves a named star and ignores body when star is set', async () => {

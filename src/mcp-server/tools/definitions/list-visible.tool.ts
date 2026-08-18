@@ -9,20 +9,29 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
-import { sig } from '@/mcp-server/tools/format-numbers.js';
+import { num, pct, sig } from '@/mcp-server/tools/format-numbers.js';
 import { getEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { SkyPositionOutput } from './get-sky-position.tool.js';
 
-const VisibleBodySchema = SkyPositionOutput.extend({
-  rank: z.number().describe('1-based rank, brightest-and-highest first.'),
-  visibility_note: z
-    .string()
-    .describe(
-      'Server-computed one-line headline from real values, e.g. "Venus, mag -4.1, 12° above the WSW horizon — very bright".',
-    ),
-}).describe(
-  'A sky position above the horizon, with its rank and a plain-language visibility note.',
-);
+/**
+ * The per-body element reuses the single-position shape, minus the body card. The card is
+ * static reference data, identical on every call and already addressable per body through
+ * `astronomy://body/{body}` and `astronomy_get_sky_position` — repeating it down a list of
+ * dozens of bodies would bloat the one surface that is read at a glance, for a value that
+ * never varies with the observation.
+ */
+const VisibleBodySchema = SkyPositionOutput.omit({ body_metadata: true })
+  .extend({
+    rank: z.number().describe('1-based rank, brightest-and-highest first.'),
+    visibility_note: z
+      .string()
+      .describe(
+        'Server-computed one-line headline from real values, e.g. "Venus, mag -4.1, 12° above the WSW horizon — very bright".',
+      ),
+  })
+  .describe(
+    'A sky position above the horizon, with its rank and a plain-language visibility note.',
+  );
 
 export const ListVisibleOutput = z.object({
   sky_condition: z
@@ -170,39 +179,39 @@ export const listVisibleTool = tool('astronomy_list_visible', {
   },
 
   /**
-   * The scan surface, so the one `format()` that does not tail every value with its
-   * exact counterpart: a body carries the whole `SkyPositionOutput` field set, and
-   * eleven seventeen-digit tails per body grew `content[]` by ~1.7x on every call.
-   * The distance keeps its tail, spanning 0.0026 AU at the Moon to 1e8 at a catalog
-   * star; for the rest, `astronomy_get_sky_position` takes any body listed here and
-   * returns the same field set with every exact value.
+   * The scan surface, so the display precision is the coarsest of any tool on this
+   * server — one decimal on an angle, read at a glance down a list of dozens of
+   * bodies. Behind each rounded display sits the exact value in brackets, so a
+   * `content[]`-only client recovers from this result what a `structuredContent`
+   * client reads, instead of a second `astronomy_get_sky_position` call per body.
+   * That runs a full sky sweep about 1.5x longer than the bare line.
    */
   format: (r) => {
     const lines: string[] = [
-      `Sky: ${r.sky_condition} (Sun ${r.sun_altitude_degrees.toFixed(1)}°) — ${r.total_count} bodies visible`,
+      `Sky: ${r.sky_condition} (Sun ${num(r.sun_altitude_degrees, 1, '°')}) — ${r.total_count} bodies visible`,
     ];
     if (r.bodies.length === 0) {
       lines.push('No bodies above the minimum-altitude filter at this instant.');
     }
-    /** Round to `digits` with an optional unit suffix; null reads as "n/a". */
+    /** Round to `digits` with an optional unit suffix; null reads as "n/a", untailed. */
     const orNa = (v: number | null, digits: number, suffix = '') =>
-      v === null ? 'n/a' : `${v.toFixed(digits)}${suffix}`;
+      v === null ? 'n/a' : num(v, digits, suffix);
     for (const b of r.bodies) {
       // The visibility_note is the human headline; the supporting coordinates
       // follow on one compact, rounded line.
       lines.push(`## ${b.rank}. ${b.body} — ${b.visibility_note}`);
       lines.push(
         [
-          `alt ${b.horizontal.altitude_degrees.toFixed(1)}° az ${b.horizontal.azimuth_degrees.toFixed(1)}° (${b.horizontal.above_horizon ? 'above' : 'below'} horizon)`,
-          `RA ${b.equatorial.ra_hours.toFixed(2)}h Dec ${b.equatorial.dec_degrees.toFixed(1)}°`,
+          `alt ${num(b.horizontal.altitude_degrees, 1, '°')} az ${num(b.horizontal.azimuth_degrees, 1, '°')} (${b.horizontal.above_horizon ? 'above' : 'below'} horizon)`,
+          `RA ${num(b.equatorial.ra_hours, 2, 'h')} Dec ${num(b.equatorial.dec_degrees, 1, '°')}`,
           // Significant figures, not fixed decimals — `toFixed(3)` rendered the Moon
           // as "0.003 AU", 13% high.
           sig(b.equatorial.distance_au, 4, ' AU'),
           `mag ${orNa(b.magnitude, 1)}`,
           `⌀ ${orNa(b.angular_diameter_arcsec, 1, '″')}`,
           `phase ${orNa(b.phase_angle_degrees, 1, '°')}`,
-          `illum ${b.illuminated_fraction === null ? 'n/a' : `${(b.illuminated_fraction * 100).toFixed(0)}%`}`,
-          `ecl lon ${b.ecliptic.longitude_degrees.toFixed(1)}° lat ${b.ecliptic.latitude_degrees.toFixed(1)}°`,
+          `illum ${b.illuminated_fraction === null ? 'n/a' : pct(b.illuminated_fraction, 0)}`,
+          `ecl lon ${num(b.ecliptic.longitude_degrees, 1, '°')} lat ${num(b.ecliptic.latitude_degrees, 1, '°')}`,
           `${b.constellation.name} (${b.constellation.abbreviation})`,
           `${b.time_utc}${b.time_local ? ` (local ${b.time_local})` : ''}`,
         ].join(' · '),

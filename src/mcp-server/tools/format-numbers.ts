@@ -6,10 +6,7 @@
  *
  *   These helpers carry no domain judgment: the caller picks the display precision
  *   and the unit, because how coarse a value may read is a per-field decision that
- *   belongs in the tool definition. Whether to reach for them at all is the same kind
- *   of decision — `astronomy_list_visible` renders its scan line with plain `toFixed`
- *   and uses `sig` only for the distance, where the display cannot stand in for the
- *   value.
+ *   belongs in the tool definition.
  * @module mcp-server/tools/format-numbers
  */
 

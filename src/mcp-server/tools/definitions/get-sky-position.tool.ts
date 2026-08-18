@@ -8,11 +8,22 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { num, pct, sig } from '@/mcp-server/tools/format-numbers.js';
+import { BODY_META } from '@/services/ephemeris/body-data.js';
 import { getEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { BODY_NAMES } from '@/services/ephemeris/types.js';
 
 export const SkyPositionOutput = z.object({
   body: z.string().describe('The body or star this position is for, echoed from the request.'),
+  body_metadata: z
+    .object({
+      type: z.enum(['star', 'planet', 'moon', 'dwarf']).describe('Classification of the body.'),
+      mean_radius_km: z.number().describe('Mean radius in kilometers, from IAU/NASA fact sheets.'),
+      naked_eye: z.boolean().describe('True when the body is typically visible to the naked eye.'),
+    })
+    .optional()
+    .describe(
+      'The body card also served at astronomy://body/{body}, copied here so a client without resource support can reach it. Present for the ten solar-system bodies; absent for a catalog star, which has no card.',
+    ),
   time_utc: z.string().describe('The instant of the observation in ISO 8601 UTC.'),
   time_local: z
     .string()
@@ -81,7 +92,7 @@ export type SkyPositionOutputType = z.infer<typeof SkyPositionOutput>;
 export const getSkyPositionTool = tool('astronomy_get_sky_position', {
   title: 'astronomy-mcp-server: get sky position',
   description:
-    'Compute the apparent topocentric position of one solar-system body (sun, moon, mercury through neptune, pluto) or a named bright star for an observer location and instant. Returns equatorial (RA/Dec), refraction-corrected horizontal (altitude/azimuth), and ecliptic coordinates, plus distance, apparent magnitude, angular diameter, phase angle, illuminated fraction, and the constellation it falls in. Positions are parallax- and aberration-corrected for the given observer; default elevation is 0 m and the default time is now. Supply `star` (e.g. "Sirius", "Polaris") instead of `body` to target a catalog star; `body` is ignored when `star` is set. Pass an IANA `timezone` to also receive the observer-local time. This server does not geocode — resolve a place name to latitude/longitude upstream first.',
+    'Compute the apparent topocentric position of one solar-system body (sun, moon, mercury through neptune, pluto) or a named bright star for an observer location and instant. Returns equatorial (RA/Dec), refraction-corrected horizontal (altitude/azimuth), and ecliptic coordinates, plus distance, apparent magnitude, angular diameter, phase angle, illuminated fraction, and the constellation it falls in. For a solar-system body it also returns that body card — classification, mean radius, naked-eye visibility — the same values served at astronomy://body/{body}, so a client without resource support does not need a second surface to reach them; a catalog star has no card and the field is absent. Positions are parallax- and aberration-corrected for the given observer; default elevation is 0 m and the default time is now. Supply `star` (e.g. "Sirius", "Polaris") instead of `body` to target a catalog star; `body` is ignored when `star` is set. Pass an IANA `timezone` to also receive the observer-local time. This server does not geocode — resolve a place name to latitude/longitude upstream first.',
   annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
     body: z
@@ -194,8 +205,23 @@ export const getSkyPositionTool = tool('astronomy_get_sky_position', {
 function toOutput(
   pos: ReturnType<ReturnType<typeof getEphemerisService>['position']>,
 ): SkyPositionOutputType {
+  /**
+   * `pos.body` echoes the request: a body key for a solar-system target, a catalog star
+   * name otherwise. Only the former has a card, so the lookup is also the discriminator —
+   * a star yields no metadata rather than a fabricated one.
+   */
+  const card = BODY_META[pos.body as keyof typeof BODY_META];
   return {
     body: pos.body,
+    ...(card
+      ? {
+          body_metadata: {
+            type: card.type,
+            mean_radius_km: card.meanRadiusKm,
+            naked_eye: card.nakedEye,
+          },
+        }
+      : {}),
     time_utc: pos.timeUtc,
     ...(pos.timeLocal ? { time_local: pos.timeLocal } : {}),
     equatorial: {
@@ -246,5 +272,10 @@ export function formatPosition(r: SkyPositionOutputType): string {
     `**Illuminated fraction:** ${r.illuminated_fraction === null ? 'unavailable' : pct(r.illuminated_fraction, 1)}`,
   );
   lines.push(`**Constellation:** ${r.constellation.name} (${r.constellation.abbreviation})`);
+  if (r.body_metadata) {
+    lines.push(
+      `**Body:** ${r.body_metadata.type}, mean radius ${r.body_metadata.mean_radius_km} km, naked-eye ${r.body_metadata.naked_eye ? 'yes' : 'no'}`,
+    );
+  }
   return lines.join('\n');
 }

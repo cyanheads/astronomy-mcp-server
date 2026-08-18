@@ -494,6 +494,19 @@ describe('astronomy_find_events — error contracts and validation', () => {
   });
 });
 
+/**
+ * Every numeric leaf of a response, with its dotted path. The `content[]` parity
+ * assertions run off this rather than a written-out field list, so a numeric field
+ * added to an output schema later is covered without anyone remembering to add it.
+ */
+function numericLeaves(value: unknown, path = ''): [string, number][] {
+  if (typeof value === 'number') return [[path, value]];
+  if (value === null || typeof value !== 'object') return [];
+  return Object.entries(value).flatMap(([key, child]) =>
+    numericLeaves(child, path ? `${path}.${key}` : key),
+  );
+}
+
 describe('astronomy_list_visible — boundaries and validation', () => {
   it('fails time_out_of_range outside the supported span', () => {
     const ctx = createMockContext({ errors: listVisibleTool.errors });
@@ -576,7 +589,29 @@ describe('astronomy_list_visible — boundaries and validation', () => {
     expect(text).not.toContain('above_horizon');
   });
 
-  it('format() tails only the distance — the rest of the scan line is display-only', async () => {
+  it('format() makes a listed star altitude and RA recoverable without a second call', async () => {
+    const ctx = createMockContext({ errors: listVisibleTool.errors });
+    const input = listVisibleTool.input.parse({
+      ...SEATTLE,
+      time: '2024-08-01T08:00:00Z',
+      include_stars: true,
+    });
+    const result = await listVisibleTool.handler(input, ctx);
+    const star = result.bodies.find((b) => b.body === 'Arcturus');
+    expect(star).toBeDefined();
+    const block = listVisibleTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    // `alt 11.5°` and `RA 14.28h` are what a scan reads; 11.5053577071495 and
+    // 14.280223566073504 are what a structured client gets. Both surfaces carry both.
+    expectExactCarried(text, star!.horizontal.altitude_degrees);
+    expectExactCarried(text, star!.equatorial.ra_hours);
+    // The rounded value still leads the phrase.
+    expect(displayValuesOf(text)).toContain(
+      `alt ${star!.horizontal.altitude_degrees.toFixed(1)}° az ${star!.horizontal.azimuth_degrees.toFixed(1)}°`,
+    );
+  });
+
+  it('format() carries every number in the result, not a hand-picked subset', async () => {
     const ctx = createMockContext({ errors: listVisibleTool.errors });
     const input = listVisibleTool.input.parse({
       ...SEATTLE,
@@ -588,17 +623,81 @@ describe('astronomy_list_visible — boundaries and validation', () => {
     expect(result.bodies.length).toBeGreaterThan(20);
     const block = listVisibleTool.format!(result)[0];
     const text = block && block.type === 'text' ? block.text : '';
-    // Tailing all eleven coordinates per body grew this surface by ~1.7x for digits an
-    // at-a-glance list is never read for. Only the distance keeps its tail, so the
-    // bracket count never exceeds one per body.
-    const tails = text.match(/\[/g) ?? [];
-    expect(tails.length).toBeLessThanOrEqual(result.bodies.length);
-    for (const b of result.bodies) expectExactCarried(text, b.equatorial.distance_au);
-    expect(text).not.toContain('fraction ');
+    // Driven off the response rather than a listed field set, so a numeric field added
+    // to the output later without a tail fails here instead of shipping unrecoverable.
+    const leaves = numericLeaves(result);
+    expect(leaves.length).toBeGreaterThan(result.bodies.length * 8);
+    for (const [path, value] of leaves) {
+      expect(text, `${path} = ${value} is not recoverable from content[]`).toContain(String(value));
+    }
+    // The rounded display still leads every phrase, and the exact fraction behind a
+    // percentage stays labelled so 100% is never read back as the 1 the schema declares.
+    expectRoundedDisplay(text);
+    expect(text).toContain('fraction ');
+  });
+
+  it('format() reads a null field as n/a and attempts no tail on it', async () => {
+    const ctx = createMockContext({ errors: listVisibleTool.errors });
+    const input = listVisibleTool.input.parse({
+      ...SEATTLE,
+      time: '2024-08-01T08:00:00Z',
+      include_stars: true,
+    });
+    const result = await listVisibleTool.handler(input, ctx);
+    // A catalog star carries a magnitude but no angular diameter, phase, or
+    // illumination; a planet carries all four. Both shapes are on this one sweep.
+    const star = result.bodies.find((b) => b.body === 'Arcturus');
+    const planet = result.bodies.find((b) => b.body === 'saturn');
+    expect(star?.angular_diameter_arcsec).toBeNull();
+    expect(star?.phase_angle_degrees).toBeNull();
+    expect(star?.illuminated_fraction).toBeNull();
+    expect(planet?.illuminated_fraction).not.toBeNull();
+
+    const block = listVisibleTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    const lines = text.split('\n');
+    const starLine = lines[lines.findIndex((l) => l.includes(`${star!.rank}. Arcturus`)) + 1] ?? '';
+    expect(starLine).toContain('⌀ n/a');
+    expect(starLine).toContain('phase n/a');
+    expect(starLine).toContain('illum n/a');
+    expect(starLine).not.toMatch(/n\/a\s*\[/);
+    // The magnitude it does have is still recoverable.
+    expectExactCarried(starLine, star!.magnitude!);
+  });
+
+  it('the empty-list scan still carries the sky-condition numbers and no body tails', async () => {
+    const ctx = createMockContext({ errors: listVisibleTool.errors });
+    const input = listVisibleTool.input.parse({
+      ...SEATTLE,
+      time: '2024-06-21T20:00:00Z',
+      min_altitude: 90,
+    });
+    const result = await listVisibleTool.handler(input, ctx);
+    expect(result.bodies).toHaveLength(0);
+    const block = listVisibleTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expectExactCarried(text, result.sun_altitude_degrees);
+    // One tail, the sun altitude's — there are no bodies to carry any others.
+    expect(text.match(/\[/g) ?? []).toHaveLength(1);
     expectRoundedDisplay(text);
   });
 
-  it('astronomy_get_sky_position carries the exact values this scan line rounds', async () => {
+  it('carries the exact values on both client surfaces of one call', async () => {
+    const result = await runToolContract(listVisibleTool, {
+      ...SEATTLE,
+      time: '2024-06-21T09:00:00Z',
+      include_stars: true,
+    });
+    expect(result.isError).toBeFalsy();
+    const text = firstText(result);
+    // Read off the wire shapes a client actually receives, not the handler's return:
+    // every number in structuredContent is recoverable from the content[] twin.
+    for (const [path, value] of numericLeaves(result.structuredContent)) {
+      expect(text, `${path} = ${value} is not recoverable from content[]`).toContain(String(value));
+    }
+  });
+
+  it('astronomy_get_sky_position agrees with the scan line on a body they both report', async () => {
     const time = '2024-06-21T09:00:00Z';
     const listed = await listVisibleTool.handler(
       listVisibleTool.input.parse({ ...SEATTLE, time, min_altitude: -90 }),
@@ -610,8 +709,9 @@ describe('astronomy_list_visible — boundaries and validation', () => {
       getSkyPositionTool.input.parse({ body: 'saturn', ...SEATTLE, time }),
       createMockContext({ errors: getSkyPositionTool.errors }),
     );
-    // Same instant, same observer, same schema — the recovery path a content[]-only
-    // client takes when it needs more than the scan line's rounding.
+    // Same instant, same observer, same schema — the two tools must not disagree on a
+    // body they both report. Each carries its own exact values, so this pins cross-tool
+    // consistency rather than a recovery path from one surface to the other.
     expect(detail.equatorial.ra_hours).toBe(body!.equatorial.ra_hours);
     const block = getSkyPositionTool.format!(detail)[0];
     const text = block && block.type === 'text' ? block.text : '';

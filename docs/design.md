@@ -17,7 +17,7 @@ idea sketch — not renamed, added, or dropped.
 
 | Tool | Summary | readOnlyHint | openWorldHint | Key inputs | Output shape |
 |---|---|---|---|---|---|
-| `astronomy_get_sky_position` | Apparent position of one body for an observer + time: equatorial (RA/Dec), horizontal (alt/az), ecliptic lon/lat, distance, magnitude, angular diameter, phase angle/fraction, constellation. The atomic "where is X right now." Topocentric by default. | `true` | `false` | `body`, `star?`, `latitude`, `longitude`, `elevation?`, `time?`, `timezone?` | single position record |
+| `astronomy_get_sky_position` | Apparent position of one body for an observer + time: equatorial (RA/Dec), horizontal (alt/az), ecliptic lon/lat, distance, magnitude, angular diameter, phase angle/fraction, constellation. For a solar-system body it also carries that body card (type, mean radius, naked-eye) inline, so a resource-less client reaches it without a second surface; absent for a catalog star. The atomic "where is X right now." Topocentric by default. | `true` | `false` | `body`, `star?`, `latitude`, `longitude`, `elevation?`, `time?`, `timezone?` | single position record |
 | `astronomy_get_rise_set` | Rise, set, and culmination (transit) times for a body at a location/date, plus max altitude at transit. For the Sun, also the three twilight pairs (civil/nautical/astronomical). Searches forward from `start`; returns the next `count` cycles (default 1). A body already above the horizon at `start` yields a partial first cycle (null `rise`, the imminent `set`) rather than a set paired with the following day's rise. | `true` | `false` | `body`, `latitude`, `longitude`, `elevation?`, `start?`, `count?`, `timezone?` | array of rise/set/transit events |
 | `astronomy_get_moon_phase` | Moon phase for a date: illuminated fraction, phase name, age (days since new), phase angle, and the next four quarter phases (new/first/full/last) with timestamps. | `true` | `false` | `time?`, `timezone?` | phase record + next 4 quarters |
 | `astronomy_find_events` | Search upcoming sky events from a start time, consolidated by an `event` enum. For eclipses takes an observer location and reports local visibility + contact times; the rest are geocentric. Returns the next `count` occurrences (default 1). `body` is required for `opposition`, `conjunction`, `max_elongation`, and `perigee_apogee`. | `true` | `false` | `event`, `start?`, `count?`, `body?`, `latitude?`, `longitude?`, `elevation?`, `timezone?` | array of event records |
@@ -632,12 +632,15 @@ anchored to the cycle's own rise.
   visibility note is the agent's headline; it always appears in both surfaces. Numbers
   carry the same way: a value renders as a rounded display figure with its exact
   counterpart in brackets (`RA 4.4116 h [4.411597993526305]`), dropped when the rounded
-  string already round-trips. `astronomy_list_visible` is the exception: tailing all
-  eleven coordinates per body grew that surface by ~1.7x on every call, so its scan line
-  keeps only the distance's tail — the one value whose display cannot stand in for it,
-  spanning 0.0026 AU at the Moon to 1e8 at a catalog star. Any body it lists is
-  addressable by name through `astronomy_get_sky_position`, which returns the same field
-  set with every exact value.
+  string already round-trips. `astronomy_list_visible` carries them too, and used not to:
+  tailing every coordinate grows its response about 1.5x, and that size budget was
+  originally spent by keeping only the distance's tail. The saving was not worth what it
+  cost — it made the one tool whose whole purpose is surveying dozens of bodies at once
+  the only tool from which a value could not be recovered without a second call, per body.
+  It rounds hardest of any tool here, because its per-body line is read at a glance down a
+  long list, and the rounded figure still leads every phrase; the exact value follows it in
+  brackets rather than replacing it, so readability and recoverability are not traded
+  against each other.
 - **`visibility_note` is server-computed prose, not a fabricated metric.** It's a
   deterministic rendering of real values (magnitude, altitude, compass octant from azimuth) —
   no synthetic "confidence score." The brightness adjective maps from actual magnitude
