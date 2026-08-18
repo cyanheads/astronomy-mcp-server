@@ -7,7 +7,9 @@
  *
  *   Covers every declared `ctx.fail` reason (invalid_time, invalid_time_range,
  *   incomplete_observer, invalid_step, body_not_found, horizons_unavailable,
- *   tle_not_found, object_decayed, time_out_of_range, celestrak_unavailable), the
+ *   tle_not_found, object_decayed, time_out_of_range, celestrak_unavailable,
+ *   malformed_element_set), the split between a CelesTrak outage and a 200 whose GP
+ *   record fails OMM validation — one retryable, one permanent — the
  *   happy-path parse, a sparse upstream payload (Horizons "n.a." magnitude → null),
  *   rows the parse cannot turn into a point (short layout, "n.a." distance, an
  *   unparseable position) being dropped and disclosed rather than shipped as a
@@ -25,6 +27,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { type ErrorContract, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { toJSONSchema } from 'zod/v4/core';
 import {
   type EphemerisOutputType,
   getEphemerisTool,
@@ -765,14 +768,31 @@ describe('astronomy_get_ephemeris — error contracts', () => {
 });
 
 /**
- * A real ISS (NORAD 25544) TLE epoch 2024-01-01 — used to drive the SGP4
- * propagation for real over the fixture rather than mocking the math.
+ * A real ISS (NORAD 25544) element set at epoch 2024-01-01T12:00Z, shaped the way
+ * CelesTrak serves GP data under `FORMAT=JSON` — used to drive the SGP4 propagation for
+ * real over the fixture rather than mocking the math.
  */
-const ISS_TLE = [
-  'ISS (ZARYA)',
-  '1 25544U 98067A   24001.50000000  .00016717  00000-0  10270-3 0  9006',
-  '2 25544  51.6416 247.4627 0006703 130.5360 325.0288 15.49447822  1234',
-].join('\n');
+const ISS_ELEMENTS = JSON.stringify([
+  {
+    OBJECT_NAME: 'ISS (ZARYA)',
+    OBJECT_ID: '1998-067A',
+    EPOCH: '2024-01-01T12:00:00.000000',
+    MEAN_MOTION: 15.49447822,
+    ECCENTRICITY: 0.0006703,
+    INCLINATION: 51.6416,
+    RA_OF_ASC_NODE: 247.4627,
+    ARG_OF_PERICENTER: 130.536,
+    MEAN_ANOMALY: 325.0288,
+    EPHEMERIS_TYPE: 0,
+    CLASSIFICATION_TYPE: 'U',
+    NORAD_CAT_ID: 25544,
+    ELEMENT_SET_NO: 999,
+    REV_AT_EPOCH: 123,
+    BSTAR: 0.0001027,
+    MEAN_MOTION_DOT: 0.00016717,
+    MEAN_MOTION_DDOT: 0,
+  },
+]);
 
 /**
  * A synthetic element set standing in for a decayed object: an orbit low and draggy
@@ -782,15 +802,97 @@ const ISS_TLE = [
  * rather than a real catalog entry because CelesTrak drops decayed objects from
  * `gp.php?CATNR=` — what triggers the rejection is the drag term, not the identity.
  */
-const DECAYED_TLE = [
-  'DECAYED TEST OBJECT',
-  '1 88888U 99001A   20001.50000000  .00016717  00000+0  86870-3 0  9990',
-  '2 88888  51.6000 100.0000 0005000 100.0000 260.0000 16.30000000    10',
-].join('\n');
+const DECAYED_ELEMENTS = JSON.stringify([
+  {
+    OBJECT_NAME: 'DECAYED TEST OBJECT',
+    OBJECT_ID: '1999-001A',
+    EPOCH: '2020-01-01T12:00:00.000000',
+    MEAN_MOTION: 16.3,
+    ECCENTRICITY: 0.0005,
+    INCLINATION: 51.6,
+    RA_OF_ASC_NODE: 100,
+    ARG_OF_PERICENTER: 100,
+    MEAN_ANOMALY: 260,
+    EPHEMERIS_TYPE: 0,
+    CLASSIFICATION_TYPE: 'U',
+    NORAD_CAT_ID: 88888,
+    ELEMENT_SET_NO: 999,
+    REV_AT_EPOCH: 1,
+    BSTAR: 0.0008687,
+    MEAN_MOTION_DOT: 0.00016717,
+    MEAN_MOTION_DDOT: 0,
+  },
+]);
+
+/**
+ * The exact pass geometry the ISS fixture yields over a three-day window from
+ * 2024-01-01. Pinned rather than asserted structurally so a change to how the element
+ * set reaches SGP4 has to reproduce the same orbit, down to the azimuths — a
+ * structural assertion would pass on a subtly different propagation.
+ */
+const ISS_BASELINE_PASSES = [
+  {
+    rise_utc: '2024-01-01T01:06:00.000Z',
+    peak_utc: '2024-01-01T01:11:00.000Z',
+    set_utc: '2024-01-01T01:17:00.000Z',
+    peak_altitude_degrees: 47.88101721069092,
+    rise_azimuth_degrees: 290.5091005594054,
+    set_azimuth_degrees: 95.65353075015668,
+    peak_azimuth_degrees: 357.5385040257746,
+    duration_seconds: 660,
+    sunlit: true,
+  },
+  {
+    rise_utc: '2024-01-02T01:55:00.000Z',
+    peak_utc: '2024-01-02T02:00:00.000Z',
+    set_utc: '2024-01-02T02:06:00.000Z',
+    peak_altitude_degrees: 68.43510558663432,
+    rise_azimuth_degrees: 293.29664528607714,
+    set_azimuth_degrees: 121.46507035829904,
+    peak_azimuth_degrees: 244.21337319425083,
+    duration_seconds: 660,
+    sunlit: true,
+  },
+  {
+    rise_utc: '2024-01-03T01:07:00.000Z',
+    peak_utc: '2024-01-03T01:12:30.000Z',
+    set_utc: '2024-01-03T01:18:00.000Z',
+    peak_altitude_degrees: 77.21974981116315,
+    rise_azimuth_degrees: 293.2828498925305,
+    set_azimuth_degrees: 111.88315109193502,
+    peak_azimuth_degrees: 64.43069916478123,
+    duration_seconds: 660,
+    sunlit: true,
+  },
+  {
+    rise_utc: '2024-01-03T02:44:00.000Z',
+    peak_utc: '2024-01-03T02:49:00.000Z',
+    set_utc: '2024-01-03T02:54:00.000Z',
+    peak_altitude_degrees: 21.01892580792883,
+    rise_azimuth_degrees: 287.3507070518781,
+    set_azimuth_degrees: 154.68179815462565,
+    peak_azimuth_degrees: 216.31588576206866,
+    duration_seconds: 600,
+    sunlit: true,
+  },
+];
 
 describe('astronomy_get_satellite_passes — happy path', () => {
+  it('reproduces the pinned ISS pass geometry over a three-day window', async () => {
+    stubFetch(ISS_ELEMENTS);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      norad_id: 25544,
+      ...SEATTLE,
+      days: 3,
+      start: '2024-01-01T00:00:00Z',
+    });
+    const result = await getSatellitePassesTool.handler(input, ctx);
+    expect(result.passes).toEqual(ISS_BASELINE_PASSES);
+  });
+
   it('fetches a TLE, propagates with SGP4, and returns a schema-conforming result', async () => {
-    stubFetch(ISS_TLE);
+    stubFetch(ISS_ELEMENTS);
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({
       norad_id: 25544,
@@ -811,7 +913,9 @@ describe('astronomy_get_satellite_passes — happy path', () => {
   });
 
   it('caches the TLE so a second call within the TTL does not refetch', async () => {
-    const fetchSpy = vi.fn(async () => new Response(ISS_TLE, { status: 200 }));
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
     vi.stubGlobal('fetch', fetchSpy);
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({
@@ -826,7 +930,7 @@ describe('astronomy_get_satellite_passes — happy path', () => {
   });
 
   it('format() renders a header and the no-passes branch when none are visible', async () => {
-    stubFetch(ISS_TLE);
+    stubFetch(ISS_ELEMENTS);
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     // A 1-day window from an instant; if no visible passes occur, the empty
     // branch must render rather than producing a bare header.
@@ -848,7 +952,7 @@ describe('astronomy_get_satellite_passes — happy path', () => {
   });
 
   it('omits a pass already underway at start rather than reporting start as its rise', async () => {
-    stubFetch(ISS_TLE);
+    stubFetch(ISS_ELEMENTS);
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const baseline = await getSatellitePassesTool.handler(
       getSatellitePassesTool.input.parse({
@@ -891,7 +995,7 @@ describe('astronomy_get_satellite_passes — happy path', () => {
     // At that instant the satellite is above the horizon but has not been up for a full
     // step, so it is rising, not underway — dropping it would silently lose the pass the
     // previous call just advertised.
-    stubFetch(ISS_TLE);
+    stubFetch(ISS_ELEMENTS);
     const baseline = await getSatellitePassesTool.handler(
       getSatellitePassesTool.input.parse({
         norad_id: 25544,
@@ -917,7 +1021,7 @@ describe('astronomy_get_satellite_passes — happy path', () => {
   });
 
   it('keeps a pass that rises one step after start', async () => {
-    stubFetch(ISS_TLE);
+    stubFetch(ISS_ELEMENTS);
     const baseline = await getSatellitePassesTool.handler(
       getSatellitePassesTool.input.parse({
         norad_id: 25544,
@@ -1063,7 +1167,7 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
     // and the scan loop used to swallow that per timestep, so the caller saw
     // `passes: []`, indistinguishable from "nothing visible in this window". The window
     // sits inside the element set's own validity horizon, so the object is what changed.
-    stubFetch(DECAYED_TLE);
+    stubFetch(DECAYED_ELEMENTS);
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({
       norad_id: 88888,
@@ -1084,7 +1188,7 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
     // orbit, so reporting it as a decay would be a false statement with a recovery the
     // caller cannot act on — the actionable fact is that the element set does not reach
     // that far.
-    stubFetch(ISS_TLE);
+    stubFetch(ISS_ELEMENTS);
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({
       norad_id: 25544,
@@ -1118,7 +1222,9 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
     // Bare new Date('not-a-date') is an Invalid Date; SGP4 turns it into NaN positions so
     // every candidate pass fails the elevation/sunlit filters — a silent, falsely-successful
     // "0 passes". resolveTime() must reject it up front, before any TLE fetch or propagation.
-    const fetchSpy = vi.fn(async () => new Response(ISS_TLE, { status: 200 }));
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
     vi.stubGlobal('fetch', fetchSpy);
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({
@@ -1133,7 +1239,9 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
   });
 
   it('rejects a start outside the 1900–2100 span with time_out_of_range', async () => {
-    const fetchSpy = vi.fn(async () => new Response(ISS_TLE, { status: 200 }));
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
     vi.stubGlobal('fetch', fetchSpy);
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({
@@ -1178,12 +1286,28 @@ function declaredRecovery(errors: readonly ErrorContract[] | undefined, reason: 
   return entry.recovery;
 }
 
+/**
+ * The `retryable` flag a definition declares for one of its contract reasons — the
+ * field a client reads to decide whether a failure is worth trying again. Absent is
+ * "infer from the code", which for a non-transient code means do not retry.
+ */
+function declaredRetryable(
+  errors: readonly ErrorContract[] | undefined,
+  reason: string,
+): boolean | undefined {
+  const entry = errors?.find((e) => e.reason === reason);
+  if (!entry) throw new Error(`No contract entry declares reason "${reason}".`);
+  return entry.retryable;
+}
+
 describe('astronomy_get_satellite_passes — invalid_time recovery reaches both surfaces', () => {
   it('carries the declared hint in structuredContent and in content[] text', async () => {
     // Clients split on which surface they forward: structuredContent-only clients read
     // data.recovery.hint, format()-only clients read the Recovery: line. A hint on one
     // surface and not the other leaves half the clients with no next move.
-    const fetchSpy = vi.fn(async () => new Response(ISS_TLE, { status: 200 }));
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
     vi.stubGlobal('fetch', fetchSpy);
     const result = await runToolContract(getSatellitePassesTool, {
       norad_id: 25544,
@@ -1203,7 +1327,9 @@ describe('astronomy_get_satellite_passes — invalid_time recovery reaches both 
   it('keeps the time_out_of_range hint on both surfaces', async () => {
     // The branch two lines below invalid_time in the same resolver already carried its
     // hint; a fix scoped to invalid_time must leave it alone.
-    const fetchSpy = vi.fn(async () => new Response(ISS_TLE, { status: 200 }));
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
     vi.stubGlobal('fetch', fetchSpy);
     const result = await runToolContract(getSatellitePassesTool, {
       norad_id: 25544,
@@ -1217,7 +1343,9 @@ describe('astronomy_get_satellite_passes — invalid_time recovery reaches both 
   });
 
   it('rejects an impossible calendar date in start before any TLE fetch', async () => {
-    const fetchSpy = vi.fn(async () => new Response(ISS_TLE, { status: 200 }));
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
     vi.stubGlobal('fetch', fetchSpy);
     const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
     const input = getSatellitePassesTool.input.parse({
@@ -1306,5 +1434,533 @@ describe('astronomy_get_ephemeris — calendar validity without a year range', (
     const result = await getEphemerisTool.handler(input, ctx);
     expect(result.points).toHaveLength(1);
     expect(fetchSpy).toHaveBeenCalled();
+  });
+});
+
+/**
+ * A live-shaped OMM record for a six-digit catalog object, transcribed from
+ * `gp.php?CATNR=100269&FORMAT=JSON`. CelesTrak refuses to serve this object as TLE at
+ * all — the legacy format cannot encode a catalog number above 99999 — so the JSON
+ * element set is the only one there is.
+ */
+const STARLINK_OMM = JSON.stringify([
+  {
+    OBJECT_NAME: 'STARLINK-38255',
+    OBJECT_ID: '2026-181Z',
+    EPOCH: '2026-08-18T06:06:04.961376',
+    MEAN_MOTION: 15.81947338,
+    ECCENTRICITY: 9.836e-5,
+    INCLINATION: 97.2823,
+    RA_OF_ASC_NODE: 272.1614,
+    ARG_OF_PERICENTER: 152.0908,
+    MEAN_ANOMALY: 208.0413,
+    EPHEMERIS_TYPE: 0,
+    CLASSIFICATION_TYPE: 'U',
+    NORAD_CAT_ID: 100269,
+    ELEMENT_SET_NO: 999,
+    REV_AT_EPOCH: 271,
+    BSTAR: -0.0032427123,
+    MEAN_MOTION_DOT: -0.00610774,
+    MEAN_MOTION_DDOT: 0,
+  },
+]);
+
+/**
+ * Build a candidate set the way a broad `NAME=` substring query returns one — CelesTrak
+ * matches case-insensitively anywhere in `OBJECT_NAME`, so an ordinary query resolves to
+ * thousands of objects. `noradIds` overrides the default ascending run so a fixture can
+ * arrive in an order other than the one the candidate list must come back in.
+ */
+function ommCandidates(
+  names: readonly string[],
+  firstNoradId = 44714,
+  noradIds?: readonly number[],
+): string {
+  return JSON.stringify(
+    names.map((name, i) => ({
+      OBJECT_NAME: name,
+      OBJECT_ID: `2026-${100 + i}A`,
+      EPOCH: '2026-08-18T06:06:04.961376',
+      MEAN_MOTION: 15.81947338,
+      ECCENTRICITY: 9.836e-5,
+      INCLINATION: 97.2823,
+      RA_OF_ASC_NODE: 272.1614,
+      ARG_OF_PERICENTER: 152.0908,
+      MEAN_ANOMALY: 208.0413,
+      EPHEMERIS_TYPE: 0,
+      CLASSIFICATION_TYPE: 'U',
+      NORAD_CAT_ID: noradIds?.[i] ?? firstNoradId + i,
+      ELEMENT_SET_NO: 999,
+      REV_AT_EPOCH: 271,
+      BSTAR: -0.0032427123,
+      MEAN_MOTION_DOT: -0.00610774,
+      MEAN_MOTION_DDOT: 0,
+    })),
+  );
+}
+
+describe('astronomy_get_satellite_passes — six-digit catalog numbers', () => {
+  it('asks CelesTrak for JSON, the only format that carries six-digit objects', async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      norad_id: 25544,
+      ...SEATTLE,
+      start: '2024-01-01T00:00:00Z',
+    });
+    await getSatellitePassesTool.handler(input, ctx);
+    const url = String(fetchSpy.mock.calls[0]?.[0]);
+    expect(url).toContain('CATNR=25544');
+    expect(url).toContain('FORMAT=JSON');
+    expect(url).not.toContain('FORMAT=TLE');
+  });
+
+  it('predicts passes for a six-digit catalog object instead of reporting it uncatalogued', async () => {
+    stubFetch(STARLINK_OMM);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      norad_id: 100269,
+      ...SEATTLE,
+      days: 3,
+      start: '2026-08-18T00:00:00Z',
+    });
+    const result = await getSatellitePassesTool.handler(input, ctx);
+    expect(result).toEqual(expect.schemaMatching(getSatellitePassesTool.output));
+    expect(result.norad_id).toBe(100269);
+    expect(result.satellite_name).toBe('STARLINK-38255');
+    expect(result.passes.length).toBeGreaterThan(0);
+  });
+
+  it('fails celestrak_unavailable on a 200 body that is neither JSON nor a miss sentinel', async () => {
+    stubFetch('<html>CelesTrak is down for maintenance</html>');
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ norad_id: 25544, ...SEATTLE });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('celestrak_unavailable');
+    expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+  });
+
+  it('fails tle_not_found on an empty JSON array under a 200', async () => {
+    stubFetch('[]');
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ norad_id: 99999, ...SEATTLE });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('tle_not_found');
+  });
+});
+
+describe('astronomy_get_satellite_passes — name resolution', () => {
+  it('resolves a name matching exactly one object and predicts its passes', async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      name: 'ISS (ZARYA)',
+      ...SEATTLE,
+      days: 3,
+      start: '2024-01-01T00:00:00Z',
+    });
+    const result = await getSatellitePassesTool.handler(input, ctx);
+    const url = String(fetchSpy.mock.calls[0]?.[0]);
+    expect(url).toContain(`NAME=${encodeURIComponent('ISS (ZARYA)')}`);
+    expect(url).toContain('FORMAT=JSON');
+    // One round trip: a single-match NAME= response already carries the element set.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(result.norad_id).toBe(25544);
+    expect(result.satellite_name).toBe('ISS (ZARYA)');
+    expect(result.resolved_from_name).toBe('ISS (ZARYA)');
+    // Identical geometry to the norad_id path — the input path does not change the orbit.
+    expect(result.passes).toEqual(ISS_BASELINE_PASSES);
+  });
+
+  it('fails satellite_name_not_found, not tle_not_found, when no object carries the name', async () => {
+    stubFetch('No GP data found');
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ name: 'nonexistentxyz123', ...SEATTLE });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('satellite_name_not_found');
+    expect(err?.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err?.data?.recovery?.hint).toBe(
+      declaredRecovery(getSatellitePassesTool.errors, 'satellite_name_not_found'),
+    );
+  });
+
+  it('caps an ambiguous candidate list and discloses how many were left out', async () => {
+    // A realistically broad query: NAME=STARLINK matched 10,930 current objects live.
+    const names = Array.from({ length: 10_930 }, (_, i) => `STARLINK-${1000 + i}`);
+    stubFetch(ommCandidates(names));
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ name: 'STARLINK', ...SEATTLE });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('ambiguous_satellite_name');
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    const data = err?.data as unknown as {
+      candidates?: { name: string; norad_id: number }[];
+      match_count?: number;
+      shown?: number;
+      truncated?: boolean;
+    };
+    expect(data.match_count).toBe(10_930);
+    expect(data.shown).toBe(data.candidates?.length);
+    expect(data.truncated).toBe(true);
+    expect(data.shown).toBe(20);
+    expect(data.candidates?.length).toBe(20);
+    // The count reaches a content[]-only client too, which reads the message and hint.
+    expect(err?.message).toContain('10930');
+    /**
+     * A truncated list is a slice, so the hint must lead with narrowing rather than with
+     * the declared "pick one of the listed candidates" — following that against a
+     * constellation query yields a confident prediction for an arbitrary member.
+     */
+    expect(err?.data?.recovery?.hint).toMatch(/^Supply a longer, more specific name/);
+    expect(err?.data?.recovery?.hint).not.toBe(
+      declaredRecovery(getSatellitePassesTool.errors, 'ambiguous_satellite_name'),
+    );
+  });
+
+  it('lists every candidate, with no truncation claim, when the match set fits the cap', async () => {
+    // Served out of catalog order, so the ascending order the candidates come back in is
+    // the service's doing rather than the upstream response's.
+    stubFetch(
+      ommCandidates(
+        ['HUBBLE 7', 'HUBBLE 6', 'LEMUR-2-HUBBLE-5', 'LEMUR-2-HUBBLE-4'],
+        64562,
+        [64564, 64562, 64565, 64563],
+      ),
+    );
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ name: 'Hubble', ...SEATTLE });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('ambiguous_satellite_name');
+    const data = err?.data as unknown as {
+      candidates?: { name: string; norad_id: number }[];
+      match_count?: number;
+      truncated?: boolean;
+    };
+    expect(data.match_count).toBe(4);
+    expect(data.truncated).toBe(false);
+    expect(data.candidates).toEqual([
+      { name: 'HUBBLE 6', norad_id: 64562 },
+      { name: 'LEMUR-2-HUBBLE-4', norad_id: 64563 },
+      { name: 'HUBBLE 7', norad_id: 64564 },
+      { name: 'LEMUR-2-HUBBLE-5', norad_id: 64565 },
+    ]);
+    expect(err?.message).toContain('HUBBLE 6 (64562)');
+    // A complete list is something to pick from, so it keeps the declared hint.
+    expect(err?.data?.recovery?.hint).toBe(
+      declaredRecovery(getSatellitePassesTool.errors, 'ambiguous_satellite_name'),
+    );
+  });
+
+  it('rejects supplying both norad_id and name before any CelesTrak request', async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      norad_id: 25544,
+      name: 'ISS (ZARYA)',
+      ...SEATTLE,
+    });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('invalid_target');
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.recovery?.hint).toBe(
+      declaredRecovery(getSatellitePassesTool.errors, 'invalid_target'),
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects supplying neither norad_id nor name before any CelesTrak request', async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ ...SEATTLE });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('invalid_target');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('astronomy_get_satellite_passes — name resolution on both client surfaces', () => {
+  it('carries the resolved object through structuredContent and content[] alike', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 })),
+    );
+    const result = await runToolContract(getSatellitePassesTool, {
+      name: 'ISS (ZARYA)',
+      ...SEATTLE,
+      days: 3,
+      start: '2024-01-01T00:00:00Z',
+    });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      norad_id?: number;
+      resolved_from_name?: string;
+      satellite_name?: string;
+    };
+    expect(structured.norad_id).toBe(25544);
+    expect(structured.satellite_name).toBe('ISS (ZARYA)');
+    expect(structured.resolved_from_name).toBe('ISS (ZARYA)');
+    // A content[]-only client must be able to read the same three facts.
+    expect(firstText(result)).toContain('ISS (ZARYA) (NORAD 25544)');
+    expect(firstText(result)).toContain('Resolved from the name query "ISS (ZARYA)"');
+  });
+
+  it('puts the candidate list and the match count on both surfaces of the ambiguity error', async () => {
+    stubFetch(ommCandidates(['NOAA 15', 'NOAA 16', 'NOAA 17'], 25338));
+    const result = await runToolContract(getSatellitePassesTool, { name: 'NOAA 1', ...SEATTLE });
+    const hint = declaredRecovery(getSatellitePassesTool.errors, 'ambiguous_satellite_name');
+
+    expect(result.isError).toBe(true);
+    expect(errorEnvelope(result)?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(errorEnvelope(result)?.data?.reason).toBe('ambiguous_satellite_name');
+    expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
+    expect(errorEnvelope(result)?.message).toContain('NOAA 15 (25338)');
+    // structuredContent-only clients read the structured candidates…
+    const envelopeData = errorEnvelope(result)?.data as unknown as { candidates?: unknown[] };
+    expect(envelopeData.candidates).toHaveLength(3);
+    // …and content[]-only clients read the same objects out of the message plus the hint.
+    expect(firstText(result)).toContain('NOAA 15 (25338)');
+    expect(firstText(result)).toContain('NOAA 17 (25340)');
+    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+  });
+});
+
+describe('astronomy_get_satellite_passes — name resolution edge cases', () => {
+  it('resolves a name that is one match’s whole name even when longer names contain it', async () => {
+    // CelesTrak matches NAME= as a substring, so "NOAA 1" also returns NOAA 10..19. A
+    // caller that typed a catalog name in full asked for that object, not for its
+    // namesakes.
+    stubFetch(ommCandidates(['NOAA 1', 'NOAA 10', 'NOAA 11'], 4793));
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      name: 'noaa 1',
+      ...SEATTLE,
+      start: '2026-08-18T00:00:00Z',
+    });
+    const result = await getSatellitePassesTool.handler(input, ctx);
+    expect(result.norad_id).toBe(4793);
+    expect(result.satellite_name).toBe('NOAA 1');
+    expect(result.resolved_from_name).toBe('noaa 1');
+  });
+
+  it('stays ambiguous when two objects share the queried name outright', async () => {
+    stubFetch(ommCandidates(['NOAA 7 DEB', 'NOAA 7 DEB'], 12559));
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ name: 'NOAA 7 DEB', ...SEATTLE });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('ambiguous_satellite_name');
+  });
+
+  it('caches a resolved name so a second call within the TTL does not refetch', async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+    const input = getSatellitePassesTool.input.parse({
+      name: 'ISS (ZARYA)',
+      ...SEATTLE,
+      days: 1,
+      start: '2024-01-01T00:00:00Z',
+    });
+    await getSatellitePassesTool.handler(
+      input,
+      createMockContext({ errors: getSatellitePassesTool.errors }),
+    );
+    await getSatellitePassesTool.handler(
+      input,
+      createMockContext({ errors: getSatellitePassesTool.errors }),
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a blank name from a form client as no name at all, not a catalog-wide query', async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      norad_id: 25544,
+      name: '   ',
+      ...SEATTLE,
+      days: 1,
+      start: '2024-01-01T00:00:00Z',
+    });
+    const result = await getSatellitePassesTool.handler(input, ctx);
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('CATNR=25544');
+    expect(result.resolved_from_name).toBeUndefined();
+  });
+
+  it('url-encodes a name carrying spaces and parentheses', async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({
+      name: '  ISS (ZARYA)  ',
+      ...SEATTLE,
+      start: '2024-01-01T00:00:00Z',
+    });
+    await getSatellitePassesTool.handler(input, ctx);
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('NAME=ISS%20(ZARYA)');
+  });
+
+  it('format() renders the resolving name query alongside the pass list', () => {
+    const block = getSatellitePassesTool.format!({
+      norad_id: 25544,
+      satellite_name: 'ISS (ZARYA)',
+      resolved_from_name: 'ISS',
+      passes: [],
+    })[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text).toContain('ISS (ZARYA) (NORAD 25544)');
+    expect(text).toContain('Resolved from the name query "ISS".');
+    expect(text).toMatch(/No visible passes/i);
+  });
+});
+
+/**
+ * The ISS element set with one required OMM field dropped — a well-formed 200 whose GP
+ * record parses as JSON but does not match `OmmRecordSchema`. Built from the live-shaped
+ * fixture rather than hand-written, so the record stays valid in every other respect:
+ * what makes it fail is the one named field and nothing else, and if the schema stopped
+ * requiring that field the call would succeed and the tests below would fail.
+ */
+function ommWithout(field: string, source: string = ISS_ELEMENTS): string {
+  const records = JSON.parse(source) as Record<string, unknown>[];
+  for (const record of records) delete record[field];
+  return JSON.stringify(records);
+}
+
+describe('astronomy_get_satellite_passes — a record that fails OMM validation is not an outage', () => {
+  it('fails malformed_element_set, not celestrak_unavailable, for a GP record missing a required field', async () => {
+    // The body is a 200 carrying JSON CelesTrak really served; only the OMM shape is
+    // wrong. Nothing about that is transient — the same request returns the same record
+    // — so the outage reason, whose whole guidance is "retry in a few minutes", would
+    // send the caller into a loop that can only fail again.
+    stubFetch(ommWithout('OBJECT_ID'));
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ norad_id: 25544, ...SEATTLE });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('malformed_element_set');
+    expect(err?.code).toBe(JsonRpcErrorCode.SerializationError);
+    // The message names the record that did not validate, and the field that did it.
+    expect(err?.message).toContain('NORAD ID 25544');
+    expect(err?.message).toContain('OBJECT_ID');
+    // …without handing the client the validator's own vocabulary.
+    expect(err?.message).not.toMatch(/zod|invalid_type|expected|received|issues/i);
+    // data carries the contract pair and nothing else — no issue list, no upstream body.
+    expect(err?.data).toEqual({
+      reason: 'malformed_element_set',
+      recovery: { hint: declaredRecovery(getSatellitePassesTool.errors, 'malformed_element_set') },
+    });
+  });
+
+  it('declares the schema failure non-retryable and the outage retryable', () => {
+    // The two arms differ in exactly one client-visible way: whether retrying is worth
+    // anything. A shared reason cannot express that, which is why the split exists.
+    expect(declaredRetryable(getSatellitePassesTool.errors, 'malformed_element_set')).not.toBe(
+      true,
+    );
+    expect(declaredRetryable(getSatellitePassesTool.errors, 'celestrak_unavailable')).toBe(true);
+  });
+
+  it('keeps a body that is not GP data at all on the retryable outage arm', async () => {
+    // Characterization: an HTML maintenance page is a genuine CelesTrak failure and must
+    // stay retryable. The fix narrows what the outage reason covers, not what it means.
+    stubFetch('<html>CelesTrak is down for maintenance</html>');
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ norad_id: 25544, ...SEATTLE });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('celestrak_unavailable');
+    expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(declaredRetryable(getSatellitePassesTool.errors, 'celestrak_unavailable')).toBe(true);
+  });
+
+  it('keeps a transport failure on the retryable outage arm', async () => {
+    // Characterization: nothing was parsed at all here, so the outage classification is
+    // the honest one and its retry guidance is the right next move.
+    stubFetchThrowsUpstream();
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ norad_id: 25544, ...SEATTLE });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('celestrak_unavailable');
+    expect(err?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expectNoUpstreamLeak(err?.data);
+  });
+
+  it('classifies a NAME= lookup the same way as a CATNR= one', async () => {
+    // Both lookups run through the same parse, so a name query hitting a malformed
+    // record must not fall back to the outage reason on the resolution path.
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) => new Response(ommWithout('ELEMENT_SET_NO'), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ name: 'ISS (ZARYA)', ...SEATTLE });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('NAME=');
+    expect(err?.data?.reason).toBe('malformed_element_set');
+    expect(err?.message).toContain('ISS (ZARYA)');
+    expect(err?.message).toContain('ELEMENT_SET_NO');
+  });
+
+  it('carries the hint on both client surfaces', async () => {
+    // structuredContent-only clients read data.recovery.hint, format()-only clients read
+    // the Recovery: line; a caller that only sees one of them still gets the same move.
+    stubFetch(ommWithout('OBJECT_ID'));
+    const result = await runToolContract(getSatellitePassesTool, {
+      norad_id: 25544,
+      ...SEATTLE,
+    });
+    const hint = declaredRecovery(getSatellitePassesTool.errors, 'malformed_element_set');
+
+    expect(result.isError).toBe(true);
+    expect(errorEnvelope(result)?.code).toBe(JsonRpcErrorCode.SerializationError);
+    expect(errorEnvelope(result)?.data?.reason).toBe('malformed_element_set');
+    expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
+    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+  });
+});
+
+describe('astronomy_get_satellite_passes — contract wording matches what the service throws', () => {
+  it.each([
+    ['tle_not_found', 'No GP data found', { norad_id: 99999 }],
+    ['satellite_name_not_found', 'No GP data found', { name: 'nonexistentxyz123' }],
+    ['celestrak_unavailable', '<html>not GP data</html>', { norad_id: 25544 }],
+    ['malformed_element_set', ommWithout('OBJECT_ID'), { norad_id: 25544 }],
+  ])('throws the declared %s recovery verbatim', async (reason, body, target) => {
+    stubFetch(body);
+    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
+    const input = getSatellitePassesTool.input.parse({ ...target, ...SEATTLE });
+    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe(reason);
+    expect(err?.data?.recovery?.hint).toBe(declaredRecovery(getSatellitePassesTool.errors, reason));
+  });
+
+  it('declares norad_id and name as mutually exclusive in the emitted JSON Schema', () => {
+    const json = toJSONSchema(getSatellitePassesTool.input) as {
+      oneOf?: { required?: string[]; not?: { required?: string[] }; type?: string }[];
+      required?: string[];
+    };
+    // Neither is required on its own — the exclusivity is what the schema states.
+    expect(json.required ?? []).not.toContain('norad_id');
+    expect(json.required ?? []).not.toContain('name');
+    expect(json.oneOf).toEqual([
+      { type: 'object', required: ['norad_id'], not: { required: ['name'] } },
+      { type: 'object', required: ['name'], not: { required: ['norad_id'] } },
+    ]);
   });
 });

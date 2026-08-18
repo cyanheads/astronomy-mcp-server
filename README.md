@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -39,7 +39,7 @@ Seven tools — five form the keyless, offline, deterministic core (always regis
 | `astronomy_find_events` | Forward search for the next occurrences of one sky-event class: eclipses, equinoxes, solstices, moon quarters, oppositions, conjunctions, greatest elongations, and apsides. |
 | `astronomy_list_visible` | The one-call "what's up right now" answer: every naked-eye body (and optional bright stars) above the horizon, ranked, annotated, and gated by the Sun's altitude into daylight/twilight/dark. |
 | `astronomy_get_ephemeris` | *(gated extension)* Time-series ephemeris for a small body (asteroid/comet) or spacecraft via JPL Horizons — covers what the in-process major-body set cannot. Off by default. |
-| `astronomy_get_satellite_passes` | *(gated extension)* Visible passes of a satellite (by NORAD ID) over an observer, from a CelesTrak TLE propagated with SGP4 in-process. Off by default. |
+| `astronomy_get_satellite_passes` | *(gated extension)* Visible passes of a satellite (by NORAD catalog number, or by a name resolved against the catalog) over an observer, from a CelesTrak GP element set propagated with SGP4 in-process. Off by default. |
 
 This server computes geometry — where a body is, when an event happens — not astrophysics. The core wraps [`astronomy-engine`](https://github.com/cosinekitty/astronomy) (sub-arcminute accuracy, ≈1900–2100), so given the same `(body, time, observer)` every core tool returns identical output with no network, no rate limit, and no API key. It does not geocode: resolve a place name to latitude/longitude upstream (e.g. via an OpenStreetMap server) and pass an IANA `timezone` to receive observer-local times alongside UTC.
 
@@ -110,13 +110,15 @@ Time-series ephemeris for a small body or spacecraft via the keyless JPL Horizon
 
 Visible passes of a satellite over an observer. Registered only when `ASTRONOMY_ENABLE_SATELLITES` is set.
 
-- Fetches the current TLE from CelesTrak by NORAD catalog number (e.g. `25544` for the ISS) and propagates it with SGP4 in-process
+- Identify the satellite by exactly one of `norad_id` (e.g. `25544` for the ISS) or `name` — both, or neither, is rejected before any request goes out
+- Fetches the object's current GP element set from CelesTrak as OMM JSON and propagates it with SGP4 in-process. JSON rather than TLE because the legacy format cannot encode a catalog number above 99999, and CelesTrak already assigns six-digit numbers
+- `name` is matched as a case-insensitive substring of the catalog name, so it resolves only when it picks out a single object — either the sole match, or the one match carrying that name outright. A broader query is rejected with the matching objects and their catalog numbers to choose from, capped at 20 and stating the full match count. The result echoes the query that resolved it as `resolved_from_name`
 - Returns each pass's rise, peak, and set times with azimuths and the peak elevation
 - Only naked-eye-plausible passes are returned — the satellite must be sunlit at peak while the observer's sky is dark
 - Every returned pass rises inside the requested window. A pass already underway at `start` is omitted rather than reported with `start` as its `rise_utc`; move `start` earlier to see it. A pass rising exactly at `start` is kept, so feeding a reported `rise_utc` back as `start` never loses it
 - An element set that will not propagate to the window is rejected by name — as a reentry when the window sits near the element set's epoch, otherwise as a `start` too far from it — so an empty `passes` list means only "no visible passes in this window"
 - `start` must be within about a month of today: an element set describes the orbit for weeks around its epoch, and CelesTrak publishes only current ones
-- NORAD catalog numbers are found at [celestrak.org](https://celestrak.org) or [heavens-above.com](https://heavens-above.com)
+- NORAD catalog numbers and catalog names are found at [celestrak.org](https://celestrak.org) or [heavens-above.com](https://heavens-above.com)
 - Searches the next `days` (default 7, max 10); optional observer-local pass times
 
 ## Resources and prompts
@@ -263,10 +265,10 @@ All configuration is optional and validated at startup via Zod schemas in `src/c
 | `ASTRONOMY_ENABLE_HORIZONS` | Register the `astronomy_get_ephemeris` tool (JPL Horizons). | `false` |
 | `ASTRONOMY_ENABLE_SATELLITES` | Register the `astronomy_get_satellite_passes` tool (CelesTrak + SGP4). | `false` |
 | `ASTRONOMY_HORIZONS_BASE_URL` | Override the JPL Horizons API endpoint. | `https://ssd.jpl.nasa.gov/api/horizons.api` |
-| `ASTRONOMY_CELESTRAK_BASE_URL` | Override the CelesTrak GP/TLE endpoint. | `https://celestrak.org/NORAD/elements/gp.php` |
+| `ASTRONOMY_CELESTRAK_BASE_URL` | Override the CelesTrak GP endpoint. | `https://celestrak.org/NORAD/elements/gp.php` |
 | `ASTRONOMY_DEFAULT_TIMEZONE` | Fallback IANA timezone when a tool call omits `timezone`. Unset = UTC-only output. | none |
 | `ASTRONOMY_REQUEST_TIMEOUT_MS` | HTTP timeout (ms) for Horizons and CelesTrak requests. | `15000` |
-| `ASTRONOMY_TLE_CACHE_TTL_MS` | In-process TLE cache TTL (ms) — respects CelesTrak's refetch guidance (~once/2h). | `7200000` |
+| `ASTRONOMY_TLE_CACHE_TTL_MS` | In-process element-set cache TTL (ms) — respects CelesTrak's refetch guidance (~once/2h). | `7200000` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
@@ -321,7 +323,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/mcp-server/prompts` | Prompt definitions (`*.prompt.ts`). Stargazing plan. |
 | `src/services/ephemeris` | The offline compute core — `astronomy-engine` wrapper, body-radius table, and bundled bright-star catalog. |
 | `src/services/horizons` | JPL Horizons HTTP client (gated extension). |
-| `src/services/satellite` | CelesTrak TLE fetch + SGP4 propagation (gated extension). |
+| `src/services/satellite` | CelesTrak GP/OMM fetch + SGP4 propagation (gated extension). |
 | `tests/` | Unit and integration tests mirroring `src/`. |
 
 ## Development guide

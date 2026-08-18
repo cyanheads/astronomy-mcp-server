@@ -12,17 +12,17 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 const ServerConfigSchema = z.object({
   /** Gate the astronomy_get_ephemeris tool (JPL Horizons). Off by default. */
   enableHorizons: z.stringbool().default(false),
-  /** Gate the astronomy_get_satellite_passes tool (CelesTrak TLE + SGP4). Off by default. */
+  /** Gate the astronomy_get_satellite_passes tool (CelesTrak GP/OMM + SGP4). Off by default. */
   enableSatellites: z.stringbool().default(false),
   /** JPL Horizons API endpoint. */
   horizonsBaseUrl: z.string().default('https://ssd.jpl.nasa.gov/api/horizons.api'),
-  /** CelesTrak GP/TLE endpoint. */
+  /** CelesTrak GP endpoint. */
   celestrakBaseUrl: z.string().default('https://celestrak.org/NORAD/elements/gp.php'),
   /** Optional fallback IANA timezone when a tool call omits `timezone`. Unset = UTC-only output. */
   defaultTimezone: z.string().optional(),
   /** HTTP timeout (ms) for Horizons and CelesTrak requests. */
   requestTimeoutMs: z.coerce.number().default(15000),
-  /** In-process TLE cache TTL (ms). Default 2h — respects CelesTrak's refetch guidance. */
+  /** In-process element-set cache TTL (ms). Default 2h — respects CelesTrak's refetch guidance. */
   tleCacheTtlMs: z.coerce.number().default(7200000),
 });
 

@@ -4,7 +4,7 @@ Observational astronomy computed in-process. Five keyless, offline, deterministi
 [`astronomy-engine`](https://github.com/cosinekitty/astronomy) (v2.1.19, MIT, zero deps,
 sub-arcminute accuracy) to answer "what's in the sky from here, and when." Two optional
 extensions add keyless HTTP data sources (JPL Horizons small bodies, CelesTrak satellite
-TLEs) behind config flags so the offline core always runs.
+element sets) behind config flags so the offline core always runs.
 
 This formalizes `docs/idea.md` into a build spec. Tool names are taken verbatim from the
 idea sketch — not renamed, added, or dropped.
@@ -23,7 +23,7 @@ idea sketch — not renamed, added, or dropped.
 | `astronomy_find_events` | Search upcoming sky events from a start time, consolidated by an `event` enum. For eclipses takes an observer location and reports local visibility + contact times; the rest are geocentric. Returns the next `count` occurrences (default 1). `body` is required for `opposition`, `conjunction`, `max_elongation`, and `perigee_apogee`. | `true` | `false` | `event`, `start?`, `count?`, `body?`, `latitude?`, `longitude?`, `elevation?`, `timezone?` | array of event records |
 | `astronomy_list_visible` | Workflow flagship. For a location + instant, iterate every naked-eye body (sun, moon, planets; optional bundled bright stars), compute alt/az, filter to above-horizon, return a ranked "what's up" list with a visibility note. Sun-altitude gate flags daylight/twilight/dark. `time` is a single evaluation instant, not a window — for "tonight" pick a time after astronomical dusk. | `true` | `false` | `latitude`, `longitude`, `elevation?`, `time?`, `timezone?`, `min_altitude?`, `include_stars?` | ranked visible-body list + sky condition |
 | `astronomy_get_ephemeris` | *(extension, gated)* Ephemeris for a small body (asteroid/comet) or spacecraft via JPL Horizons. The designation is passed to Horizons verbatim and must resolve to one record: numbered asteroid as `433;` (trailing semicolon), periodic comet as `DES=1P;CAP` (DES + closest-apparition), spacecraft as a negative SPK-ID — a bare name (`433 Eros`, `1P/Halley`) returns no match or an ambiguous record list. RA/Dec, distance, magnitude over a time span. Covers what the major-body set can't. `start`/`stop` are ISO 8601 UTC; `step` is a Horizons step string (e.g. `"1d"`, `"1h"`, `"10m"`). | `true` | `true` | `designation`, `latitude?`, `longitude?`, `elevation?`, `start?`, `stop?`, `step?` | time-series of positions |
-| `astronomy_get_satellite_passes` | *(extension, gated)* Visible passes of a satellite (ISS, by NORAD ID) over an observer in the next `days` (default 7). Fetches the TLE from CelesTrak, propagates with SGP4 (offline), returns pass start/peak/end with alt/az; only sunlit-satellite + dark-ground passes are "visible." NORAD IDs are found at celestrak.org or heavens-above.com. | `true` | `true` | `norad_id`, `latitude`, `longitude`, `elevation?`, `days?`, `start?`, `timezone?` | array of visible passes |
+| `astronomy_get_satellite_passes` | *(extension, gated)* Visible passes of a satellite (ISS, by NORAD catalog number or catalog name) over an observer in the next `days` (default 7). Fetches the GP element set from CelesTrak as OMM JSON, propagates with SGP4 (offline), returns pass start/peak/end with alt/az; only sunlit-satellite + dark-ground passes are "visible." Exactly one of `norad_id` and `name` is required; `name` is a case-insensitive substring match, so a broad one is rejected with the matching objects to choose from. NORAD IDs and names are found at celestrak.org or heavens-above.com. | `true` | `true` | one of `norad_id` / `name`, plus `latitude`, `longitude`, `elevation?`, `days?`, `start?`, `timezone?` | array of visible passes |
 
 Seven tools total. Five form the keyless offline core (always registered); two extensions
 register only when their config flag is enabled.
@@ -71,7 +71,7 @@ set, and when is it dark" — `astronomy_get_rise_set`; (3) "when is the next fu
 eclipse / opposition" — `astronomy_get_moon_phase` and `astronomy_find_events`; (4) "where
 is Mars right now" — `astronomy_get_sky_position`. Two optional extensions reach beyond the
 major-body set: small bodies (comets/asteroids) via JPL Horizons and satellite passes via
-CelesTrak TLEs + SGP4.
+CelesTrak GP element sets + SGP4.
 
 Observer location (lat/lon + optional elevation) and an ISO 8601 UTC instant are the
 universal inputs across every tool. Output carries both UTC and observer-local time; the
@@ -94,7 +94,7 @@ caller passes an IANA timezone, or derives one upstream by composing with `refer
   (daylight/twilight/dark).
 - Bundle a bright-star subset so the catalog-backed star slots (`DefineStar`) answer for
   named stars in `astronomy_list_visible` and `astronomy_get_sky_position`.
-- Extensions (config-gated): JPL Horizons small-body ephemerides; CelesTrak TLE + SGP4
+- Extensions (config-gated): JPL Horizons small-body ephemerides; CelesTrak GP/OMM + SGP4
   satellite pass prediction.
 
 **Non-functional**
@@ -313,7 +313,8 @@ include_stars: boolean // include catalog bright stars in the output, default fa
 // envelope:
 {
   norad_id: number;
-  satellite_name?: string;    // from TLE header if available
+  satellite_name?: string;       // the element set's OBJECT_NAME
+  resolved_from_name?: string;   // iff the request supplied `name` instead of `norad_id`
   passes: SatellitePass[];
 }
 ```
@@ -331,7 +332,7 @@ small-body database).
 |---|---|---|---|
 | `EphemerisService` | `astronomy-engine` (in-process, no network) + the bundled bright-star catalog | `position(body, observer, time)`, `riseSet(body, observer, start, count)`, `twilight(observer, date)`, `moonPhase(time)`, `findEvents(event, opts)`, `listVisible(observer, time, opts)`, `defineStar(name)` | all five core tools |
 | `HorizonsService` *(gated)* | JPL Horizons HTTP API (`ssd.jpl.nasa.gov/api/horizons.api`, keyless) | `ephemeris(designation, observer, start, stop, step)` | `astronomy_get_ephemeris` |
-| `SatelliteService` *(gated)* | CelesTrak TLE fetch (`celestrak.org`, keyless) + SGP4 propagation via `satellite.js` (in-process) | `fetchTle(noradId)`, `predictPasses(tle, observer, days)` | `astronomy_get_satellite_passes` |
+| `SatelliteService` *(gated)* | CelesTrak GP/OMM JSON fetch (`celestrak.org`, keyless) + SGP4 propagation via `satellite.js` (in-process) | `fetchElementSet(noradId)`, `resolveByName(name)`, `predictPasses(elements, observer, days, start)` | `astronomy_get_satellite_passes` |
 
 - **`EphemerisService`** is the heart and a *server-as-service* — there is no upstream to
   retry; it's pure computation over `astronomy-engine` plus a static catalog. Owns unit
@@ -343,7 +344,7 @@ small-body database).
   accessed via `getEphemerisService()`.
 - **`HorizonsService`** and **`SatelliteService`** are the only network-touching code. Each
   gets its own `fetchWithTimeout` + `withRetry` boundary (base delay ~1–2 s; Horizons can be
-  slow). TLEs are cached briefly in-process (CelesTrak asks clients not to refetch the same
+  slow). Element sets are cached briefly in-process (CelesTrak asks clients not to refetch the same
   object more than ~once/2h) — a small `Map` keyed by NORAD ID with a TTL, not `ctx.state`,
   since it's global and tenant-independent. Both throw `serviceUnavailable(...)` on
   upstream failure; they never substitute core output.
@@ -366,10 +367,10 @@ framework config. The core needs no configuration at all; every var below is opt
 | `ASTRONOMY_ENABLE_HORIZONS` | no | `false` | Gate the `astronomy_get_ephemeris` tool. `z.stringbool()`. When false, the tool is not registered. |
 | `ASTRONOMY_ENABLE_SATELLITES` | no | `false` | Gate the `astronomy_get_satellite_passes` tool. `z.stringbool()`. |
 | `ASTRONOMY_HORIZONS_BASE_URL` | no | `https://ssd.jpl.nasa.gov/api/horizons.api` | Override the JPL Horizons endpoint (testing / mirror). |
-| `ASTRONOMY_CELESTRAK_BASE_URL` | no | `https://celestrak.org/NORAD/elements/gp.php` | Override the CelesTrak GP/TLE endpoint. |
+| `ASTRONOMY_CELESTRAK_BASE_URL` | no | `https://celestrak.org/NORAD/elements/gp.php` | Override the CelesTrak GP endpoint. |
 | `ASTRONOMY_DEFAULT_TIMEZONE` | no | *(unset)* | Optional fallback IANA tz when a tool call omits `timezone`. Unset = UTC-only output. |
 | `ASTRONOMY_REQUEST_TIMEOUT_MS` | no | `15000` | HTTP timeout (ms) for Horizons and CelesTrak requests. `z.coerce.number().default(15000)`. |
-| `ASTRONOMY_TLE_CACHE_TTL_MS` | no | `7200000` | In-process TLE cache TTL (ms). Default 2 hours — respects CelesTrak's guidance not to refetch the same object more than ~once/2h. `z.coerce.number().default(7200000)`. |
+| `ASTRONOMY_TLE_CACHE_TTL_MS` | no | `7200000` | In-process element-set cache TTL (ms). Default 2 hours — respects CelesTrak's guidance not to refetch the same object more than ~once/2h. `z.coerce.number().default(7200000)`. |
 
 Use `z.stringbool()` for the boolean gates, never `z.coerce.boolean()` (`Boolean("false")`
 is `true`). The two extension tools are conditionally pushed into the `createApp({ tools })`
@@ -455,7 +456,7 @@ the idea's "when does the sun set and when is it truly dark" framing.
 
 | # | Call | Purpose |
 |---|---|---|
-| 1 | `SatelliteService.fetchTle(25544)` | CelesTrak GP query → current TLE (cached ≤2h) |
+| 1 | `SatelliteService.fetchElementSet(25544)` | CelesTrak GP query (`CATNR=`, `FORMAT=JSON`) → current OMM element set (cached ≤2h). `resolveByName("ISS (ZARYA)")` reaches the same element set through a `NAME=` query, in one round trip |
 | 2 | SGP4 propagation over `days` | step the orbit, find above-horizon intervals |
 | 3 | sun-position check per pass *(in-process, `EphemerisService`)* | keep only sunlit-satellite + dark-ground passes ("visible") |
 
@@ -546,9 +547,13 @@ public surface, so it is repeated per tool rather than extracted:
 | `astronomy_get_satellite_passes` | `invalid_time` | `InvalidParams` | As above, on `start`. |
 | `astronomy_get_satellite_passes` | `time_out_of_range` | `InvalidParams` | `start` is outside the SGP4 high-accuracy span, or too far from the epoch of the current element set for SGP4 to reach. Recovery: request a start within about a month of today. |
 | `astronomy_get_satellite_passes` | `invalid_timezone` | `InvalidParams` | As above. |
+| `astronomy_get_satellite_passes` | `invalid_target` | `InvalidParams` | Neither `norad_id` nor `name` was supplied, or both were. Recovery: supply exactly one. Rejected before any CelesTrak request. |
 | `astronomy_get_satellite_passes` | `tle_not_found` | `NotFound` | CelesTrak has no current element set for the NORAD ID. Recovery: verify the catalog number at celestrak.org; the object may have decayed. |
+| `astronomy_get_satellite_passes` | `satellite_name_not_found` | `NotFound` | No current CelesTrak object has a name containing the `name` value. Recovery: check the spelling, try a shorter distinctive substring, or look it up at celestrak.org. |
+| `astronomy_get_satellite_passes` | `ambiguous_satellite_name` | `InvalidParams` | `name` matches more than one current object and none carries it as their whole name. The error names the match count and lists up to 20 candidates with their catalog numbers, flagging `truncated` when more matched. Recovery: re-call with one candidate's `norad_id`, or narrow the name — a truncated list swaps in a hint that leads with narrowing, since the wanted object need not be shown. |
 | `astronomy_get_satellite_passes` | `object_decayed` | `NotFound` | A current element set will not propagate to a window near its own epoch — the signature of an object that has reentered. |
-| `astronomy_get_satellite_passes` | `celestrak_unavailable` | `ServiceUnavailable` | TLE fetch failed after retries. Retryable. |
+| `astronomy_get_satellite_passes` | `celestrak_unavailable` | `ServiceUnavailable` | The element-set fetch failed after retries, or returned a body that is not JSON at all. Retryable. |
+| `astronomy_get_satellite_passes` | `malformed_element_set` | `SerializationError` | CelesTrak answered with parsable JSON whose GP record does not carry the fields an OMM element set requires — a permanent property of that record, not the transient outage above. Not retryable: the same request returns the same record. The message names the subject and the fields that did not validate. Recovery: request a different object, and report the element set to celestrak.org. |
 | `astronomy://body/{body}` | `unknown_body` | `NotFound` | The `{body}` segment is not one of the supported solar-system bodies. Recovery: use one of `sun`, `moon`, `mercury` … `pluto`. |
 
 Two cross-cutting validation gates: (1) `astronomy_find_events` `observer_required` — a
@@ -616,7 +621,7 @@ leaving the accepted epoch range to the caller: the in-process engine restricts 
 - **No cloud cover / transparency / light pollution.** "Good seeing tonight?" needs the
   weather and dark-sky servers; this server answers only the geometry half.
 - **Extension rate limits.** JPL Horizons is slow and unmetered-but-throttled; CelesTrak asks
-  clients not to refetch the same object more than ~once/2h (honored via the in-process TLE
+  clients not to refetch the same object more than ~once/2h (honored via the in-process element-set
   cache). Both extensions are best-effort and `openWorldHint: true`.
 - **Timezone is caller-supplied.** Without `timezone` (and no `ASTRONOMY_DEFAULT_TIMEZONE`),
   output is UTC-only; the server won't infer a zone from coordinates.

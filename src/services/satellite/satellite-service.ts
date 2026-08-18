@@ -1,15 +1,20 @@
 /**
  * @fileoverview SatelliteService — gated extension that predicts visible satellite
- *   passes. Fetches the current TLE from CelesTrak (keyless, cached briefly in
- *   process per CelesTrak's refetch guidance), propagates with SGP4 via satellite.js
- *   (offline), and returns above-horizon passes. A pass is "visible" only when the
- *   satellite is sunlit at peak AND the observer's sky is dark — the ground-darkness
- *   gate reuses the core sun-altitude logic. A pass already underway when the window
- *   opens is omitted rather than reported with the query boundary as its rise, and an
- *   element set that will not propagate to the window is rejected — naming the object
- *   or the requested instant, whichever the epoch distance implicates — rather than
- *   yielding no passes. Network-touching code carries its own timeout + retry boundary
- *   and degrades loudly; it never substitutes core output.
+ *   passes. Fetches the current GP element set from CelesTrak as OMM JSON (keyless,
+ *   cached briefly in process per CelesTrak's refetch guidance), propagates it with SGP4
+ *   via satellite.js (offline), and returns above-horizon passes. One request builder
+ *   serves both lookups: by catalog number (`CATNR=`) and by name (`NAME=`, a
+ *   case-insensitive substring match whose single-match response already carries the
+ *   element set, so resolving a name costs no extra round trip). A pass is "visible"
+ *   only when the satellite is sunlit at peak AND the observer's sky is dark — the
+ *   ground-darkness gate reuses the core sun-altitude logic. A pass already underway
+ *   when the window opens is omitted rather than reported with the query boundary as its
+ *   rise, and an element set that will not propagate to the window is rejected — naming
+ *   the object or the requested instant, whichever the epoch distance implicates —
+ *   rather than yielding no passes. Network-touching code carries its own timeout +
+ *   retry boundary and degrades loudly; it never substitutes core output. A response
+ *   that parses but is not an OMM element set is reported apart from an outage — its
+ *   shape is a property of the record, so retrying it can only fail again.
  * @module services/satellite/satellite-service
  */
 
@@ -19,6 +24,7 @@ import {
   JsonRpcErrorCode,
   McpError,
   notFound,
+  serializationError,
   serviceUnavailable,
 } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
@@ -28,14 +34,21 @@ import {
   eciToEcf,
   gstime,
   jday,
+  json2satrec,
   propagate,
   type SatRec,
   shadowFraction,
   sunPos,
-  twoline2satrec,
 } from 'satellite.js';
 import type { ObserverInput } from '../ephemeris/types.js';
-import type { SatellitePass, SatellitePassResult, Tle } from './types.js';
+import {
+  type ElementSet,
+  type OmmRecord,
+  OmmResponseSchema,
+  type SatelliteCandidate,
+  type SatellitePass,
+  type SatellitePassResult,
+} from './types.js';
 
 const DEG = 180 / Math.PI;
 /**
@@ -62,14 +75,56 @@ const MIN_PEAK_ELEVATION = 10;
 const STEP_SECONDS = 30;
 /** Ground is "dark enough" for a naked-eye pass when the Sun is below this altitude (civil dusk). */
 const GROUND_DARK_SUN_ALT = -6;
+/**
+ * How many candidates an ambiguous name query offers back. CelesTrak's `NAME=` is a
+ * case-insensitive substring match, so an everyday query is routinely five figures deep
+ * ("STARLINK" matches over ten thousand objects) — the list exists to let a caller
+ * recognize the object it meant, not to enumerate the catalog. Twenty covers a real
+ * family (the handful of objects carrying "HUBBLE", a weather-satellite series) while
+ * keeping the error small enough to read; past that the answer is to narrow the name,
+ * and the match count says so rather than passing a slice off as the whole set.
+ */
+const MAX_NAME_CANDIDATES = 20;
 
-interface CachedTle {
+/**
+ * Recovery hints, byte-identical to the `recovery` strings the tool declares for the
+ * same reasons. The contract entry documents the next move and this is the copy that
+ * reaches the wire; a test pins each pair so the two cannot drift apart.
+ */
+const TLE_NOT_FOUND_RECOVERY =
+  'Verify the catalog number at celestrak.org; the object may have decayed or never been catalogued.';
+const NAME_NOT_FOUND_RECOVERY =
+  'Check the spelling, try a shorter distinctive substring, or look the object up at celestrak.org.';
+const AMBIGUOUS_NAME_RECOVERY =
+  'Re-call with norad_id set to one of the listed candidates, or supply a longer, more specific name.';
+/**
+ * The hint for an ambiguity whose candidate list is a slice rather than the whole match
+ * set. Picking from the list is the right first move only when the list is complete;
+ * offered against a constellation query it invites a confident pass prediction for an
+ * object the caller never asked about, so the truncated case leads with narrowing and
+ * makes the list conditional on the wanted object actually appearing in it.
+ */
+const AMBIGUOUS_NAME_TRUNCATED_RECOVERY =
+  'Supply a longer, more specific name — the listed candidates are only the lowest-numbered few of the matches. Use norad_id only if the object you want is among them.';
+const CELESTRAK_UNAVAILABLE_RECOVERY =
+  'CelesTrak is degraded or timed out; retry in a few minutes.';
+const MALFORMED_ELEMENT_SET_RECOVERY =
+  'Retrying returns the same record — request a different object, and report the element set to celestrak.org.';
+
+interface CachedElementSet {
+  elements: ElementSet;
   expiresAt: number;
-  tle: Tle;
 }
 
+/**
+ * A match set with at least one record. The parse rejects an empty response as a miss,
+ * so every record list that reaches a caller has a first element — saying so in the type
+ * keeps that invariant from being re-checked at each use.
+ */
+type MatchedRecords = [OmmRecord, ...OmmRecord[]];
+
 export class SatelliteService {
-  private readonly cache = new Map<number, CachedTle>();
+  private readonly cache = new Map<string, CachedElementSet>();
 
   constructor(
     private readonly baseUrl: string,
@@ -77,12 +132,78 @@ export class SatelliteService {
     private readonly cacheTtlMs: number,
   ) {}
 
-  /** Fetch a current TLE for a NORAD ID, using the in-process TTL cache. */
-  async fetchTle(noradId: number, ctx: Context): Promise<Tle> {
-    const cached = this.cache.get(noradId);
-    if (cached && cached.expiresAt > Date.now()) return cached.tle;
+  /** Fetch the current element set for a NORAD ID, using the in-process TTL cache. */
+  async fetchElementSet(noradId: number, ctx: Context): Promise<ElementSet> {
+    const cacheKey = `CATNR=${noradId}`;
+    const cached = this.fromCache(cacheKey);
+    if (cached) return cached;
 
-    const url = `${this.baseUrl}?CATNR=${noradId}&FORMAT=TLE`;
+    const records = await this.fetchGpRecords(cacheKey, `NORAD ID ${noradId}`, ctx, () =>
+      this.catalogMiss(noradId),
+    );
+    return this.cacheElementSet(cacheKey, records[0]);
+  }
+
+  /**
+   * Resolve a satellite name to the one current element set it names. CelesTrak matches
+   * `NAME=` as a case-insensitive substring, so a query resolves only when it picks out a
+   * single object — either because it matched one, or because exactly one match carries
+   * that name outright, which is a request for that object however many longer names
+   * contain it. Anything else comes back as candidates to choose from.
+   */
+  async resolveByName(name: string, ctx: Context): Promise<ElementSet> {
+    const query = name.trim();
+    const cacheKey = `NAME=${encodeURIComponent(query)}`;
+    const cached = this.fromCache(cacheKey);
+    if (cached) return cached;
+
+    const records = await this.fetchGpRecords(cacheKey, `the name "${query}"`, ctx, () =>
+      this.nameMiss(query),
+    );
+    const single = records.length === 1 ? records[0] : this.exactlyNamed(records, query);
+    if (!single) throw this.ambiguousName(records, query);
+    return this.cacheElementSet(cacheKey, single);
+  }
+
+  /** The one record whose `OBJECT_NAME` is the query itself, when exactly one is. */
+  private exactlyNamed(records: OmmRecord[], query: string): OmmRecord | undefined {
+    const wanted = query.toLowerCase();
+    const exact = records.filter((r) => r.OBJECT_NAME.trim().toLowerCase() === wanted);
+    return exact.length === 1 ? exact[0] : undefined;
+  }
+
+  /** The cached element set for a query, while its TTL holds. */
+  private fromCache(cacheKey: string): ElementSet | undefined {
+    const entry = this.cache.get(cacheKey);
+    return entry && entry.expiresAt > Date.now() ? entry.elements : undefined;
+  }
+
+  private cacheElementSet(cacheKey: string, record: OmmRecord): ElementSet {
+    const elements: ElementSet = {
+      name: record.OBJECT_NAME.trim(),
+      noradId: Number(record.NORAD_CAT_ID),
+      omm: record,
+    };
+    this.cache.set(cacheKey, { elements, expiresAt: Date.now() + this.cacheTtlMs });
+    return elements;
+  }
+
+  /**
+   * Run one GP query and return the records it matched. `FORMAT=JSON` rather than
+   * `FORMAT=TLE`: the legacy format cannot encode a catalog number above 99999, and
+   * CelesTrak refuses to serve such an object as TLE at all, so JSON is the only format
+   * covering the whole catalog. `params` is the query fragment selecting the objects
+   * (`CATNR=` or `NAME=`); `miss` names an empty result in the caller's own terms, since
+   * "no object with that catalog number" and "no object with that name" are different
+   * answers with different next moves.
+   */
+  private async fetchGpRecords(
+    params: string,
+    subject: string,
+    ctx: Context,
+    miss: () => McpError,
+  ): Promise<MatchedRecords> {
+    const url = `${this.baseUrl}?${params}&FORMAT=JSON`;
 
     let text: string;
     try {
@@ -90,87 +211,145 @@ export class SatelliteService {
         async () => {
           const response = await fetchWithTimeout(url, this.timeoutMs, ctx, {
             signal: ctx.signal,
-            // CelesTrak answers an uncatalogued object with 404, which is a domain
-            // outcome here (tle_not_found), not a service failure — log it at debug.
-            // The thrown status-mapped McpError is unchanged; only severity drops.
+            // CelesTrak answers an unmatched query with 404, which is a domain outcome
+            // here (a miss), not a service failure — log it at debug. The thrown
+            // status-mapped McpError is unchanged; only severity drops.
             expectedStatuses: [404],
           });
           return response.text();
         },
         {
-          operation: 'SatelliteService.fetchTle',
+          operation: 'SatelliteService.fetchGpRecords',
           context: ctx,
           baseDelayMs: 1000,
           signal: ctx.signal,
         },
       );
     } catch (err) {
-      // fetchWithTimeout throws a status-mapped McpError on any non-2xx whose
-      // data carries raw upstream internals (URL, status/body plus the legacy
-      // statusCode/responseBody aliases). Map it into the typed contract with
-      // clean data so nothing upstream leaks to the client. CelesTrak answers a
-      // missing object with 404 → NotFound.
-      throw this.classifyFetchError(err, noradId);
+      /**
+       * fetchWithTimeout throws a status-mapped McpError on any non-2xx whose data
+       * carries raw upstream internals (URL, status/body plus the legacy
+       * statusCode/responseBody aliases). Map it into the typed contract with clean data
+       * so nothing upstream leaks to the client. CelesTrak answers an unmatched query
+       * with 404 → NotFound; everything else — 5xx, a fetch deadline, a network failure
+       * — is an outage. The original rides as `cause` for server-side logs only.
+       */
+      if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) throw miss();
+      throw serviceUnavailable(
+        `Failed to fetch element sets for ${subject} from CelesTrak.`,
+        {
+          reason: 'celestrak_unavailable',
+          recovery: { hint: CELESTRAK_UNAVAILABLE_RECOVERY },
+        },
+        { cause: err instanceof Error ? err : undefined },
+      );
     }
 
-    const tle = this.parseTle(text, noradId);
-    this.cache.set(noradId, { tle, expiresAt: Date.now() + this.cacheTtlMs });
-    return tle;
+    return this.parseGpRecords(text, subject, miss);
   }
 
   /**
-   * Map a fetch/transport McpError onto the typed contract with leak-free data.
-   * A NotFound (CelesTrak's 404 for an uncatalogued object) becomes tle_not_found;
-   * everything else — 5xx (ServiceUnavailable), a fetch deadline (Timeout), or a
-   * network failure — becomes celestrak_unavailable. The
-   * original error rides as `cause` for server-side logs but never reaches the client.
+   * Parse a CelesTrak GP response into OMM records. The miss sentinel has to be tested
+   * before `JSON.parse`: CelesTrak returns that text under a 200 in some cases, and
+   * parsing it would throw a `SyntaxError` where the caller is owed a typed miss.
    */
-  private classifyFetchError(err: unknown, noradId: number): McpError {
-    if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
-      return notFound(`CelesTrak has no current element set for NORAD ID ${noradId}.`, {
-        reason: 'tle_not_found',
-        recovery: {
-          hint: 'Verify the catalog number at celestrak.org; the object may have decayed or never been catalogued.',
-        },
-      });
+  private parseGpRecords(text: string, subject: string, miss: () => McpError): MatchedRecords {
+    const trimmed = text.trim();
+    if (trimmed.length === 0 || /No GP data found|Invalid query/i.test(trimmed)) throw miss();
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      throw this.unparsable(subject);
     }
-    return serviceUnavailable(
-      `Failed to fetch a TLE for NORAD ID ${noradId} from CelesTrak.`,
+    const records = OmmResponseSchema.safeParse(parsed);
+    /**
+     * A body that parsed as JSON but does not carry an OMM element set is a different
+     * outcome from one that is not GP data at all: CelesTrak answered, with a record
+     * whose shape is a permanent property of that record. Retrying reaches the same
+     * record and fails the same way, so it is classified apart from the outage rather
+     * than sending the caller into a loop that can only fail again.
+     */
+    if (!records.success) throw this.malformedElementSet(subject, records.error.issues);
+    if (records.data.length === 0) throw miss();
+    return records.data as MatchedRecords;
+  }
+
+  private unparsable(subject: string): McpError {
+    return serviceUnavailable(`CelesTrak returned an unparsable response for ${subject}.`, {
+      reason: 'celestrak_unavailable',
+      recovery: { hint: CELESTRAK_UNAVAILABLE_RECOVERY },
+    });
+  }
+
+  /**
+   * Name the record that failed OMM validation, and the fields that failed it. Each
+   * issue path is `[record index, field name]`, and those names are the OMM message's
+   * own, so listing them says which part of the record is wrong without putting the
+   * validator's vocabulary — issue codes, expected/received types — on the wire. A body
+   * whose whole shape is wrong (an object where an array belongs) names no field, and
+   * the message stands on the subject alone.
+   */
+  private malformedElementSet(
+    subject: string,
+    issues: readonly { path: PropertyKey[] }[],
+  ): McpError {
+    const fields = [...new Set(issues.map(({ path: [, field] }) => field))].filter(
+      (field) => typeof field === 'string',
+    );
+    const named = fields.length > 0 ? ` Fields that did not validate: ${fields.join(', ')}.` : '';
+    return serializationError(
+      `CelesTrak returned a GP record for ${subject} that is not a valid OMM element set.${named}`,
       {
-        reason: 'celestrak_unavailable',
-        recovery: { hint: 'CelesTrak is degraded or timed out; retry in a few minutes.' },
+        reason: 'malformed_element_set',
+        recovery: { hint: MALFORMED_ELEMENT_SET_RECOVERY },
       },
-      { cause: err instanceof Error ? err : undefined },
     );
   }
 
-  /** Parse a CelesTrak TLE response (optional name line + the two element lines). */
-  private parseTle(text: string, noradId: number): Tle {
-    const trimmed = text.trim();
-    if (/No GP data found|Invalid query/i.test(trimmed) || trimmed.length === 0) {
-      throw notFound(`CelesTrak has no current element set for NORAD ID ${noradId}.`, {
-        reason: 'tle_not_found',
-        recovery: {
-          hint: 'Verify the catalog number at celestrak.org; the object may have decayed or never been catalogued.',
-        },
-      });
-    }
-    const lines = trimmed.split('\n').map((l) => l.trimEnd());
-    const line1Index = lines.findIndex((l) => l.startsWith('1 '));
-    const line2Index = lines.findIndex((l) => l.startsWith('2 '));
-    const line1 = line1Index === -1 ? undefined : lines[line1Index];
-    const line2 = line2Index === -1 ? undefined : lines[line2Index];
-    if (!line1 || !line2) {
-      throw serviceUnavailable(
-        `CelesTrak returned an unparsable response for NORAD ID ${noradId}.`,
-        {
-          reason: 'celestrak_unavailable',
-          recovery: { hint: 'CelesTrak may be degraded; retry in a few minutes.' },
-        },
-      );
-    }
-    const nameLine = line1Index > 0 ? lines[line1Index - 1]?.trim() : undefined;
-    return { ...(nameLine ? { name: nameLine } : {}), line1, line2 };
+  private catalogMiss(noradId: number): McpError {
+    return notFound(`CelesTrak has no current element set for NORAD ID ${noradId}.`, {
+      reason: 'tle_not_found',
+      recovery: { hint: TLE_NOT_FOUND_RECOVERY },
+    });
+  }
+
+  private nameMiss(query: string): McpError {
+    return notFound(`No current CelesTrak object has a name containing "${query}".`, {
+      reason: 'satellite_name_not_found',
+      recovery: { hint: NAME_NOT_FOUND_RECOVERY },
+    });
+  }
+
+  /**
+   * Hand back the objects a name query matched so the caller can name one outright. The
+   * total is stated whether or not the list is complete, because a slice presented as the
+   * whole set would read as a catalog holding twenty Starlinks. Ordered by catalog
+   * number — the order CelesTrak already answers in — so the same query always offers the
+   * same candidates. Whether the list is complete also selects the hint: a complete list
+   * is something to pick from, a slice is something to narrow past.
+   */
+  private ambiguousName(records: OmmRecord[], query: string): McpError {
+    const candidates: SatelliteCandidate[] = records
+      .map((r) => ({ name: r.OBJECT_NAME.trim(), norad_id: Number(r.NORAD_CAT_ID) }))
+      .sort((a, b) => a.norad_id - b.norad_id)
+      .slice(0, MAX_NAME_CANDIDATES);
+    const truncated = records.length > candidates.length;
+    const listing = candidates.map((c) => `${c.name} (${c.norad_id})`).join(', ');
+    const preamble = truncated
+      ? `"${query}" matches ${records.length} current CelesTrak objects. The ${candidates.length} with the lowest catalog numbers:`
+      : `"${query}" matches ${records.length} current CelesTrak objects:`;
+    return invalidParams(`${preamble} ${listing}.`, {
+      reason: 'ambiguous_satellite_name',
+      recovery: {
+        hint: truncated ? AMBIGUOUS_NAME_TRUNCATED_RECOVERY : AMBIGUOUS_NAME_RECOVERY,
+      },
+      match_count: records.length,
+      shown: candidates.length,
+      truncated,
+      candidates,
+    });
   }
 
   /**
@@ -184,14 +363,13 @@ export class SatelliteService {
    * `passes: []`, which reads identically to "nothing visible tonight".
    */
   predictPasses(
-    tle: Tle,
-    noradId: number,
+    elements: ElementSet,
     observer: ObserverInput,
     days: number,
     start: Date,
     formatLocal?: (d: Date) => string,
   ): SatellitePassResult {
-    const satrec = twoline2satrec(tle.line1, tle.line2);
+    const satrec = json2satrec(elements.omm);
     /**
      * Probe the first instant of the window before scanning it. SGP4 refuses an element
      * set it can no longer turn into an orbit by answering null, and the scan loop would
@@ -199,7 +377,7 @@ export class SatelliteService {
      * list. Reject up front instead, naming which of the two causes applies.
      */
     if (!propagate(satrec, start, PROPAGATE_OPTIONS)) {
-      throw this.classifyPropagationFailure(satrec, noradId, start);
+      throw this.classifyPropagationFailure(satrec, elements.noradId, start);
     }
     const observerGd = {
       longitude: (observer.longitude * Math.PI) / 180,
@@ -292,7 +470,7 @@ export class SatelliteService {
       }
     }
 
-    return { noradId, ...(tle.name ? { satelliteName: tle.name } : {}), passes };
+    return { noradId: elements.noradId, satelliteName: elements.name, passes };
   }
 
   /**
