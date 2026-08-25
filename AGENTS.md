@@ -2,9 +2,9 @@
 
 **Server:** astronomy-mcp-server
 **Version:** 0.2.8
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.11.5`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.12.3`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/sdk` ^1.30.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.0.0
 **Zod:** ^4.4.3
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -43,7 +43,7 @@ Both extension services carry their own timeout + retry boundary, cache nothing 
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
-- **Check `ctx.elicit`** for presence before calling.
+- **Need input the caller didn't supply?** `return ctx.requestInput(...)` and read `ctx.inputs` when the handler is re-entered. Never `await` for user input mid-handler. No handler here does — every tool is a pure computation over its arguments, which is why the server runs stateless.
 - **Secrets in env vars only** — never hardcoded.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
@@ -90,6 +90,10 @@ export const getMoonPhaseTool = tool('astronomy_get_moon_phase', {
 });
 ```
 
+`tool()` stores `input` with `.strict()` applied, so an argument key the schema does not declare is rejected by name before the handler runs rather than stripped. Root level only — a nested `z.object()` still strips unless it is strict itself — and an input that already declares a catchall is left alone. `astronomy_get_satellite_passes` uses that carve-out: it calls `.strict()` itself so its `.meta({ oneOf })` exclusivity survives onto the advertised `inputSchema`, which a framework-applied `.strict()` would drop when it rebuilds the schema.
+
+`error` is a reserved name on `output` and `enrichment` — that key is the wire's failure envelope, and `tool()` throws at definition time on a collision.
+
 ### Resource
 
 ```ts
@@ -103,6 +107,7 @@ export const bodyResource = resource('astronomy://body/{body}', {
   title: 'astronomy-mcp-server: body reference card',
   description: 'Static reference card for a solar-system body: name, type, mean radius (km), and naked-eye visibility.',
   mimeType: 'application/json',
+  cacheHint: { ttlMs: 86_400_000, cacheScope: 'public' }, // static table — see Caching below
   params: z.object({ body: z.string().describe('One of sun, moon, mercury … pluto.') }),
   output: BodyCardOutput,
   errors: [
@@ -196,6 +201,14 @@ await createApp({
 
 `instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
 
+### Caching
+
+Nothing this server advertises varies by caller, so `createApp({ cacheHints })` declares the list operations (`tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, `server/discover`) cacheable for an hour with `cacheScope: 'public'`. They are all decided once at startup — the tool array by the two extension gates, the rest by literals — and an hour bounds how long a client can hold a catalog from a build whose gates have since changed. `resources/read` is deliberately left off that map: `bodyResource` carries its own 24-hour `cacheHint`, and a server-wide default would silently extend that policy to whichever resource is added next. Hints exist only on protocol revision 2026-07-28; a 2025-era response is unchanged either way.
+
+### Session mode
+
+`stateless`, set in the `Dockerfile` and documented in `.env.example`. The mode a stateless server gives up is the 2025-era multi-round-trip shim, and no handler here calls `ctx.requestInput` — every tool is a pure function of its arguments — so there is nothing to give up. stdio and 2026-07-28 clients behave identically under either mode, so a green field test says nothing about this choice; the absent call site is the reason.
+
 ---
 
 ## Context
@@ -204,13 +217,13 @@ Handlers receive a unified `ctx` object. Key properties:
 
 | Property | Description |
 |:---------|:------------|
-| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
+| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
 | `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
-| `ctx.elicit` | Ask user for structured input — form call `(message, schema)` or `.url(message, url)` for an external link. **Check for presence first:** `if (ctx.elicit) { ... }` |
+| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
+| `ctx.inputs` | Reader over a retried request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped`. Empty on the first round. |
 | `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
 | `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
 | `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.progress` | Task progress (present when `task: true`) — `.setTotal(n)`, `.increment()`, `.update(message)`. |
 | `ctx.requestId` | Unique request ID. |
 | `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
 
@@ -326,7 +339,7 @@ Available skills:
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
 | `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |
 | `api-config` | AppConfig, parseConfig, env vars |
-| `api-context` | Context interface, logger, state, progress |
+| `api-context` | Context interface, RequestContext, logger, state, multi-round-trip input |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
 | `api-linter` | Definition linter rule catalog — invoked by `bun run lint:mcp` and `devcheck` |
 | `api-mirror` | MirrorService: persistent self-refreshing local mirror (embedded SQLite + FTS5) of a bulk upstream dataset — Tier 3 opt-in |
