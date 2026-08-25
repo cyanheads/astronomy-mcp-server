@@ -2448,6 +2448,7 @@ describe('astronomy_get_satellite_passes — contract wording matches what the s
     const json = toJSONSchema(getSatellitePassesTool.input) as {
       oneOf?: { required?: string[]; not?: { required?: string[] }; type?: string }[];
       required?: string[];
+      additionalProperties?: boolean;
     };
     // Neither is required on its own — the exclusivity is what the schema states.
     expect(json.required ?? []).not.toContain('norad_id');
@@ -2456,5 +2457,29 @@ describe('astronomy_get_satellite_passes — contract wording matches what the s
       { type: 'object', required: ['norad_id'], not: { required: ['name'] } },
       { type: 'object', required: ['name'], not: { required: ['norad_id'] } },
     ]);
+    /**
+     * Both constraints have to survive together. `tool()` strictens an input that
+     * declares no catchall, and that rebuild drops `.meta()` — so a schema carrying
+     * `additionalProperties: false` and no `oneOf` is the signature of the
+     * exclusivity having been silently thrown away on the advertised surface.
+     */
+    expect(json.additionalProperties).toBe(false);
+  });
+
+  it('rejects an unrecognized top-level argument by name', () => {
+    const result = getSatellitePassesTool.input.safeParse({ norad_id: 25544, ...SEATTLE, dayz: 3 });
+    expect(result.success).toBe(false);
+    const issue = result.error?.issues[0];
+    expect(issue?.code).toBe('unrecognized_keys');
+    expect(issue?.message).toContain('dayz');
+  });
+
+  it('still accepts each declared selector on its own', () => {
+    expect(getSatellitePassesTool.input.safeParse({ norad_id: 25544, ...SEATTLE }).success).toBe(
+      true,
+    );
+    expect(
+      getSatellitePassesTool.input.safeParse({ name: 'ISS (ZARYA)', ...SEATTLE }).success,
+    ).toBe(true);
   });
 });

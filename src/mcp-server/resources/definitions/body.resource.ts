@@ -17,6 +17,14 @@ export const bodyResource = resource('astronomy://body/{body}', {
   description:
     'Static reference card for a solar-system body: canonical name, type (star/planet/moon/dwarf), mean radius in kilometers, and whether it is naked-eye visible. `{body}` must be one of the closed enum values (sun, moon, mercury … pluto).',
   mimeType: 'application/json',
+  /**
+   * The card is a lookup into a compiled-in table of IAU/NASA figures — the same bytes
+   * for every caller, on every request, for the life of the build. A day is the horizon
+   * over which a redeploy would be the only thing to invalidate it, and `public` is
+   * accurate because nothing here is observer-, tenant-, or auth-scoped. Applies to
+   * protocol revision 2026-07-28 only; 2025-era reads are unchanged.
+   */
+  cacheHint: { ttlMs: 86_400_000, cacheScope: 'public' },
   params: z.object({
     body: z
       .string()

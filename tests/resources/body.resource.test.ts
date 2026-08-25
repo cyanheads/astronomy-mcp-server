@@ -39,4 +39,24 @@ describe('bodyResource', () => {
     expect(listing.resources).toHaveLength(10);
     expect(listing.resources.map((r) => r.uri)).toContain('astronomy://body/pluto');
   });
+
+  /**
+   * The card is a lookup into a compiled-in constant, so it is safe to hand a shared
+   * cache. Pinned because the hint is what a 2026-07-28 client acts on: an accidental
+   * drop to the SDK default (`ttlMs: 0`, `cacheScope: 'private'`) is invisible in
+   * every other assertion here — the handler's answer is identical either way.
+   */
+  it('declares a shareable day-long cache hint for a static reference card', () => {
+    expect(bodyResource.cacheHint).toEqual({ ttlMs: 86_400_000, cacheScope: 'public' });
+  });
+
+  /**
+   * A `ttlMs` the SDK would reject fails startup with a ConfigurationError rather than
+   * anything a handler test would catch, so the constraint is asserted on the value.
+   */
+  it('declares a ttl the protocol accepts', () => {
+    const ttlMs = bodyResource.cacheHint?.ttlMs;
+    expect(Number.isSafeInteger(ttlMs)).toBe(true);
+    expect(ttlMs).toBeGreaterThanOrEqual(0);
+  });
 });

@@ -132,6 +132,16 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
         ),
     })
     /**
+     * Strictness is declared here rather than left to `tool()`, which applies its own
+     * `.strict()` to an input that declares no catchall. That call builds a new schema,
+     * and Zod keys `.meta()` to the instance it was set on — so a framework-applied
+     * `.strict()` would drop the `oneOf` below and publish an `inputSchema` that no
+     * longer states the exclusivity. Strictening first puts `.meta()` on the schema that
+     * survives, so the emitted shape carries both `additionalProperties: false` and the
+     * branches. Same semantics either way — `.strict()` is the catchall `tool()` looks for.
+     */
+    .strict()
+    /**
      * `norad_id` and `name` are two ways of naming one object, so neither can be marked
      * required on its own. `oneOf` carries the exclusivity into the emitted JSON Schema,
      * where a validating client can act on it — with `type` on each branch, since Gemini

@@ -45,6 +45,23 @@ await createApp({
   title: 'astronomy-mcp-server',
   instructions:
     'Observer location is latitude/longitude in decimal degrees plus optional elevation; times are ISO 8601 UTC and default to now. This server does not geocode — resolve a place name to coordinates upstream (e.g. via openstreetmap) and a timezone via reference-data, then pass `timezone` to receive observer-local times. astronomy_list_visible is the one-call "what is up now" answer. The astronomy_get_ephemeris (small bodies) and astronomy_get_satellite_passes tools are off by default; enable them with ASTRONOMY_ENABLE_HORIZONS / ASTRONOMY_ENABLE_SATELLITES.',
+  /**
+   * Every catalog a client can list here is decided once, at startup: the tool array is
+   * fixed by the two gates read above, and the resource, template, and prompt sets are
+   * literals. None of them varies by caller — no definition declares an auth scope — so
+   * the results are shareable rather than per-client, and an hour is short enough that a
+   * redeploy flipping a gate reaches a reconnecting client on its next miss. Deliberately
+   * absent is a `resources/read` entry: the one resource states its own longer hint, and a
+   * server-wide default would silently apply that policy to whatever is added next. Cache
+   * hints exist only on protocol revision 2026-07-28; 2025-era responses are unchanged.
+   */
+  cacheHints: {
+    'tools/list': { ttlMs: 3_600_000, cacheScope: 'public' },
+    'prompts/list': { ttlMs: 3_600_000, cacheScope: 'public' },
+    'resources/list': { ttlMs: 3_600_000, cacheScope: 'public' },
+    'resources/templates/list': { ttlMs: 3_600_000, cacheScope: 'public' },
+    'server/discover': { ttlMs: 3_600_000, cacheScope: 'public' },
+  },
   setup() {
     initEphemerisService();
     if (cfg.enableHorizons) {

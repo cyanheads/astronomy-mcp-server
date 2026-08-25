@@ -250,3 +250,39 @@ describe('astronomy_list_visible', () => {
     expect(result.total_count).toBe(result.bodies.length);
   });
 });
+
+/**
+ * Strict inputs are a client-visible contract change, not an internal detail: a
+ * caller who misspells an argument now gets that key named back instead of a
+ * plausible answer computed without it. `tool()` applies `.strict()` to `input`,
+ * so the schema these tests parse through is the same one the dispatcher runs.
+ */
+describe('strict tool inputs', () => {
+  const MINIMAL = [
+    [getSkyPositionTool, { body: 'mars', ...SEATTLE }],
+    [getRiseSetTool, { body: 'sun', ...SEATTLE }],
+    [getMoonPhaseTool, {}],
+    [findEventsTool, { event: 'equinox' }],
+    [listVisibleTool, SEATTLE],
+  ] as const;
+
+  it.each(MINIMAL.map(([t, i]) => [t.name, t, i] as const))(
+    '%s rejects an unrecognized top-level argument by name',
+    (_name, tool, minimal) => {
+      const result = tool.input.safeParse({ ...minimal, timezon: 'America/Los_Angeles' });
+      expect(result.success).toBe(false);
+      const issue = result.error?.issues[0];
+      expect(issue?.code).toBe('unrecognized_keys');
+      // The name is the whole point — a bare "invalid input" would leave the
+      // caller guessing which of their arguments the server threw away.
+      expect(issue?.message).toContain('timezon');
+    },
+  );
+
+  it.each(MINIMAL.map(([t, i]) => [t.name, t, i] as const))(
+    '%s still accepts its declared arguments',
+    (_name, tool, minimal) => {
+      expect(tool.input.safeParse(minimal).success).toBe(true);
+    },
+  );
+});
