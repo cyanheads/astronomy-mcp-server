@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.9](changelog/0.2.x/0.2.9.md) — 2026-08-25 · ⚠️ Breaking
+
+Adopts mcp-ts-core ^0.12.3: a tool call with an argument key the schema doesn't declare is now rejected by name instead of accepted, every tool's outputSchema declares the error envelope, and list operations plus the body resource advertise cache hints. Bun pinned to 1.4.0.
+
 ## [0.2.8](changelog/0.2.x/0.2.8.md) — 2026-08-18
 
 astronomy_list_visible's content[] scan line now tails every number, not just distance, growing responses about 1.5x; astronomy_get_sky_position returns the body card inline for solar-system bodies.
