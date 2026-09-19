@@ -43,6 +43,15 @@ const extensionTools = [
 await createApp({
   name: 'astronomy-mcp-server',
   title: 'astronomy-mcp-server',
+  /**
+   * Declared here rather than left to the `auto` default so the posture travels with the
+   * source instead of with whatever the deployment happens to export. Every tool is a pure
+   * function of its arguments — no handler calls `ctx.requestInput` — so the only thing
+   * `stateless` gives up is the 2025-era multi-round-trip shim nothing here would use. Not
+   * `require: 'stateful'`: there is no capability to fail startup over. `MCP_SESSION_MODE`
+   * still wins when it carries a meaningful value, which is how an operator overrides this.
+   */
+  sessionMode: 'stateless',
   instructions:
     'Observer location is latitude/longitude in decimal degrees plus optional elevation; times are ISO 8601 UTC and default to now. This server does not geocode — resolve a place name to coordinates upstream (e.g. via openstreetmap) and a timezone via reference-data, then pass `timezone` to receive observer-local times. astronomy_list_visible is the one-call "what is up now" answer. The astronomy_get_ephemeris (small bodies) and astronomy_get_satellite_passes tools are off by default; enable them with ASTRONOMY_ENABLE_HORIZONS / ASTRONOMY_ENABLE_SATELLITES.',
   /**

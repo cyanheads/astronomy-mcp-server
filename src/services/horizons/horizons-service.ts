@@ -54,13 +54,17 @@ export class HorizonsService {
         },
       );
     } catch (err) {
-      // fetchWithTimeout throws a status-mapped McpError on any non-2xx whose data
-      // carries raw upstream internals (URL, status/body plus the legacy
-      // statusCode/responseBody aliases), and a Timeout McpError when its own
-      // deadline fires. Either way the failure is horizons_unavailable here —
-      // Horizons signals a genuine no-match with a 200 body (handled in parse), not
-      // an HTTP error status. Map to the typed contract with clean data so nothing
-      // upstream leaks to the client.
+      /**
+       * fetchWithTimeout throws a status-mapped McpError on any non-2xx whose data
+       * carries raw upstream internals (status/statusText/body plus the legacy
+       * statusCode/responseBody aliases), and a Timeout McpError when its own deadline
+       * fires. Either way the failure is horizons_unavailable here — Horizons signals a
+       * genuine no-match with a 200 body (handled in parse), not an HTTP error status.
+       * Map to the typed contract with clean data so nothing upstream leaks to the
+       * client. The request URL is no longer among those internals — the framework
+       * stopped putting it on client-facing data — but the captured body still echoes
+       * the query, so the data is replaced rather than forwarded.
+       */
       throw serviceUnavailable(
         `Failed to fetch an ephemeris for "${designation}" from JPL Horizons.`,
         {

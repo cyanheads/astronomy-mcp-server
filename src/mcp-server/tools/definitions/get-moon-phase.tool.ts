@@ -88,12 +88,14 @@ export const getMoonPhaseTool = tool('astronomy_get_moon_phase', {
       // documents the same next move the client is handed on the wire.
       recovery:
         'Pass the timestamp as an ISO 8601 UTC instant with a real calendar date, e.g. 2024-01-01T00:00:00Z, then retry.',
+      thrownBy: 'service',
     },
     {
       reason: 'time_out_of_range',
       code: JsonRpcErrorCode.InvalidParams,
       when: "The requested instant is outside the engine's high-accuracy span (≈1900–2100).",
       recovery: 'Use a date between 1900 and 2100 and retry.',
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_timezone',
@@ -101,6 +103,7 @@ export const getMoonPhaseTool = tool('astronomy_get_moon_phase', {
       when: 'The `timezone` value is not an IANA zone this runtime knows.',
       // Verbatim the hint EphemerisService.resolveTimezone() throws with.
       recovery: 'Pass a valid IANA timezone like America/Los_Angeles or UTC.',
+      thrownBy: 'service',
     },
   ],
 

@@ -167,6 +167,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       // documents the same next move the client is handed on the wire.
       recovery:
         'Pass the timestamp as an ISO 8601 UTC instant with a real calendar date, e.g. 2024-01-01T00:00:00Z, then retry.',
+      thrownBy: 'service',
     },
     {
       reason: 'time_out_of_range',
@@ -174,6 +175,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       when: 'The start instant is outside the SGP4 high-accuracy span (≈1900–2100), or more than about a month from the epoch of the current element set — checked on the epoch distance itself, since SGP4 keeps returning positions well past the point where the mean elements describe the orbit.',
       recovery:
         'Request a start within about a month of today — element sets only describe the orbit for weeks around their epoch.',
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_timezone',
@@ -181,6 +183,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       when: 'The `timezone` value is not an IANA zone this runtime knows.',
       // Verbatim the hint EphemerisService.resolveTimezone() throws with.
       recovery: 'Pass a valid IANA timezone like America/Los_Angeles or UTC.',
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_target',
@@ -198,6 +201,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       // Verbatim the hint SatelliteService throws with, as are the four below.
       recovery:
         'Verify the catalog number at celestrak.org; the object may have decayed or never been catalogued.',
+      thrownBy: 'service',
     },
     {
       reason: 'satellite_name_not_found',
@@ -205,6 +209,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       when: 'No current CelesTrak object has a name containing the `name` value.',
       recovery:
         'Check the spelling, try a shorter distinctive substring, or look the object up at celestrak.org.',
+      thrownBy: 'service',
     },
     {
       reason: 'ambiguous_satellite_name',
@@ -212,6 +217,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       when: 'The `name` value matches more than one current object and none of them carries it as their whole name. The error names the match count and lists the matching objects with their catalog numbers, capped when there are more than the list holds. A capped list carries a hint leading with narrowing instead of with the list, since the wanted object need not be among the ones shown.',
       recovery:
         'Re-call with norad_id set to one of the listed candidates, or supply a longer, more specific name.',
+      thrownBy: 'service',
     },
     {
       reason: 'object_decayed',
@@ -219,6 +225,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       when: 'A current element set will not propagate to a window near its own epoch — the signature of an object that has reentered.',
       recovery:
         'Pick an object that is still in orbit; confirm its status at celestrak.org before requesting passes.',
+      thrownBy: 'service',
     },
     {
       reason: 'celestrak_unavailable',
@@ -226,6 +233,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       when: 'The element-set fetch failed after retries, or returned a body that is not JSON at all.',
       retryable: true,
       recovery: 'CelesTrak is degraded or timed out; retry in a few minutes.',
+      thrownBy: 'service',
     },
     {
       reason: 'malformed_element_set',
@@ -233,6 +241,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       when: 'CelesTrak answered with parsable JSON whose GP record does not carry the fields an OMM element set requires — a permanent property of that record, not the transient outage celestrak_unavailable covers. The same request returns the same record, so retrying it can only fail again.',
       recovery:
         'Retrying returns the same record — request a different object, and report the element set to celestrak.org.',
+      thrownBy: 'service',
     },
   ],
 

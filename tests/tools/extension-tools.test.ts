@@ -980,10 +980,10 @@ describe('astronomy_get_ephemeris — error contracts', () => {
   });
 
   it('maps a Horizons HTTP failure to horizons_unavailable without leaking HTTP internals', async () => {
-    // fetchWithTimeout throws a status-mapped McpError whose data carries the request
-    // URL, statusCode, and raw body. The service catches it and re-throws the typed
-    // contract with leak-free data — the framework error rides only as `cause`
-    // (server-side logs), never reaching the client surface.
+    // fetchWithTimeout throws a status-mapped McpError whose data carries statusCode and
+    // the raw body, and whose message names the upstream host. The service catches it and
+    // re-throws the typed contract with leak-free data — the framework error rides only
+    // as `cause` (server-side logs), never reaching the client surface.
     stubFetchThrowsUpstream();
     const ctx = createMockContext({ errors: getEphemerisTool.errors });
     const input = getEphemerisTool.input.parse({ designation: '433;' });
@@ -1483,9 +1483,9 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
 
   it('maps a CelesTrak 404 to tle_not_found without leaking HTTP internals', async () => {
     // CelesTrak answers a missing object with HTTP 404 (not a 200 sentinel), so
-    // fetchWithTimeout throws a NotFound McpError carrying the URL, status, and
-    // raw body in its data. The service must reclassify into the typed contract
-    // with leak-free data — no statusCode/responseBody/url/requestId.
+    // fetchWithTimeout throws a NotFound McpError carrying the status and raw body
+    // in its data. The service must reclassify into the typed contract with
+    // leak-free data — no statusCode/responseBody/url/requestId.
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response('No GP data found', { status: 404 })),

@@ -217,6 +217,7 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
       when: 'JPL Horizons has no match for the designation, or the designation is ambiguous (a bare comet name matches multiple apparition records).',
       recovery:
         'Use a record-resolving form: a numbered asteroid as "<number>;" (e.g. "433;"), a periodic comet as "DES=<designation>;CAP" (e.g. "DES=1P;CAP"), or a spacecraft as its negative SPK-ID. Verify the designation at ssd.jpl.nasa.gov/tools/sbdb_lookup.html.',
+      thrownBy: 'service',
     },
     {
       reason: 'horizons_unavailable',
@@ -224,6 +225,7 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
       when: 'The JPL Horizons API failed after retries.',
       retryable: true,
       recovery: 'JPL Horizons is degraded or timed out; retry in a few minutes.',
+      thrownBy: 'service',
     },
   ],
 

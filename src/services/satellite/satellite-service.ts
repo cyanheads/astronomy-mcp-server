@@ -232,11 +232,14 @@ export class SatelliteService {
     } catch (err) {
       /**
        * fetchWithTimeout throws a status-mapped McpError on any non-2xx whose data
-       * carries raw upstream internals (URL, status/body plus the legacy
+       * carries raw upstream internals (status/statusText/body plus the legacy
        * statusCode/responseBody aliases). Map it into the typed contract with clean data
-       * so nothing upstream leaks to the client. CelesTrak answers an unmatched query
-       * with 404 → NotFound; everything else — 5xx, a fetch deadline, a network failure
-       * — is an outage. The original rides as `cause` for server-side logs only.
+       * so nothing upstream leaks to the client. The request URL is no longer among
+       * those internals — the framework stopped putting it on client-facing data — but
+       * the captured body still echoes the query, so the data is replaced rather than
+       * forwarded. CelesTrak answers an unmatched query with 404 → NotFound; everything
+       * else — 5xx, a fetch deadline, a network failure — is an outage. The original
+       * rides as `cause` for server-side logs only.
        */
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) throw miss();
       throw serviceUnavailable(
