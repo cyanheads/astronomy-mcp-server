@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.10](changelog/0.2.x/0.2.10.md) — 2026-09-19
+
+Adopts mcp-ts-core ^0.12.3 → ^0.13.6: a schema-rejected tool call now carries structuredContent.error, tool errors close with a reason/retryable suffix and a Recovery hint, and a client-injected metadata key is dropped before validation instead of rejecting the call. Skill tree moves to framework-skills/; releases now ship through a release PR.
+
 ## [0.2.9](changelog/0.2.x/0.2.9.md) — 2026-08-25 · ⚠️ Breaking
 
 Adopts mcp-ts-core ^0.12.3: a tool call with an argument key the schema doesn't declare is now rejected by name instead of accepted, every tool's outputSchema declares the error envelope, and list operations plus the body resource advertise cache hints. Bun pinned to 1.4.0.
