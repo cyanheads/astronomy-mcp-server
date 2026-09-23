@@ -160,6 +160,20 @@ export interface MoonPhaseResult {
   timeUtc: string;
 }
 
+/**
+ * Eclipse contact phases, bare-named. A solar eclipse uses the five from `partial_begin`
+ * to `partial_end`; a lunar eclipse adds the two penumbral contacts. `contacts` keys each
+ * phase as `<phase>_utc`, `contactAltitudesDegrees` by the bare name.
+ */
+export type EclipsePhase =
+  | 'penumbral_begin'
+  | 'partial_begin'
+  | 'total_begin'
+  | 'peak'
+  | 'total_end'
+  | 'partial_end'
+  | 'penumbral_end';
+
 /** Discriminated event record. `event` is the discriminator; details vary. */
 export interface EventRecord {
   /** Apsis classification. */
@@ -168,6 +182,11 @@ export interface EventRecord {
   body?: string;
   /** Which conjunction an inner planet reaches — inferior (near side) or superior (far side). */
   conjunctionKind?: 'inferior' | 'superior';
+  /**
+   * Refracted altitude in degrees of the eclipsed body (Sun for solar, Moon for lunar) at
+   * each contact, keyed by phase; null for a phase that does not occur. Observer only.
+   */
+  contactAltitudesDegrees?: Partial<Record<EclipsePhase, number | null>>;
   /** Solar/lunar eclipse contact times (ISO 8601 UTC), present per eclipse phase. */
   contacts?: Record<string, string | null>;
   distanceAu?: number;
@@ -177,10 +196,14 @@ export interface EventRecord {
   event: EventName;
   /** Eclipse classification (solar/lunar). */
   kind?: string;
-  /** True when a solar eclipse is above the horizon for the observer at peak. */
+  /** Observer only: true when the eclipsed body is above the horizon at any contact. */
   localVisible?: boolean;
   /** Peak fraction of the disc obscured, when known (eclipses). */
   obscuration?: number | null;
+  /** Global total/annular solar eclipse: geographic latitude of greatest eclipse. */
+  peakLatitudeDegrees?: number;
+  /** Global total/annular solar eclipse: geographic longitude of greatest eclipse. */
+  peakLongitudeDegrees?: number;
   /** Moon quarter name. */
   quarter?: QuarterName;
   timeLocal?: string;

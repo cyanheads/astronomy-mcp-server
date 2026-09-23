@@ -23,6 +23,8 @@ beforeAll(() => {
 const DALLAS = { latitude: 32.7767, longitude: -96.797, elevation: 131 };
 /** Seattle, WA. */
 const SEATTLE = { latitude: 47.6062, longitude: -122.3321, elevation: 56 };
+/** Rome — the 2026-08-12 partial solar eclipse peaks there just after sunset. */
+const ROME = { latitude: 41.9, longitude: 12.5, elevation: 0 };
 
 describe('moonPhase', () => {
   it('reports a full moon near 2024-04-23T23:49Z', () => {
@@ -122,15 +124,99 @@ describe('findEvents — solar eclipse (local circumstances)', () => {
     expect(e.contacts?.peak_utc).toBeTruthy();
   });
 
-  it('finds a global solar eclipse on 2024-04-08 without an observer', () => {
+  it('reports the Sun altitude at every contact of a total eclipse, all above the horizon', () => {
+    const [e] = svc.findEvents('solar_eclipse', {
+      start: new Date('2024-01-01T00:00:00Z'),
+      count: 1,
+      observer: DALLAS,
+    });
+    const altitudes = e!.contactAltitudesDegrees!;
+    expect(Object.keys(altitudes)).toEqual([
+      'partial_begin',
+      'total_begin',
+      'peak',
+      'total_end',
+      'partial_end',
+    ]);
+    for (const [phase, altitude] of Object.entries(altitudes)) {
+      expect(altitude, `${phase} altitude`).not.toBeNull();
+      expect(altitude!, `${phase} altitude`).toBeGreaterThan(50);
+      expect(altitude!, `${phase} altitude`).toBeLessThan(90);
+    }
+  });
+
+  /**
+   * The 2026-08-12 partial from Rome begins with the Sun 6.7° up and ends 10.1° below the
+   * horizon, peaking just after sunset — about 42 minutes of a deep partial eclipse are
+   * observable. Peak-only visibility answered "no" to "can I see it from here?".
+   */
+  it('marks the 2026-08-12 sunset partial from Rome visible, with each contact altitude', () => {
+    const [e] = svc.findEvents('solar_eclipse', {
+      start: new Date('2026-01-01T00:00:00Z'),
+      count: 1,
+      observer: ROME,
+    });
+    expect(e!.timeUtc.startsWith('2026-08-12')).toBe(true);
+    expect(e!.kind).toBe('partial');
+    expect(e!.localVisible).toBe(true);
+    const altitudes = e!.contactAltitudesDegrees!;
+    expect(altitudes.partial_begin).toBeCloseTo(6.7, 1);
+    expect(altitudes.total_begin).toBeNull();
+    expect(altitudes.peak).toBeCloseTo(-1.9, 1);
+    expect(altitudes.total_end).toBeNull();
+    expect(altitudes.partial_end).toBeCloseTo(-10.1, 1);
+    // Contacts stay time-only and keep their `_utc` keys.
+    expect(e!.contacts).toEqual({
+      partial_begin_utc: expect.stringMatching(/^2026-08-12T17:32/),
+      total_begin_utc: null,
+      peak_utc: e!.timeUtc,
+      total_end_utc: null,
+      partial_end_utc: expect.stringMatching(/^2026-08-12T19:13/),
+    });
+  });
+});
+
+describe('findEvents — solar eclipse (global, no observer)', () => {
+  it('returns the peak location of total and annular eclipses and no local visibility', () => {
     const events = svc.findEvents('solar_eclipse', {
+      start: new Date('2026-08-01T00:00:00Z'),
+      count: 2,
+    });
+    expect(events.map((e) => [e.kind, e.timeUtc.slice(0, 10)])).toEqual([
+      ['total', '2026-08-12'],
+      ['annular', '2027-02-06'],
+    ]);
+    expect(events[0]!.peakLatitudeDegrees).toBeCloseTo(65.2, 1);
+    expect(events[0]!.peakLongitudeDegrees).toBeCloseTo(-25.2, 1);
+    expect(events[1]!.peakLatitudeDegrees).toBeCloseTo(-31.3, 1);
+    expect(events[1]!.peakLongitudeDegrees).toBeCloseTo(-48.5, 1);
+    for (const e of events) {
+      // A global eclipse has no observer to be visible or invisible to.
+      expect(e.localVisible).toBeUndefined();
+      expect(e.contactAltitudesDegrees).toBeUndefined();
+      expect(e.contacts).toEqual({ peak_utc: e.timeUtc });
+    }
+  });
+
+  it('finds the 2024-04-08 eclipse without an observer', () => {
+    const [e] = svc.findEvents('solar_eclipse', {
       start: new Date('2024-01-01T00:00:00Z'),
       count: 1,
     });
-    const t = new Date(events[0]!.timeUtc);
-    expect(t.getUTCDate()).toBe(8);
-    expect(t.getUTCMonth()).toBe(3);
-    expect(events[0]?.localVisible).toBe(false);
+    expect(e!.timeUtc.startsWith('2024-04-08')).toBe(true);
+    expect(e!.localVisible).toBeUndefined();
+  });
+
+  it('omits the peak location and obscuration for a partial eclipse, whose axis misses Earth', () => {
+    const [e] = svc.findEvents('solar_eclipse', {
+      start: new Date('2025-03-01T00:00:00Z'),
+      count: 1,
+    });
+    expect(e!.kind).toBe('partial');
+    expect(e!.timeUtc.startsWith('2025-03-29')).toBe(true);
+    expect(e!.obscuration).toBeNull();
+    expect(e!.peakLatitudeDegrees).toBeUndefined();
+    expect(e!.peakLongitudeDegrees).toBeUndefined();
   });
 });
 
@@ -147,6 +233,181 @@ describe('findEvents — lunar eclipse', () => {
     const penumbralEnd = new Date(e.contacts!.penumbral_end_utc as string).getTime();
     expect(penumbralBegin).toBeLessThan(peak);
     expect(penumbralEnd).toBeGreaterThan(peak);
+  });
+
+  it('stays geocentric without an observer: no local visibility, no altitudes', () => {
+    const [e] = svc.findEvents('lunar_eclipse', {
+      start: new Date('2025-01-01T00:00:00Z'),
+      count: 1,
+    });
+    expect(e!.localVisible).toBeUndefined();
+    expect(e!.contactAltitudesDegrees).toBeUndefined();
+  });
+
+  it('reports the Moon altitude at all seven contacts of the 2025-03-14 total eclipse from Seattle', () => {
+    const [e] = svc.findEvents('lunar_eclipse', {
+      start: new Date('2025-01-01T00:00:00Z'),
+      count: 1,
+      observer: SEATTLE,
+    });
+    expect(e!.kind).toBe('total');
+    expect(e!.timeUtc.startsWith('2025-03-14')).toBe(true);
+    expect(e!.localVisible).toBe(true);
+    const altitudes = e!.contactAltitudesDegrees!;
+    expect(Object.keys(altitudes)).toEqual([
+      'penumbral_begin',
+      'partial_begin',
+      'total_begin',
+      'peak',
+      'total_end',
+      'partial_end',
+      'penumbral_end',
+    ]);
+    // Each altitude is the Moon's apparent (refracted, topocentric) altitude at that contact's
+    // instant — the same number astronomy_get_sky_position reports for the Moon then, to
+    // within the millisecond the contact string is rounded to.
+    for (const [phase, altitude] of Object.entries(altitudes)) {
+      const at = e!.contacts![`${phase}_utc`]!;
+      const moon = svc.position({ kind: 'body', body: 'moon' }, SEATTLE, new Date(at));
+      expect(altitude, `${phase} altitude`).toBeCloseTo(moon.horizontal.altitudeDegrees, 4);
+      expect(altitude!, `${phase} altitude`).toBeGreaterThan(0);
+    }
+  });
+
+  it('nulls the altitude of each phase a partial lunar eclipse does not reach', () => {
+    const [e] = svc.findEvents('lunar_eclipse', {
+      start: new Date('2026-08-01T00:00:00Z'),
+      count: 1,
+      observer: SEATTLE,
+    });
+    expect(e!.kind).toBe('partial');
+    const altitudes = e!.contactAltitudesDegrees!;
+    expect(altitudes.total_begin).toBeNull();
+    expect(altitudes.total_end).toBeNull();
+    for (const phase of [
+      'penumbral_begin',
+      'partial_begin',
+      'peak',
+      'partial_end',
+      'penumbral_end',
+    ] as const) {
+      expect(typeof altitudes[phase], `${phase} altitude`).toBe('number');
+    }
+  });
+
+  it('marks an eclipse that happens entirely during the local day not visible', () => {
+    // The 2025-09-07 total eclipse peaks at 18:11 UTC — late morning in Seattle, with
+    // the Moon below the horizon from the first penumbral contact to the last.
+    const [e] = svc.findEvents('lunar_eclipse', {
+      start: new Date('2025-09-01T00:00:00Z'),
+      count: 1,
+      observer: SEATTLE,
+    });
+    expect(e!.timeUtc.startsWith('2025-09-07')).toBe(true);
+    expect(e!.localVisible).toBe(false);
+    for (const [phase, altitude] of Object.entries(e!.contactAltitudesDegrees!)) {
+      expect(altitude!, `${phase} altitude`).toBeLessThan(0);
+    }
+  });
+});
+
+/**
+ * Every search stops at the end of the supported span (the close of 2100) rather than
+ * returning events the start-time gate would have rejected. One case per search
+ * mechanism: equinox/solstice share one, as do opposition/conjunction.
+ */
+describe('findEvents — stops at the end of the supported span', () => {
+  const SPAN_END = Date.parse('2101-01-01T00:00:00Z');
+  const cases: Array<{
+    name: string;
+    event: EventName;
+    start: string;
+    count: number;
+    body?: EventBodyName;
+    observer?: typeof ROME;
+    expected: number;
+  }> = [
+    { name: 'seasons', event: 'solstice', start: '2100-01-01T00:00:00Z', count: 5, expected: 2 },
+    {
+      name: 'moon quarters',
+      event: 'moon_quarter',
+      start: '2100-12-20T00:00:00Z',
+      count: 3,
+      expected: 2,
+    },
+    {
+      name: 'lunar eclipses',
+      event: 'lunar_eclipse',
+      start: '2100-01-01T00:00:00Z',
+      count: 4,
+      expected: 2,
+    },
+    {
+      name: 'lunar eclipses with an observer',
+      event: 'lunar_eclipse',
+      start: '2100-01-01T00:00:00Z',
+      count: 4,
+      observer: ROME,
+      expected: 2,
+    },
+    {
+      name: 'global solar eclipses',
+      event: 'solar_eclipse',
+      start: '2100-01-01T00:00:00Z',
+      count: 4,
+      expected: 2,
+    },
+    {
+      name: 'local solar eclipses',
+      event: 'solar_eclipse',
+      start: '2100-01-01T00:00:00Z',
+      count: 2,
+      observer: ROME,
+      expected: 0,
+    },
+    {
+      name: 'relative longitude (opposition/conjunction)',
+      event: 'opposition',
+      body: 'mars',
+      start: '2099-12-01T00:00:00Z',
+      count: 5,
+      expected: 0,
+    },
+    {
+      name: 'greatest elongation',
+      event: 'max_elongation',
+      body: 'mercury',
+      start: '2100-09-01T00:00:00Z',
+      count: 5,
+      expected: 2,
+    },
+    {
+      name: 'lunar apsides',
+      event: 'perigee_apogee',
+      body: 'moon',
+      start: '2100-12-20T00:00:00Z',
+      count: 2,
+      expected: 1,
+    },
+    {
+      name: 'planetary apsides',
+      event: 'perigee_apogee',
+      body: 'earth',
+      start: '2100-06-01T00:00:00Z',
+      count: 2,
+      expected: 1,
+    },
+  ];
+
+  it.each(cases)('$name: returns $expected of $count', (c) => {
+    const events = svc.findEvents(c.event, {
+      start: new Date(c.start),
+      count: c.count,
+      ...(c.body ? { body: c.body } : {}),
+      ...(c.observer ? { observer: c.observer } : {}),
+    });
+    expect(events).toHaveLength(c.expected);
+    for (const e of events) expect(Date.parse(e.timeUtc)).toBeLessThan(SPAN_END);
   });
 });
 

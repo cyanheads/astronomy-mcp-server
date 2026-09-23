@@ -16,11 +16,15 @@
 import { type ErrorContract, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { findEventsTool } from '@/mcp-server/tools/definitions/find-events.tool.js';
+import {
+  type FindEventsOutputType,
+  findEventsTool,
+} from '@/mcp-server/tools/definitions/find-events.tool.js';
 import { getMoonPhaseTool } from '@/mcp-server/tools/definitions/get-moon-phase.tool.js';
 import { getRiseSetTool } from '@/mcp-server/tools/definitions/get-rise-set.tool.js';
 import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
+import { num } from '@/mcp-server/tools/format-numbers.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { captureThrown } from '../helpers/capture-thrown.js';
 import {
@@ -279,17 +283,37 @@ describe('astronomy_get_rise_set — boundaries and contracts', () => {
 });
 
 describe('astronomy_find_events — error contracts and validation', () => {
-  it('exposes the InvalidParams code on the observer_required failure', () => {
+  it.each([
+    ['solar_eclipse', { latitude: 41.9 }],
+    ['lunar_eclipse', { longitude: 12.5 }],
+  ] as const)('fails incomplete_observer for a %s with one coordinate', (event, coordinate) => {
+    // A lone coordinate cannot place an observer. Dropping it would silently answer a
+    // different question — global circumstances — than the one the caller asked.
     const ctx = createMockContext({ errors: findEventsTool.errors });
     const input = findEventsTool.input.parse({
-      event: 'solar_eclipse',
-      start: '2024-01-01T00:00:00Z',
+      event,
+      start: '2026-01-01T00:00:00Z',
+      ...coordinate,
     });
     const err = captureThrown(() => {
       findEventsTool.handler(input, ctx);
     });
-    expect(err?.data?.reason).toBe('observer_required');
+    expect(err?.data?.reason).toBe('incomplete_observer');
     expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.recovery?.hint).toBe(
+      declaredRecovery(findEventsTool.errors, 'incomplete_observer'),
+    );
+  });
+
+  it('ignores a lone coordinate on an event that takes no observer', async () => {
+    const ctx = createMockContext({ errors: findEventsTool.errors });
+    const input = findEventsTool.input.parse({
+      event: 'equinox',
+      start: '2026-01-01T00:00:00Z',
+      latitude: 41.9,
+    });
+    const result = await findEventsTool.handler(input, ctx);
+    expect(result.events).toHaveLength(1);
   });
 
   it('fails time_out_of_range for a start outside the supported span', () => {
@@ -304,32 +328,22 @@ describe('astronomy_find_events — error contracts and validation', () => {
     expect(err?.data?.reason).toBe('time_out_of_range');
   });
 
-  it('does NOT require an observer for a lunar eclipse (geocentric)', async () => {
-    const ctx = createMockContext({ errors: findEventsTool.errors });
-    const input = findEventsTool.input.parse({
+  it('answers a lunar eclipse without an observer, geocentric and with no local fields', async () => {
+    // Without coordinates the eclipse is the same event for every observer, so neither
+    // surface may carry local visibility or per-contact altitudes.
+    const result = await runToolContract(findEventsTool, {
       event: 'lunar_eclipse',
       start: '2024-01-01T00:00:00Z',
     });
-    const result = await findEventsTool.handler(input, ctx);
-    expect(result.events[0]?.event).toBe('lunar_eclipse');
-  });
-
-  it('omits local_visible for a lunar eclipse even when coordinates are supplied', async () => {
-    // A lunar eclipse is the same event for every observer, so the tool advertises
-    // no local visibility for it — supplying coordinates must not conjure the field.
-    const ctx = createMockContext({ errors: findEventsTool.errors });
-    const input = findEventsTool.input.parse({
-      event: 'lunar_eclipse',
-      start: '2024-01-01T00:00:00Z',
-      ...SEATTLE,
-    });
-    const result = await findEventsTool.handler(input, ctx);
-    const e = result.events[0]!;
-    expect(e.local_visible).toBeUndefined();
+    expect(result.isError).toBeFalsy();
+    const e = (result.structuredContent as FindEventsOutputType).events[0]!;
+    expect(e.event).toBe('lunar_eclipse');
     expect(e.contacts?.peak_utc).toBeTruthy();
-    const block = findEventsTool.format!(result)[0];
-    const text = block && block.type === 'text' ? block.text : '';
+    expect(e.local_visible).toBeUndefined();
+    expect(e.contact_altitudes_degrees).toBeUndefined();
+    const text = firstText(result);
     expect(text).not.toContain('Locally visible');
+    expect(text).not.toContain('Contact altitudes');
   });
 
   it.each([
@@ -419,24 +433,20 @@ describe('astronomy_find_events — error contracts and validation', () => {
     expect(text).toMatch(/Apsis|Distance/);
   });
 
-  it('renders eclipse obscuration honestly when null (global solar, no observer)', async () => {
+  it('renders a null obscuration honestly (global partial solar, no observer)', async () => {
+    // The 2025-03-29 partial: the engine defines no obscuration for a global partial, and
+    // format() must not invent one.
     const ctx = createMockContext({ errors: findEventsTool.errors });
     const input = findEventsTool.input.parse({
       event: 'solar_eclipse',
-      start: '2024-01-01T00:00:00Z',
-      latitude: 0,
-      longitude: 0,
+      start: '2025-03-01T00:00:00Z',
     });
     const result = await findEventsTool.handler(input, ctx);
-    // Whatever obscuration comes back, format() must not invent a value: a null
-    // renders as "unavailable", a number renders as a percentage.
+    expect(result.events[0]?.kind).toBe('partial');
+    expect(result.events[0]?.obscuration).toBeNull();
     const block = findEventsTool.format!(result)[0];
     const text = block && block.type === 'text' ? block.text : '';
-    if (result.events[0]?.obscuration === null) {
-      expect(text).toContain('unavailable');
-    } else {
-      expect(text).toMatch(/Obscuration:.*%/);
-    }
+    expect(text).toContain('**Obscuration:** unavailable');
   });
 
   it('format() opens with the total event count', async () => {
@@ -493,6 +503,229 @@ describe('astronomy_find_events — error contracts and validation', () => {
     expect(text).toContain('[0.0024215706172]');
   });
 });
+
+/** The success payload of a `runToolContract` call, typed as find_events output. */
+function eventsOf(result: ToolCallResult): FindEventsOutputType['events'] {
+  return (result.structuredContent as FindEventsOutputType).events;
+}
+
+/** Every `content[]` text block joined — `format()` output plus the enrichment trailer. */
+function allText(result: ToolCallResult): string {
+  return result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
+}
+
+/** Every number in `structuredContent` is recoverable from the `content[]` a client reads. */
+function expectContentCarriesEveryNumber(result: ToolCallResult): void {
+  const text = allText(result);
+  for (const [path, value] of numericLeaves(result.structuredContent)) {
+    expect(text, `${path} = ${value} is not recoverable from content[]`).toContain(String(value));
+  }
+}
+
+/**
+ * Eclipse circumstances, driven through the production rendering path so each field is
+ * asserted on both client surfaces: `structuredContent` for structured clients, and the
+ * `content[]` text a format()-only client reads — every number recoverable from it.
+ */
+describe('astronomy_find_events — eclipse circumstances on both surfaces', () => {
+  const ROME = { latitude: 41.9, longitude: 12.5 };
+
+  it('marks the 2026-08-12 sunset partial from Rome visible, with every contact altitude', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'solar_eclipse',
+      start: '2026-01-01T00:00:00Z',
+      ...ROME,
+    });
+    expect(result.isError).toBeFalsy();
+    const e = eventsOf(result)[0]!;
+    expect(e.time_utc.startsWith('2026-08-12')).toBe(true);
+    expect(e.local_visible).toBe(true);
+    const altitudes = e.contact_altitudes_degrees!;
+    expect(Object.keys(altitudes)).toEqual([
+      'partial_begin',
+      'total_begin',
+      'peak',
+      'total_end',
+      'partial_end',
+    ]);
+    expect(altitudes.partial_begin).toBeCloseTo(6.7, 1);
+    expect(altitudes.total_begin).toBeNull();
+    expect(altitudes.peak).toBeCloseTo(-1.9, 1);
+    expect(altitudes.total_end).toBeNull();
+    expect(altitudes.partial_end).toBeCloseTo(-10.1, 1);
+    // `contacts` stays time-only.
+    for (const value of Object.values(e.contacts!)) {
+      expect(value === null || typeof value === 'string').toBe(true);
+    }
+
+    const text = firstText(result);
+    expect(text).toContain('**Locally visible:** yes');
+    expect(text).toContain(`partial_begin ${num1(altitudes.partial_begin!)}`);
+    expect(text).toContain(`peak ${num1(altitudes.peak!)}`);
+    expect(text).toContain(`partial_end ${num1(altitudes.partial_end!)}`);
+    expectContentCarriesEveryNumber(result);
+    expectRoundedDisplay(text);
+  });
+
+  it('keeps the Dallas totality visible with all five contact altitudes above the horizon', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'solar_eclipse',
+      start: '2024-01-01T00:00:00Z',
+      latitude: 32.7767,
+      longitude: -96.797,
+    });
+    const e = eventsOf(result)[0]!;
+    expect(e.local_visible).toBe(true);
+    for (const [phase, altitude] of Object.entries(e.contact_altitudes_degrees!)) {
+      expect(altitude!, `${phase} altitude`).toBeGreaterThan(0);
+      expect(firstText(result)).toContain(`${phase} ${num1(altitude!)}`);
+    }
+  });
+
+  it('returns global solar eclipses with peak coordinates when no observer is supplied', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'solar_eclipse',
+      start: '2026-08-01T00:00:00Z',
+      count: 2,
+    });
+    expect(result.isError).toBeFalsy();
+    const events = eventsOf(result);
+    expect(events.map((e) => e.kind)).toEqual(['total', 'annular']);
+    expect(events[0]!.peak_latitude_degrees).toBeCloseTo(65.2, 1);
+    expect(events[0]!.peak_longitude_degrees).toBeCloseTo(-25.2, 1);
+    expect(events[1]!.peak_latitude_degrees).toBeCloseTo(-31.3, 1);
+    expect(events[1]!.peak_longitude_degrees).toBeCloseTo(-48.5, 1);
+    for (const e of events) {
+      expect(e.local_visible).toBeUndefined();
+      expect(e.contact_altitudes_degrees).toBeUndefined();
+    }
+
+    const text = firstText(result);
+    expect(text).toContain(
+      `**Peak location:** lat ${num1(events[0]!.peak_latitude_degrees!)}, lon ${num1(events[0]!.peak_longitude_degrees!)}`,
+    );
+    expect(text).not.toContain('Locally visible');
+    expectContentCarriesEveryNumber(result);
+  });
+
+  it('omits the peak location for a global partial solar eclipse on both surfaces', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'solar_eclipse',
+      start: '2025-03-01T00:00:00Z',
+    });
+    const e = eventsOf(result)[0]!;
+    expect(e.kind).toBe('partial');
+    expect(e.peak_latitude_degrees).toBeUndefined();
+    expect(e.peak_longitude_degrees).toBeUndefined();
+    expect(firstText(result)).not.toContain('Peak location');
+  });
+
+  it('reports lunar local circumstances at all seven contacts when coordinates are supplied', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'lunar_eclipse',
+      start: '2025-01-01T00:00:00Z',
+      ...SEATTLE,
+    });
+    expect(result.isError).toBeFalsy();
+    const e = eventsOf(result)[0]!;
+    expect(e.kind).toBe('total');
+    expect(e.local_visible).toBe(true);
+    const altitudes = e.contact_altitudes_degrees!;
+    expect(Object.keys(altitudes)).toEqual([
+      'penumbral_begin',
+      'partial_begin',
+      'total_begin',
+      'peak',
+      'total_end',
+      'partial_end',
+      'penumbral_end',
+    ]);
+    const text = firstText(result);
+    expect(text).toContain('**Locally visible:** yes');
+    for (const [phase, altitude] of Object.entries(altitudes)) {
+      expect(altitude, `${phase} altitude`).not.toBeNull();
+      expect(text).toContain(`${phase} ${num1(altitude!)}`);
+    }
+    expectContentCarriesEveryNumber(result);
+  });
+
+  it('reports a daytime lunar eclipse not visible, and nulls unreached phases', async () => {
+    const daytime = await runToolContract(findEventsTool, {
+      event: 'lunar_eclipse',
+      start: '2025-09-01T00:00:00Z',
+      ...SEATTLE,
+    });
+    expect(eventsOf(daytime)[0]!.local_visible).toBe(false);
+    expect(firstText(daytime)).toContain('**Locally visible:** no');
+
+    const partial = await runToolContract(findEventsTool, {
+      event: 'lunar_eclipse',
+      start: '2026-08-01T00:00:00Z',
+      ...SEATTLE,
+    });
+    const altitudes = eventsOf(partial)[0]!.contact_altitudes_degrees!;
+    expect(altitudes.total_begin).toBeNull();
+    expect(altitudes.total_end).toBeNull();
+    // A phase that does not occur is left out of the rendered line, as in Contacts.
+    const line = firstText(partial)
+      .split('\n')
+      .find((l) => l.startsWith('**Contact altitudes:**'));
+    expect(line).toBeDefined();
+    expect(line).not.toContain('total_begin');
+    expect(line).toContain('penumbral_begin');
+  });
+});
+
+/**
+ * Searches stop at the end of the supported span. A list cut short that way is not the
+ * complete answer the caller asked for, so the handler says so — on both surfaces.
+ */
+describe('astronomy_find_events — the end of the supported span', () => {
+  /** The `notice` enrichment on a successful call's structuredContent. */
+  const noticeOf = (result: ToolCallResult) =>
+    (result.structuredContent as { notice?: string }).notice;
+
+  it('returns zero events and a notice when the first result falls past 2100', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'opposition',
+      body: 'mars',
+      start: '2099-12-01T00:00:00Z',
+      count: 5,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(eventsOf(result)).toEqual([]);
+    expect(noticeOf(result)).toMatch(/0 of 5/);
+    expect(noticeOf(result)).toMatch(/2100/);
+    // The empty list renders as a clean header; the notice rides the enrichment trailer.
+    expect(firstText(result)).toBe('## 0 events found');
+    expect(allText(result)).toContain(noticeOf(result)!);
+  });
+
+  it('names N of M when the span ends partway through the requested count', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'solstice',
+      start: '2100-01-01T00:00:00Z',
+      count: 5,
+    });
+    expect(eventsOf(result).map((e) => e.which)).toEqual(['june', 'december']);
+    expect(noticeOf(result)).toMatch(/2 of 5/);
+    expect(allText(result)).toContain(noticeOf(result)!);
+  });
+
+  it('adds no notice when the full count fits inside the span', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'moon_quarter',
+      start: '2100-12-01T00:00:00Z',
+      count: 4,
+    });
+    expect(eventsOf(result)).toHaveLength(4);
+    expect(noticeOf(result)).toBeUndefined();
+    expect(allText(result)).not.toContain('supported span');
+  });
+});
+
+/** The one-decimal display `format()` gives an angle, with its exact tail when lossy. */
+const num1 = (value: number) => num(value, 1, '°');
 
 /**
  * Every numeric leaf of a response, with its dotted path. The `content[]` parity

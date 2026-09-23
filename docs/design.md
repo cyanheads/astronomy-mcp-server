@@ -20,7 +20,7 @@ idea sketch — not renamed, added, or dropped.
 | `astronomy_get_sky_position` | Apparent position of one body for an observer + time: equatorial (RA/Dec), horizontal (alt/az), ecliptic lon/lat, distance, magnitude, angular diameter, phase angle/fraction, constellation. For a solar-system body it also carries that body card (type, mean radius, naked-eye) inline, so a resource-less client reaches it without a second surface; absent for a catalog star. The atomic "where is X right now." Topocentric by default. | `true` | `false` | `body`, `star?`, `latitude`, `longitude`, `elevation?`, `time?`, `timezone?` | single position record |
 | `astronomy_get_rise_set` | Rise, set, and culmination (transit) times for a body at a location/date, plus max altitude at transit. For the Sun, also the three twilight pairs (civil/nautical/astronomical). Searches forward from `start`; returns the next `count` cycles (default 1). A body already above the horizon at `start` yields a partial first cycle (null `rise`, the imminent `set`) rather than a set paired with the following day's rise. | `true` | `false` | `body`, `latitude`, `longitude`, `elevation?`, `start?`, `count?`, `timezone?` | array of rise/set/transit events |
 | `astronomy_get_moon_phase` | Moon phase for a date: illuminated fraction, phase name, age (days since new), phase angle, and the next four quarter phases (new/first/full/last) with timestamps. | `true` | `false` | `time?`, `timezone?` | phase record + next 4 quarters |
-| `astronomy_find_events` | Search upcoming sky events from a start time, consolidated by an `event` enum. For eclipses takes an observer location and reports local visibility + contact times; the rest are geocentric. Returns the next `count` occurrences (default 1). `body` is required for `opposition`, `conjunction`, `max_elongation`, and `perigee_apogee`. | `true` | `false` | `event`, `start?`, `count?`, `body?`, `latitude?`, `longitude?`, `elevation?`, `timezone?` | array of event records |
+| `astronomy_find_events` | Search upcoming sky events from a start time, consolidated by an `event` enum. Both eclipse classes take an optional observer: solar eclipses are global without one (peak location for total/annular) and local with one; lunar contact times are geocentric, and an observer adds local visibility + the Moon's altitude at each contact. The rest are geocentric. Returns the next `count` occurrences (default 1), stopping at the end of 2100. `body` is required for `opposition`, `conjunction`, `max_elongation`, and `perigee_apogee`. | `true` | `false` | `event`, `start?`, `count?`, `body?`, `latitude?`, `longitude?`, `elevation?`, `timezone?` | array of event records |
 | `astronomy_list_visible` | Workflow flagship. For a location + instant, iterate every naked-eye body (sun, moon, planets; optional bundled bright stars), compute alt/az, filter to above-horizon, return a ranked "what's up" list with a visibility note. Sun-altitude gate flags daylight/twilight/dark. `time` is a single evaluation instant, not a window — for "tonight" pick a time after astronomical dusk. | `true` | `false` | `latitude`, `longitude`, `elevation?`, `time?`, `timezone?`, `min_altitude?`, `include_stars?` | ranked visible-body list + sky condition |
 | `astronomy_get_ephemeris` | *(extension, gated)* Ephemeris for a small body (asteroid/comet) or spacecraft via JPL Horizons. The designation is passed to Horizons verbatim and must resolve to one record: numbered asteroid as `433;` (trailing semicolon), periodic comet as `DES=1P;CAP` (DES + closest-apparition), spacecraft as a negative SPK-ID — a bare name (`433 Eros`, `1P/Halley`) returns no match or an ambiguous record list. RA/Dec, distance, magnitude over a time span. Covers what the major-body set can't. `start`/`stop` are ISO 8601 UTC; `step` is a Horizons step string (e.g. `"1d"`, `"1h"`, `"10m"`). | `true` | `true` | `designation`, `latitude?`, `longitude?`, `elevation?`, `start?`, `stop?`, `step?` | time-series of positions |
 | `astronomy_get_satellite_passes` | *(extension, gated)* Visible passes of a satellite (ISS, by NORAD catalog number or catalog name) over an observer in the next `days` (default 7). Fetches the GP element set from CelesTrak as OMM JSON, propagates with SGP4 (offline), returns pass start/peak/end with alt/az; only sunlit-satellite + dark-ground passes are "visible." Exactly one of `norad_id` and `name` is required; `name` is a case-insensitive substring match, so a broad one is rejected with the matching objects to choose from. NORAD IDs and names are found at celestrak.org or heavens-above.com. | `true` | `true` | one of `norad_id` / `name`, plus `latitude`, `longitude`, `elevation?`, `days?`, `start?`, `timezone?` | array of visible passes |
@@ -88,7 +88,9 @@ caller passes an IANA timezone, or derives one upstream by composing with `refer
 - Compute moon phase, illumination, age, and the next four lunar quarters.
 - Search forward for nine event classes under one `event` enum: `solar_eclipse`,
   `lunar_eclipse`, `equinox`, `solstice`, `moon_quarter`, `opposition`, `conjunction`,
-  `max_elongation`, `perigee_apogee`. Eclipses report observer-local circumstances.
+  `max_elongation`, `perigee_apogee`. Eclipses report observer-local circumstances when an
+  observer is supplied; solar eclipses without one are global. Every search stops at the
+  end of the supported span (2100).
 - "What's visible now" workflow: enumerate naked-eye bodies, filter above-horizon, rank,
   annotate with a human-readable visibility note, and gate by sun altitude
   (daylight/twilight/dark).
@@ -230,18 +232,30 @@ type Body =
 // eclipse-classification field).
 // + per-event detail:
 //
-//   solar_eclipse  → { kind: 'partial'|'annular'|'total'; obscuration: number|null;
-//                    local_visible: boolean; contacts: { partial_begin_utc, peak_utc, partial_end_utc, … } }
-//                    // REQUIRES an observer (latitude/longitude) — local circumstances; throws observer_required without it.
+//   Both eclipse classes take an optional observer (latitude + longitude together; one alone
+//   throws incomplete_observer). With one, the record adds local circumstances:
+//     local_visible: boolean                          // eclipsed body above the horizon at ANY contact
+//     contact_altitudes_degrees: { <phase>: number|null }  // bare phase keys; null = phase not reached
+//
+//   solar_eclipse  → with observer (SearchLocalSolarEclipse — only eclipses with the Sun up at first
+//                    or last contact, so local_visible is always true):
+//                    { kind: 'partial'|'annular'|'total'; obscuration: number;
+//                      contacts: { partial_begin_utc, total_begin_utc, peak_utc, total_end_utc, partial_end_utc };
+//                      local_visible; contact_altitudes_degrees }   // the Sun's altitude
+//                    without observer (SearchGlobalSolarEclipse):
+//                    { kind; obscuration: number|null; contacts: { peak_utc };
+//                      peak_latitude_degrees?, peak_longitude_degrees? }  // total/annular only; no local_visible
 //   lunar_eclipse  → { kind: 'penumbral'|'partial'|'total'; obscuration: number|null;
-//                      contacts: { penumbral_begin_utc, partial_begin_utc, total_begin_utc, peak_utc, … } }  // geocentric — no observer needed.
+//                      contacts: { penumbral_begin_utc, partial_begin_utc, total_begin_utc, peak_utc, … } }
+//                    // contact times are geocentric; with an observer adds local_visible and
+//                    // contact_altitudes_degrees (the Moon's altitude, all seven phases).
 //   equinox        → { which: 'march'|'september' }
 //   solstice       → { which: 'june'|'december' }
 //   moon_quarter   → { quarter: 'new'|'first_quarter'|'full'|'last_quarter' }
 //
 // Events that REQUIRE input `body` (throws body_required without it):
-//   opposition     → { body: string }                         // SearchRelativeLongitude(body, 180)
-//   conjunction    → { body: string }                         // SearchRelativeLongitude(body, 0)
+//   opposition     → { body: string }                         // SearchRelativeLongitude(body, 0)
+//   conjunction    → { body: string; conjunction_kind?: 'inferior'|'superior' }  // 180; mercury/venus also 0 (inferior)
 //   max_elongation → { body: string; elongation_degrees: number; visibility: 'morning'|'evening' }  // SearchMaxElongation (mercury/venus only; other bodies throw body_not_supported)
 //   perigee_apogee → { body: 'moon'|<planet>; apsis_kind: 'perigee'|'apogee'|'perihelion'|'aphelion'; distance_km: number; distance_au: number }
 //                    // moon → SearchLunarApsis; planet → SearchPlanetApsis
@@ -418,7 +432,7 @@ workflows and the satellite extension.
 
 | # | Call | Purpose | Notes |
 |---|---|---|---|
-| 0 | `openstreetmap_geocode("Seattle")` *(other server)* | place name → lat/lon | the server does NOT geocode |
+| 0 | `openstreetmap_search_places("Seattle")` *(other server)* | place name → lat/lon | the server does NOT geocode |
 | 1 | `astronomy_list_visible(lat, lon, time)` | iterate bodies → filter above-horizon → rank → annotate | internally calls `EphemerisService.position()` per body + the sun-altitude gate; no further hops |
 
 `astronomy_list_visible` is deliberately a one-call workflow tool: the agent supplies
@@ -428,10 +442,13 @@ coordinates and gets a ranked, annotated, condition-gated answer without chainin
 
 | # | Call | Purpose |
 |---|---|---|
-| 1 | `astronomy_find_events(event="solar_eclipse", start="2024-01-01", latitude, longitude)` | searches forward; because an observer is supplied, returns local circumstances (visible? partial/total? contact times) |
+| 1 | `astronomy_find_events(event="solar_eclipse", start="2024-01-01", latitude, longitude)` | searches forward; because an observer is supplied, returns local circumstances (partial/total? contact times, the Sun's altitude at each, visible at any contact?) |
 
-The `event` enum routes eclipses through the observer-aware path (`SearchLocalSolarEclipse`)
-and the geocentric events through the location-free path — one tool, mode-gated by `event`.
+The `event` enum plus the presence of an observer pick the path: a solar eclipse with an
+observer goes through `SearchLocalSolarEclipse`, without one through
+`SearchGlobalSolarEclipse` ("when is the next total eclipse, and where?"); a lunar eclipse is
+geocentric either way and gains per-contact Moon altitudes from an observer; the remaining
+events take the location-free path — one tool, mode-gated by `event`.
 
 **3. "When does the sun set tonight and when is it astronomically dark?"**
 
@@ -475,8 +492,21 @@ service.
   always runs. Drives the no-DataCanvas, no-API-key, Workers-portable posture.
 - **`astronomy_find_events` consolidates nine event classes under one `event` enum** rather
   than nine event-specific tools — mode consolidation per the design skill. Eclipses are the
-  one class needing an observer location (local circumstances); the enum routes them through
+  one class an observer location changes (local circumstances); the enum routes them through
   the observer-aware path and the rest through the geocentric path within one handler.
+- **The observer is optional for both eclipse classes.** Without one, a solar eclipse answers
+  "when is the next total eclipse, and where?" from the global search; requiring an observer
+  left that question unanswerable. A lunar eclipse's contact times are geocentric either way,
+  so an observer only adds local circumstances rather than changing the search.
+- **One visibility rule for both eclipse classes: the eclipsed body above the horizon at any
+  contact**, with the per-contact altitude alongside. A peak-only check reported an eclipse
+  observable for most of an hour before sunset as not visible. Because the local solar search
+  already drops eclipses with the Sun down at both first and last contact, a solar result
+  with an observer is always visible; `contact_altitudes_degrees` carries the detail that
+  tells a sunset eclipse from a midday one.
+- **Searches stop at the end of the supported span.** `resolveTime()` rejects a start past
+  2100, so returning a later event would hand back a date the tool would refuse as input. A
+  list cut short by the span carries a notice so it is not read as the complete answer.
 - **Closed `body` enum, not a free string.** Maps to `astronomy-engine`'s `Body` enum;
   invalid bodies fail at schema validation (JSON-Schema `enum`), not at runtime. Named bright
   stars ride a separate `star`/`include_stars` path backed by the bundled catalog +
@@ -535,7 +565,7 @@ public surface, so it is repeated per tool rather than extracted:
 | `astronomy_find_events` | `invalid_time` | `InvalidParams` | As above, on `start`. |
 | `astronomy_find_events` | `time_out_of_range` | `InvalidParams` | As above, on the requested start instant. |
 | `astronomy_find_events` | `invalid_timezone` | `InvalidParams` | As above. |
-| `astronomy_find_events` | `observer_required` | `InvalidParams` | `event` is `solar_eclipse` but `latitude`/`longitude` are not supplied (lunar eclipses are geocentric and need no observer). Recovery: add observer coordinates and retry. |
+| `astronomy_find_events` | `incomplete_observer` | `InvalidParams` | `event` is `solar_eclipse` or `lunar_eclipse` and exactly one of `latitude` and `longitude` was supplied. Recovery: supply both for local circumstances, or neither for global ones. Other events ignore a location, so a lone coordinate there passes. |
 | `astronomy_find_events` | `body_required` | `InvalidParams` | `event` is one of `opposition`, `conjunction`, `max_elongation`, or `perigee_apogee` but `body` is not supplied. Recovery: add the target body (e.g. `"mars"`) and retry. |
 | `astronomy_find_events` | `body_not_supported` | `InvalidParams` | The body has no such event — `opposition` for the Sun, Moon, Earth, or an inner planet; `conjunction` for the Sun, Moon, or Earth; `max_elongation` for anything but mercury or venus; `perigee_apogee` for the Sun. |
 | `astronomy_list_visible` | `invalid_time` | `InvalidParams` | As above, on `time`. |
@@ -559,17 +589,19 @@ public surface, so it is repeated per tool rather than extracted:
 | `astronomy_get_satellite_passes` | `malformed_element_set` | `SerializationError` | CelesTrak answered with parsable JSON whose GP record does not carry the fields an OMM element set requires — a permanent property of that record, not the transient outage above. Not retryable: the same request returns the same record. The message names the subject and the fields that did not validate. Recovery: request a different object, and report the element set to celestrak.org. |
 | `astronomy://body/{body}` | `unknown_body` | `NotFound` | The `{body}` segment is not one of the supported solar-system bodies. Recovery: use one of `sun`, `moon`, `mercury` … `pluto`. |
 
-Two cross-cutting validation gates: (1) `astronomy_find_events` `observer_required` — a
-`solar_eclipse` needs observer coordinates for its local circumstances and fails fast rather
-than returning data the agent can't use (lunar eclipses are geocentric and skip this gate);
-(2) `astronomy_find_events` `body_required` — body-specific events (`opposition`,
-`conjunction`, `max_elongation`, `perigee_apogee`) require a `body` and fail fast with a clear
-recovery hint naming the valid values.
+Two cross-cutting validation gates: (1) `astronomy_find_events` `incomplete_observer` — an
+eclipse given only one coordinate fails fast rather than silently answering the global
+question when the caller reached for local circumstances; (2) `astronomy_find_events`
+`body_required` — body-specific events (`opposition`, `conjunction`, `max_elongation`,
+`perigee_apogee`) require a `body` and fail fast with a clear recovery hint naming the valid
+values.
 
 **No `no_event_in_window` reason.** A circumpolar or never-rising body is a fact the agent
 needs, not a failure: `astronomy_get_rise_set` returns `null` rise/set fields with an
 explanatory `note` instead of throwing. The same holds for an empty `astronomy_list_visible`
-result — nothing above the horizon is an answer.
+result — nothing above the horizon is an answer — and for an `astronomy_find_events` search
+that reaches the end of 2100 before finding `count` occurrences, which returns what it found
+(possibly nothing) with a `notice` naming how many of the requested events came back.
 
 **Impossible calendar dates are rejected, not normalized.** `new Date(value)` rolls a
 day-of-month that does not exist forward into the next month (`2026-02-30` → `2026-03-02`),

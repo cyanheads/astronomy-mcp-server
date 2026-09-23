@@ -92,9 +92,13 @@ Design reference: [`docs/design.md`](./docs/design.md).
 ### `astronomy_find_events` <sub>tool</sub>
 
 - One `event` enum covers nine classes: `solar_eclipse`, `lunar_eclipse`, `equinox`, `solstice`, `moon_quarter`, `opposition`, `conjunction`, `max_elongation`, `perigee_apogee`
-- `solar_eclipse` requires observer `latitude`/`longitude` for local contact times and `local_visible`; every other class, lunar eclipses included, is geocentric
+- Both eclipse classes take an optional observer (`latitude` and `longitude` together — one alone is rejected):
+  - `solar_eclipse` without one returns global eclipses, with the peak's `peak_latitude_degrees`/`peak_longitude_degrees` for total and annular eclipses; with one it returns only eclipses visible from that point, with local contact times
+  - `lunar_eclipse` contact times are geocentric either way; an observer adds local circumstances
+  - Local circumstances are `local_visible` (the eclipsed body above the horizon at any contact) and `contact_altitudes_degrees` (its altitude at each contact), so a sunrise or sunset eclipse reads differently from a midday one
+- Every other class is geocentric and ignores a location
 - Body-relative events require `body`, gated to which bodies each applies to: `opposition` to mars through pluto, `conjunction` to any planet, `max_elongation` to mercury or venus, `perigee_apogee` to the moon, earth, or a planet
-- Returns the next `count` occurrences, default 1, max 20
+- Returns the next `count` occurrences, default 1, max 20; searches stop at the end of 2100, and a notice says so when that returns fewer than `count`
 - `perigee_apogee` on earth returns perihelion/aphelion; `conjunction` on mercury or venus returns both the inferior and superior pass, labelled by `conjunction_kind`
 
 ---

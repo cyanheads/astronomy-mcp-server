@@ -1,9 +1,11 @@
 /**
  * @fileoverview astronomy_find_events — consolidated forward search for nine event
- *   classes under one `event` enum. Solar eclipses take an observer for local
- *   circumstances; every other class, lunar eclipses included, is geocentric.
- *   Validation gates fail fast when an event needs a body or an observer that was
- *   not supplied, or when the body has no such event.
+ *   classes under one `event` enum. Both eclipse classes take an optional observer:
+ *   solar eclipses are global without one and local with one, and lunar eclipses gain
+ *   the Moon's altitude at each contact. Every other class is geocentric. Every search
+ *   stops at the end of the supported span, with a notice when that cuts a list short.
+ *   Validation gates fail fast when an event needs a body that was not supplied, when an
+ *   eclipse observer is half-specified, or when the body has no such event.
  * @module mcp-server/tools/definitions/find-events.tool
  */
 
@@ -11,7 +13,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { num, pct, sig } from '@/mcp-server/tools/format-numbers.js';
-import { getEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import { getEphemerisService, SUPPORTED_SPAN } from '@/services/ephemeris/ephemeris-service.js';
 import { EVENT_BODY_NAMES, EVENT_NAMES, type EventName } from '@/services/ephemeris/types.js';
 
 const BODY_EVENTS = new Set<EventName>([
@@ -20,6 +22,9 @@ const BODY_EVENTS = new Set<EventName>([
   'max_elongation',
   'perigee_apogee',
 ]);
+
+/** The event classes whose records an observer changes. */
+const ECLIPSE_EVENTS = new Set<EventName>(['solar_eclipse', 'lunar_eclipse']);
 
 export const FindEventsOutput = z.object({
   events: z
@@ -51,13 +56,31 @@ export const FindEventsOutput = z.object({
             .boolean()
             .optional()
             .describe(
-              "True when the eclipsed Sun is above the observer's horizon at peak. Present for solar eclipses only — lunar eclipses are geocentric and report no local visibility.",
+              "True when the eclipsed body — the Sun for solar_eclipse, the Moon for lunar_eclipse — is above the observer's horizon at any contact. Present only when latitude/longitude are supplied. A solar result with an observer is always true, because the local search returns only eclipses with the Sun up at first or last contact; contact_altitudes_degrees tells an eclipse at sunrise or sunset from one at midday.",
+            ),
+          contact_altitudes_degrees: z
+            .record(z.string(), z.number().nullable())
+            .optional()
+            .describe(
+              "Apparent altitude in degrees of the eclipsed body (the Sun for solar_eclipse, the Moon for lunar_eclipse) above the observer's horizon at each contact, keyed by bare phase name: partial_begin, total_begin, peak, total_end, partial_end, plus penumbral_begin and penumbral_end for a lunar eclipse. Negative means below the horizon; null marks a phase this eclipse does not reach. Present only when latitude/longitude are supplied.",
             ),
           contacts: z
             .record(z.string(), z.string().nullable())
             .optional()
             .describe(
-              'Eclipse contact times in ISO 8601 UTC keyed by phase (e.g. partial_begin_utc, peak_utc); a phase that does not occur is null.',
+              'Eclipse contact times in ISO 8601 UTC keyed by phase (e.g. partial_begin_utc, peak_utc); a phase that does not occur is null. A global solar eclipse carries peak_utc only.',
+            ),
+          peak_latitude_degrees: z
+            .number()
+            .optional()
+            .describe(
+              'Geographic latitude in degrees where a total or annular solar eclipse is greatest. Present for a solar_eclipse searched without an observer; absent for a partial eclipse, whose shadow axis misses Earth.',
+            ),
+          peak_longitude_degrees: z
+            .number()
+            .optional()
+            .describe(
+              'Geographic longitude in degrees where a total or annular solar eclipse is greatest. Present for a solar_eclipse searched without an observer; absent for a partial eclipse.',
             ),
           which: z
             .enum(['march', 'september', 'june', 'december'])
@@ -120,7 +143,7 @@ export type FindEventsOutputType = z.infer<typeof FindEventsOutput>;
 export const findEventsTool = tool('astronomy_find_events', {
   title: 'astronomy-mcp-server: find sky events',
   description:
-    'Search forward from a start time for the next occurrences of one sky-event class, selected by the `event` enum: solar_eclipse, lunar_eclipse, equinox, solstice, moon_quarter, opposition, conjunction, max_elongation, or perigee_apogee. Only solar_eclipse takes an observer: pass latitude and longitude to get local circumstances (contact times plus `local_visible`). Every other class is geocentric and needs no location — a lunar eclipse is the same event everywhere the Moon is up, so it returns contact times and no `local_visible`. The body-relative events (opposition, conjunction, max_elongation, perigee_apogee) require a `body`: opposition applies to the superior planets (mars through pluto), conjunction to any planet, max_elongation to mercury and venus, and perigee_apogee to the moon (perigee/apogee), earth, or a planet (perihelion/aphelion). Returns the next `count` occurrences (default 1). Start defaults to now; pass an IANA `timezone` for observer-local timestamps.',
+    "Search forward from a start time for the next occurrences of one sky-event class, selected by the `event` enum: solar_eclipse, lunar_eclipse, equinox, solstice, moon_quarter, opposition, conjunction, max_elongation, or perigee_apogee. Both eclipse classes take an optional observer (latitude and longitude together). solar_eclipse without one returns global eclipses — kind, peak time, obscuration, and for a total or annular eclipse the latitude/longitude where it is greatest; with one it returns only eclipses visible from that point, with local contact times, `local_visible`, and the Sun's altitude at each contact. lunar_eclipse returns geocentric contact times, the same instants everywhere on Earth; an observer adds `local_visible` and the Moon's altitude at each contact. Every other class is geocentric and ignores a location. The body-relative events (opposition, conjunction, max_elongation, perigee_apogee) require a `body`: opposition applies to the superior planets (mars through pluto), conjunction to any planet, max_elongation to mercury and venus, and perigee_apogee to the moon (perigee/apogee), earth, or a planet (perihelion/aphelion). Returns the next `count` occurrences (default 1). Searches stop at the end of 2100, the close of the supported span; when that leaves fewer than `count`, a notice says so. Start defaults to now; pass an IANA `timezone` for observer-local timestamps.",
   annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
     event: z.enum(EVENT_NAMES).describe('Which class of event to search for.'),
@@ -149,7 +172,7 @@ export const findEventsTool = tool('astronomy_find_events', {
       .max(90)
       .optional()
       .describe(
-        'Observer latitude in decimal degrees — required for solar_eclipse to get local circumstances, ignored by every other event.',
+        'Observer latitude in decimal degrees, supplied together with longitude. Optional for solar_eclipse and lunar_eclipse, where it adds local circumstances; omit both for a global solar search. Ignored by every other event.',
       ),
     longitude: z
       .number()
@@ -157,7 +180,7 @@ export const findEventsTool = tool('astronomy_find_events', {
       .max(180)
       .optional()
       .describe(
-        'Observer longitude in decimal degrees — required for solar_eclipse, ignored by every other event.',
+        'Observer longitude in decimal degrees, supplied together with latitude. Optional for solar_eclipse and lunar_eclipse; ignored by every other event.',
       ),
     elevation: z
       .number()
@@ -173,14 +196,20 @@ export const findEventsTool = tool('astronomy_find_events', {
   output: FindEventsOutput,
   enrichment: {
     totalCount: z.number().describe('Number of event occurrences returned.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Why the list is shorter than the requested count: the search reached the end of the supported span (2100). Absent when every requested occurrence came back.',
+      ),
   },
   errors: [
     {
-      reason: 'observer_required',
+      reason: 'incomplete_observer',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'A solar_eclipse event was requested without observer latitude/longitude.',
+      when: 'A solar_eclipse or lunar_eclipse was requested with only one of latitude and longitude.',
       recovery:
-        'Add observer latitude and longitude to receive local eclipse circumstances, then retry.',
+        'Supply latitude and longitude together for local eclipse circumstances, or omit both for global ones.',
     },
     {
       reason: 'body_required',
@@ -229,10 +258,20 @@ export const findEventsTool = tool('astronomy_find_events', {
     const timezone = svc.resolveTimezone(input.timezone ?? getServerConfig().defaultTimezone);
     const start = svc.resolveTime(input.start);
 
-    const hasObserver = typeof input.latitude === 'number' && typeof input.longitude === 'number';
-    if (input.event === 'solar_eclipse' && !hasObserver) {
-      // Solar eclipses require an observer for local circumstances; lunar eclipses are geocentric.
-      throw ctx.fail('observer_required', undefined, { ...ctx.recoveryFor('observer_required') });
+    const hasLatitude = typeof input.latitude === 'number';
+    const hasLongitude = typeof input.longitude === 'number';
+    const hasObserver = hasLatitude && hasLongitude;
+    /**
+     * An eclipse with half an observer would silently answer a different question — the
+     * global search — than the local one the caller reached for. Other classes ignore a
+     * location entirely, so a lone coordinate there changes nothing and passes.
+     */
+    if (ECLIPSE_EVENTS.has(input.event) && hasLatitude !== hasLongitude) {
+      throw ctx.fail(
+        'incomplete_observer',
+        `Observer ${hasLatitude ? 'latitude' : 'longitude'} was supplied without ${hasLatitude ? 'longitude' : 'latitude'}.`,
+        { ...ctx.recoveryFor('incomplete_observer') },
+      );
     }
     if (BODY_EVENTS.has(input.event) && !input.body) {
       throw ctx.fail('body_required', undefined, { ...ctx.recoveryFor('body_required') });
@@ -257,6 +296,19 @@ export const findEventsTool = tool('astronomy_find_events', {
     ctx.log.info('Found events', { event: input.event, count: records.length });
     ctx.enrich.total(records.length);
 
+    /**
+     * Every search is unbounded except by the supported span, so a short list means the
+     * span ended. `notice` is last-wins across enrichment writers, so caveats are collected
+     * and written once.
+     */
+    const caveats: string[] = [];
+    if (records.length < input.count) {
+      caveats.push(
+        `The search reached the end of the supported span (${SUPPORTED_SPAN.lastYear}) after ${records.length} of ${input.count} requested events; no occurrence after ${SUPPORTED_SPAN.lastYear} is computed.`,
+      );
+    }
+    if (caveats.length > 0) ctx.enrich.notice(caveats.join(' '));
+
     const out: FindEventsOutputType = {
       events: records.map((r) => ({
         event: r.event,
@@ -265,7 +317,16 @@ export const findEventsTool = tool('astronomy_find_events', {
         ...(r.kind ? { kind: r.kind } : {}),
         ...(r.obscuration !== undefined ? { obscuration: r.obscuration } : {}),
         ...(r.localVisible !== undefined ? { local_visible: r.localVisible } : {}),
+        ...(r.contactAltitudesDegrees
+          ? { contact_altitudes_degrees: r.contactAltitudesDegrees }
+          : {}),
         ...(r.contacts ? { contacts: r.contacts } : {}),
+        ...(r.peakLatitudeDegrees !== undefined
+          ? { peak_latitude_degrees: r.peakLatitudeDegrees }
+          : {}),
+        ...(r.peakLongitudeDegrees !== undefined
+          ? { peak_longitude_degrees: r.peakLongitudeDegrees }
+          : {}),
         ...(r.which ? { which: r.which } : {}),
         ...(r.quarter ? { quarter: r.quarter } : {}),
         ...(r.body ? { body: r.body } : {}),
@@ -298,6 +359,10 @@ export const findEventsTool = tool('astronomy_find_events', {
         );
       if (e.local_visible !== undefined)
         lines.push(`**Locally visible:** ${e.local_visible ? 'yes' : 'no'}`);
+      if (e.peak_latitude_degrees !== undefined && e.peak_longitude_degrees !== undefined)
+        lines.push(
+          `**Peak location:** lat ${num(e.peak_latitude_degrees, 1, '°')}, lon ${num(e.peak_longitude_degrees, 1, '°')}`,
+        );
       if (e.elongation_degrees !== undefined)
         lines.push(`**Elongation:** ${num(e.elongation_degrees, 1, '°')}`);
       if (e.visibility) lines.push(`**Apparition:** ${e.visibility}`);
@@ -309,6 +374,12 @@ export const findEventsTool = tool('astronomy_find_events', {
           .filter(([, v]) => v !== null)
           .map(([k, v]) => `${k.replace(/_utc$/, '')} ${v}`);
         if (parts.length > 0) lines.push(`**Contacts:** ${parts.join(', ')}`);
+      }
+      if (e.contact_altitudes_degrees) {
+        const parts = Object.entries(e.contact_altitudes_degrees).flatMap(([phase, altitude]) =>
+          altitude === null ? [] : [`${phase} ${num(altitude, 1, '°')}`],
+        );
+        if (parts.length > 0) lines.push(`**Contact altitudes:** ${parts.join(', ')}`);
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];

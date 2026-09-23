@@ -13,9 +13,11 @@ import { invalidParams, notFound } from '@cyanheads/mcp-ts-core/errors';
 import {
   type Apsis,
   ApsisKind,
+  type AstroTime,
   Body,
   Constellation,
   DefineStar,
+  type EclipseEvent,
   Ecliptic,
   Equator,
   Horizon,
@@ -51,6 +53,7 @@ import { STAR_CATALOG } from './star-catalog.js';
 import type {
   BodyName,
   CatalogStar,
+  EclipsePhase,
   EventBodyName,
   EventName,
   EventRecord,
@@ -67,8 +70,23 @@ import type {
   VisibleBody,
 } from './types.js';
 
+/**
+ * astronomy-engine's high-accuracy span, as inclusive UTC calendar years. `resolveTime()`
+ * rejects an instant outside it, and every event search stops at its end.
+ */
+export const SUPPORTED_SPAN = { firstYear: 1900, lastYear: 2100 } as const;
+
+/** First instant past the supported span; no event at or after it is returned. */
+const SPAN_END = new Date(Date.UTC(SUPPORTED_SPAN.lastYear + 1, 0, 1));
+
+/** Whether an event instant falls inside the supported span. */
+const withinSpan = (date: Date): boolean => date < SPAN_END;
+
 /** Kilometers per astronomical unit (astronomy-engine's KM_PER_AU). */
 const KM_PER_AU = 149597870.69098932;
+
+/** Minutes per day, for turning the engine's semi-durations into day offsets. */
+const MINUTES_PER_DAY = 1440;
 
 /** Twilight depth boundaries in degrees of Sun altitude. */
 const CIVIL_DEG = -6;
@@ -182,10 +200,14 @@ export class EphemerisService {
       );
     }
     const year = date.getUTCFullYear();
-    if (year < 1900 || year > 2100) {
+    const { firstYear, lastYear } = SUPPORTED_SPAN;
+    if (year < firstYear || year > lastYear) {
       throw invalidParams(
-        `Time ${date.toISOString()} is outside the high-accuracy span (1900–2100).`,
-        { reason: 'time_out_of_range', recovery: { hint: 'Use a date between 1900 and 2100.' } },
+        `Time ${date.toISOString()} is outside the high-accuracy span (${firstYear}–${lastYear}).`,
+        {
+          reason: 'time_out_of_range',
+          recovery: { hint: `Use a date between ${firstYear} and ${lastYear}.` },
+        },
       );
     }
     return date;
@@ -529,7 +551,12 @@ export class EphemerisService {
 
   // ---- Events --------------------------------------------------------------
 
-  /** Search forward for the next `count` occurrences of an event class. */
+  /**
+   * Search forward for the next `count` occurrences of an event class. Every search stops
+   * at the end of the supported span, which is the only reason fewer than `count` come back.
+   * An observer adds local circumstances to either eclipse class, and for solar eclipses it
+   * switches the search from global to observer-local.
+   */
   findEvents(
     event: EventName,
     opts: {
@@ -547,7 +574,7 @@ export class EphemerisService {
       case 'moon_quarter':
         return this.moonQuarterEvents(opts.start, opts.count, opts.timezone);
       case 'lunar_eclipse':
-        return this.lunarEclipseEvents(opts.start, opts.count, opts.timezone);
+        return this.lunarEclipseEvents(opts.start, opts.count, opts.observer, opts.timezone);
       case 'solar_eclipse':
         return this.solarEclipseEvents(opts.start, opts.count, opts.observer, opts.timezone);
       case 'opposition':
@@ -583,8 +610,11 @@ export class EphemerisService {
     timezone?: string,
   ): EventRecord[] {
     const out: EventRecord[] = [];
-    let year = start.getUTCFullYear();
-    while (out.length < count) {
+    for (
+      let year = start.getUTCFullYear();
+      year <= SUPPORTED_SPAN.lastYear && out.length < count;
+      year++
+    ) {
       const s = Seasons(year);
       const candidates: Array<{ which: NonNullable<EventRecord['which']>; time: Date }> =
         event === 'equinox'
@@ -603,8 +633,6 @@ export class EphemerisService {
           out.push(rec);
         }
       }
-      year += 1;
-      if (year > 2100) break;
     }
     return out;
   }
@@ -612,7 +640,7 @@ export class EphemerisService {
   private moonQuarterEvents(start: Date, count: number, timezone?: string): EventRecord[] {
     const out: EventRecord[] = [];
     let mq = SearchMoonQuarter(start);
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < count && withinSpan(mq.time.date); i++) {
       const rec: EventRecord = {
         event: 'moon_quarter',
         timeUtc: mq.time.toString(),
@@ -625,25 +653,53 @@ export class EphemerisService {
     return out;
   }
 
-  private lunarEclipseEvents(start: Date, count: number, timezone?: string): EventRecord[] {
+  /**
+   * Lunar eclipses. The contact times are geocentric — the same instants everywhere — so
+   * an observer changes nothing but adds local circumstances: the Moon's altitude at each
+   * contact, and whether it is up for any of them.
+   */
+  private lunarEclipseEvents(
+    start: Date,
+    count: number,
+    observer?: ObserverInput,
+    timezone?: string,
+  ): EventRecord[] {
+    const obs = observer ? this.toObserver(observer) : undefined;
     const out: EventRecord[] = [];
     let ecl: LunarEclipseInfo = SearchLunarEclipse(start);
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < count && withinSpan(ecl.peak.date); i++) {
       const peak = ecl.peak;
+      /**
+       * The contact one semi-duration before (-1) or after (+1) the peak. A phase this
+       * eclipse never reaches has a zero semi-duration and no contact.
+       */
+      const contact = (sign: -1 | 1, semiDurationMinutes: number) =>
+        semiDurationMinutes > 0
+          ? peak.AddDays((sign * semiDurationMinutes) / MINUTES_PER_DAY)
+          : undefined;
+      const contacts: EclipseContacts<AstroTime> = [
+        ['penumbral_begin', contact(-1, ecl.sd_penum)],
+        ['partial_begin', contact(-1, ecl.sd_partial)],
+        ['total_begin', contact(-1, ecl.sd_total)],
+        ['peak', peak],
+        ['total_end', contact(1, ecl.sd_total)],
+        ['partial_end', contact(1, ecl.sd_partial)],
+        ['penumbral_end', contact(1, ecl.sd_penum)],
+      ];
       const rec: EventRecord = {
         event: 'lunar_eclipse',
         timeUtc: peak.toString(),
         kind: ecl.kind,
         obscuration: ecl.obscuration,
-        contacts: {
-          penumbral_begin_utc: minutesBefore(peak, ecl.sd_penum),
-          partial_begin_utc: ecl.sd_partial > 0 ? minutesBefore(peak, ecl.sd_partial) : null,
-          total_begin_utc: ecl.sd_total > 0 ? minutesBefore(peak, ecl.sd_total) : null,
-          peak_utc: peak.toString(),
-          total_end_utc: ecl.sd_total > 0 ? minutesAfter(peak, ecl.sd_total) : null,
-          partial_end_utc: ecl.sd_partial > 0 ? minutesAfter(peak, ecl.sd_partial) : null,
-          penumbral_end_utc: minutesAfter(peak, ecl.sd_penum),
-        },
+        contacts: contactTimes(contacts),
+        ...(obs
+          ? localCircumstances(
+              contacts.map(([phase, time]) => [
+                phase,
+                time && this.altitudeDegrees(Body.Moon, obs, time),
+              ]),
+            )
+          : {}),
       };
       if (timezone) rec.timeLocal = this.formatLocal(peak.date, timezone);
       out.push(rec);
@@ -652,6 +708,12 @@ export class EphemerisService {
     return out;
   }
 
+  /**
+   * Solar eclipses. With an observer the search is local — `SearchLocalSolarEclipse` only
+   * returns eclipses with the Sun up at first or last contact — and each record carries
+   * the Sun's altitude at every contact. Without one it is global: kind, peak time,
+   * obscuration, and where on Earth a total or annular eclipse is greatest.
+   */
   private solarEclipseEvents(
     start: Date,
     count: number,
@@ -660,42 +722,44 @@ export class EphemerisService {
   ): EventRecord[] {
     const out: EventRecord[] = [];
     if (observer) {
-      // Observer supplied → local circumstances via SearchLocalSolarEclipse.
       const obs = this.toObserver(observer);
       let ecl: LocalSolarEclipseInfo = SearchLocalSolarEclipse(start, obs);
-      for (let i = 0; i < count; i++) {
+      for (let i = 0; i < count && withinSpan(ecl.peak.time.date); i++) {
         const peakTime = ecl.peak.time;
-        const localVisible = ecl.peak.altitude > 0;
+        const contacts: EclipseContacts<EclipseEvent> = [
+          ['partial_begin', ecl.partial_begin],
+          ['total_begin', ecl.total_begin],
+          ['peak', ecl.peak],
+          ['total_end', ecl.total_end],
+          ['partial_end', ecl.partial_end],
+        ];
         const rec: EventRecord = {
           event: 'solar_eclipse',
           timeUtc: peakTime.toString(),
           kind: ecl.kind,
           obscuration: ecl.obscuration,
-          localVisible,
-          contacts: {
-            partial_begin_utc: ecl.partial_begin.time.toString(),
-            total_begin_utc: ecl.total_begin ? ecl.total_begin.time.toString() : null,
-            peak_utc: peakTime.toString(),
-            total_end_utc: ecl.total_end ? ecl.total_end.time.toString() : null,
-            partial_end_utc: ecl.partial_end.time.toString(),
-          },
+          contacts: contactTimes(contacts.map(([phase, contact]) => [phase, contact?.time])),
+          ...localCircumstances(contacts.map(([phase, contact]) => [phase, contact?.altitude])),
         };
         if (timezone) rec.timeLocal = this.formatLocal(peakTime.date, timezone);
         out.push(rec);
         ecl = NextLocalSolarEclipse(peakTime, obs);
       }
     } else {
-      // No observer → global solar eclipse circumstances.
       let ecl = SearchGlobalSolarEclipse(start);
-      for (let i = 0; i < count; i++) {
+      for (let i = 0; i < count && withinSpan(ecl.peak.date); i++) {
         const rec: EventRecord = {
           event: 'solar_eclipse',
           timeUtc: ecl.peak.toString(),
           kind: ecl.kind,
           obscuration: ecl.obscuration ?? null,
-          localVisible: false,
           contacts: { peak_utc: ecl.peak.toString() },
         };
+        // The engine leaves both undefined for a partial eclipse, whose axis misses Earth.
+        if (ecl.latitude !== undefined && ecl.longitude !== undefined) {
+          rec.peakLatitudeDegrees = ecl.latitude;
+          rec.peakLongitudeDegrees = ecl.longitude;
+        }
         if (timezone) rec.timeLocal = this.formatLocal(ecl.peak.date, timezone);
         out.push(rec);
         ecl = NextGlobalSolarEclipse(ecl.peak);
@@ -741,6 +805,7 @@ export class EphemerisService {
     let cursor = start;
     for (let i = 0; i < count; i++) {
       const next = nextOccurrence(cursor);
+      if (!withinSpan(next.time.date)) break;
       const rec: EventRecord = { event, timeUtc: next.time.toString(), body };
       if (next.kind) rec.conjunctionKind = next.kind;
       if (timezone) rec.timeLocal = this.formatLocal(next.time.date, timezone);
@@ -761,6 +826,7 @@ export class EphemerisService {
     let cursor = start;
     for (let i = 0; i < count; i++) {
       const e = SearchMaxElongation(BODY_ENUM[body], cursor);
+      if (!withinSpan(e.time.date)) break;
       const rec: EventRecord = {
         event: 'max_elongation',
         timeUtc: e.time.toString(),
@@ -786,7 +852,7 @@ export class EphemerisService {
     const out: EventRecord[] = [];
     const isMoon = body === 'moon';
     let apsis: Apsis = isMoon ? SearchLunarApsis(start) : SearchPlanetApsis(BODY_ENUM[body], start);
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < count && withinSpan(apsis.time.date); i++) {
       const near = apsis.kind === ApsisKind.Pericenter;
       const apsisKind: EventRecord['apsisKind'] = isMoon
         ? near
@@ -878,6 +944,15 @@ export class EphemerisService {
   private toObserver(o: ObserverInput): Observer {
     return new Observer(o.latitude, o.longitude, o.elevation);
   }
+
+  /**
+   * Apparent topocentric altitude of a body, refraction-corrected — the same computation
+   * `position()` reports and astronomy-engine uses for a local solar eclipse's contacts.
+   */
+  private altitudeDegrees(body: Body, obs: Observer, time: AstroTime): number {
+    const eq = Equator(body, time, obs, true, true);
+    return Horizon(time, obs, eq.ra, eq.dec, 'normal').altitude;
+  }
 }
 
 // --- Pure helpers (module-level, no service state) -------------------------
@@ -962,14 +1037,33 @@ function visibilityNote(pos: SkyPosition): string {
   return `${name}, ${magPart}${altPhrase}${adjPart}`;
 }
 
-/** ISO 8601 time `minutes` before an AstroTime peak. */
-function minutesBefore(peak: ReturnType<typeof MakeTime>, minutes: number): string {
-  return peak.AddDays(-minutes / 1440).toString();
+/**
+ * An eclipse's contacts in chronological order, each paired with a per-contact value —
+ * undefined for a phase the eclipse never reaches.
+ */
+type EclipseContacts<T> = ReadonlyArray<readonly [EclipsePhase, T | undefined]>;
+
+/** Contact times as ISO 8601 UTC keyed `<phase>_utc`, null for a phase that does not occur. */
+function contactTimes(contacts: EclipseContacts<AstroTime>): Record<string, string | null> {
+  return Object.fromEntries(
+    contacts.map(([phase, time]) => [`${phase}_utc`, time ? time.toString() : null]),
+  );
 }
 
-/** ISO 8601 time `minutes` after an AstroTime peak. */
-function minutesAfter(peak: ReturnType<typeof MakeTime>, minutes: number): string {
-  return peak.AddDays(minutes / 1440).toString();
+/**
+ * Local circumstances from the eclipsed body's altitude at each contact: the altitudes
+ * keyed by phase (null where a phase does not occur), and the one visibility rule both
+ * eclipse classes share — visible when the body is above the horizon at any contact.
+ */
+function localCircumstances(
+  altitudes: EclipseContacts<number>,
+): Pick<EventRecord, 'contactAltitudesDegrees' | 'localVisible'> {
+  return {
+    contactAltitudesDegrees: Object.fromEntries(
+      altitudes.map(([phase, altitude]) => [phase, altitude ?? null]),
+    ),
+    localVisible: altitudes.some(([, altitude]) => altitude !== undefined && altitude > 0),
+  };
 }
 
 /** The event classes that target a specific body. */

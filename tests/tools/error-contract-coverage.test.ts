@@ -159,16 +159,19 @@ function errorEnvelope(result: Awaited<ReturnType<typeof runToolContract>>) {
  * `data.reason`, the format()-only client reads it off the rendered tail.
  */
 describe('declared recovery reaches both client surfaces', () => {
-  it('carries a handler-thrown reason (find_events / observer_required)', async () => {
-    const result = await runToolContract(findEventsTool, { event: 'solar_eclipse' });
-    const hint = declaredRecovery(findEventsTool.errors, 'observer_required');
+  it('carries a handler-thrown reason (find_events / incomplete_observer)', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'solar_eclipse',
+      latitude: 41.9,
+    });
+    const hint = declaredRecovery(findEventsTool.errors, 'incomplete_observer');
 
     expect(result.isError).toBe(true);
     expect(errorEnvelope(result)?.code).toBe(JsonRpcErrorCode.InvalidParams);
-    expect(errorEnvelope(result)?.data?.reason).toBe('observer_required');
+    expect(errorEnvelope(result)?.data?.reason).toBe('incomplete_observer');
     expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
     expect(firstText(result)).toContain(`Recovery: ${hint}`);
-    expect(firstText(result)).toContain('(reason observer_required');
+    expect(firstText(result)).toContain('(reason incomplete_observer');
   });
 
   it('carries a service-thrown reason (get_sky_position / star_not_found)', async () => {

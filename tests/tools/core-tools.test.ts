@@ -189,15 +189,16 @@ describe('astronomy_get_rise_set', () => {
 });
 
 describe('astronomy_find_events', () => {
-  it('fails observer_required for a solar eclipse without coordinates', async () => {
+  it('answers a solar eclipse without coordinates with global circumstances', async () => {
     const ctx = createMockContext({ errors: findEventsTool.errors });
     const input = findEventsTool.input.parse({
       event: 'solar_eclipse',
       start: '2024-01-01T00:00:00Z',
     });
-    await expect(Promise.resolve().then(() => findEventsTool.handler(input, ctx))).rejects.toThrow(
-      /observer|latitude/i,
-    );
+    const result = await findEventsTool.handler(input, ctx);
+    expect(result).toEqual(expect.schemaMatching(findEventsTool.output));
+    expect(result.events[0]?.time_utc.startsWith('2024-04-08')).toBe(true);
+    expect(result.events[0]?.peak_latitude_degrees).toBeTypeOf('number');
   });
 
   it('fails body_required for an opposition without a body', async () => {
