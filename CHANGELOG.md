@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-23 · ⚠️ Breaking
+
+astronomy_find_events: solar_eclipse now searches globally without an observer, reporting the peak location of total/annular eclipses; both eclipse classes gain any-contact local_visible and per-contact altitudes; incomplete_observer replaces observer_required; searches stop at 2100.
+
 ## [0.2.10](changelog/0.2.x/0.2.10.md) — 2026-09-19
 
 Adopts mcp-ts-core ^0.12.3 → ^0.13.6: a schema-rejected tool call now carries structuredContent.error, tool errors close with a reason/retryable suffix and a Recovery hint, and a client-injected metadata key is dropped before validation instead of rejecting the call. Skill tree moves to framework-skills/; releases now ship through a release PR.

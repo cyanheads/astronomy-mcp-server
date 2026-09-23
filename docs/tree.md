@@ -1,6 +1,6 @@
 # astronomy-mcp-server - Directory Structure
 
-Generated on: 2026-09-19 16:59:01
+Generated on: 2026-09-23 23:55:26
 
 ```text
 astronomy-mcp-server/
@@ -26,6 +26,7 @@ astronomy-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
