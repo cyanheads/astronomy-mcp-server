@@ -113,6 +113,15 @@ describe('stargazingPlanPrompt', () => {
     }
   });
 
+  it('names the cross-server tools that resolve coordinates and the timezone', async () => {
+    // An agent following step 1 literally looks the tools up by name, so each must be a
+    // tool that exists: openstreetmap geocodes the place, reference-data names its zone.
+    const step1 = stepText(await generate({ location: 'Mount Rainier' }), 1);
+    expect(step1).toContain('openstreetmap_search_places');
+    expect(step1).toContain('ref_timezone_lookup');
+    expect(step1).not.toContain('openstreetmap_geocode');
+  });
+
   it('carries the resolved timezone into the tool calls it chains', async () => {
     // Step 1 resolves an IANA timezone; if no later step passes it, every returned
     // timestamp comes back UTC-only and the plan reads in the wrong local frame.
