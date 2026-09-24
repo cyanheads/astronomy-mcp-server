@@ -22,8 +22,8 @@ idea sketch — not renamed, added, or dropped.
 | `astronomy_get_moon_phase` | Moon phase for a date: illuminated fraction, phase name, age (days since new), phase angle, and the next four quarter phases (new/first/full/last) with timestamps. | `true` | `false` | `time?`, `timezone?` | phase record + next 4 quarters |
 | `astronomy_find_events` | Search upcoming sky events from a start time, consolidated by an `event` enum. Both eclipse classes take an optional observer: solar eclipses are global without one (peak location for total/annular) and local with one; lunar contact times are geocentric, and an observer adds local visibility + the Moon's altitude at each contact. The rest are geocentric. Returns the next `count` occurrences (default 1), stopping at the end of 2100. `body` is required for `opposition`, `conjunction`, `max_elongation`, and `perigee_apogee`. | `true` | `false` | `event`, `start?`, `count?`, `body?`, `latitude?`, `longitude?`, `elevation?`, `timezone?` | array of event records |
 | `astronomy_list_visible` | Workflow flagship. For a location + instant, iterate every naked-eye body (sun, moon, planets; optional bundled bright stars), compute alt/az, filter to above-horizon, return a ranked "what's up" list with a visibility note. Sun-altitude gate flags daylight/twilight/dark. `time` is a single evaluation instant, not a window — for "tonight" pick a time after astronomical dusk. | `true` | `false` | `latitude`, `longitude`, `elevation?`, `time?`, `timezone?`, `min_altitude?`, `include_stars?` | ranked visible-body list + sky condition |
-| `astronomy_get_ephemeris` | *(extension, gated)* Ephemeris for a small body (asteroid/comet) or spacecraft via JPL Horizons. The designation is passed to Horizons verbatim and must resolve to one record: numbered asteroid as `433;` (trailing semicolon), periodic comet as `DES=1P;CAP` (DES + closest-apparition), spacecraft as a negative SPK-ID — a bare name (`433 Eros`, `1P/Halley`) returns no match or an ambiguous record list. RA/Dec, distance, magnitude over a time span. Covers what the major-body set can't. `start`/`stop` are ISO 8601 UTC; `step` is a Horizons step string (e.g. `"1d"`, `"1h"`, `"10m"`). | `true` | `true` | `designation`, `latitude?`, `longitude?`, `elevation?`, `start?`, `stop?`, `step?` | time-series of positions |
-| `astronomy_get_satellite_passes` | *(extension, gated)* Visible passes of a satellite (ISS, by NORAD catalog number or catalog name) over an observer in the next `days` (default 7). Fetches the GP element set from CelesTrak as OMM JSON, propagates with SGP4 (offline), returns pass start/peak/end with alt/az; only sunlit-satellite + dark-ground passes are "visible." Exactly one of `norad_id` and `name` is required; `name` is a case-insensitive substring match, so a broad one is rejected with the matching objects to choose from. NORAD IDs and names are found at celestrak.org or heavens-above.com. | `true` | `true` | one of `norad_id` / `name`, plus `latitude`, `longitude`, `elevation?`, `days?`, `start?`, `timezone?` | array of visible passes |
+| `astronomy_get_ephemeris` | *(extension, gated)* Ephemeris for a small body (asteroid/comet) or spacecraft via JPL Horizons. The designation is passed to Horizons verbatim and must resolve to one record: numbered asteroid as `433;` (trailing semicolon), periodic comet as `DES=1P;CAP` (DES + closest-apparition), spacecraft as a negative SPK-ID — a bare name goes through the Horizons name search, which rejects one matching nothing (`433 Eros`) or several records (`1P/Halley`) but accepts one matching a single object even when it is the wrong one (`Eros` → Kerberos), so the output carries `target_name`, the object Horizons resolved. RA/Dec, distance, magnitude over a time span. Covers what the major-body set can't. `start`/`stop` are ISO 8601 (UTC, or with a `Z`/numeric offset) and reach Horizons as the resolved UTC instant; `step` is a Horizons step string (e.g. `"1d"`, `"1h"`, `"10m"`). | `true` | `true` | `designation`, `latitude?`, `longitude?`, `elevation?`, `start?`, `stop?`, `step?` | time-series of positions |
+| `astronomy_get_satellite_passes` | *(extension, gated)* Visible passes of a satellite (ISS, by NORAD catalog number or catalog name) over an observer in the next `days` (default 7). Fetches the GP element set from CelesTrak as OMM JSON, propagates with SGP4 (offline), returns pass start/peak/end with alt/az; only sunlit-satellite + dark-ground passes are "visible." Exactly one of `norad_id` and `name` is required; a fixed alias table resolves the common names ISS / International Space Station, Hubble / Hubble Space Telescope / HST, and Tiangong / CSS / Chinese Space Station to their catalog numbers, and any other `name` is a case-insensitive substring match, so a broad one is rejected with the matching objects to choose from. A pass rising inside the window is reported through its set even when that falls after the window ends. NORAD IDs and names are found at celestrak.org or heavens-above.com. | `true` | `true` | one of `norad_id` / `name`, plus `latitude`, `longitude`, `elevation?`, `days?`, `start?`, `timezone?` | array of visible passes |
 
 Seven tools total. Five form the keyless offline core (always registered); two extensions
 register only when their config flag is enabled.
@@ -302,6 +302,7 @@ include_stars: boolean // include catalog bright stars in the output, default fa
 // envelope:
 {
   designation: string;        // echoed input designation
+  target_name?: string;       // the object Horizons resolved ("Target body name:" header), iff present
   points: EphemerisPoint[];
 }
 // Truncation is reported out-of-band via the enrichment block, not in the output object:
@@ -476,7 +477,7 @@ the idea's "when does the sun set and when is it truly dark" framing.
 
 | # | Call | Purpose |
 |---|---|---|
-| 1 | `SatelliteService.fetchElementSet(25544)` | CelesTrak GP query (`CATNR=`, `FORMAT=JSON`) → current OMM element set (cached ≤2h). `resolveByName("ISS (ZARYA)")` reaches the same element set through a `NAME=` query, in one round trip |
+| 1 | `SatelliteService.fetchElementSet(25544)` | CelesTrak GP query (`CATNR=`, `FORMAT=JSON`) → current OMM element set (cached ≤2h). `resolveByName("ISS (ZARYA)")` reaches the same element set through a `NAME=` query, in one round trip; `resolveByName("ISS")` hits the alias table and takes the `CATNR=25544` path |
 | 2 | SGP4 propagation over `days` | step the orbit, find above-horizon intervals |
 | 3 | sun-position check per pass *(in-process, `EphemerisService`)* | keep only sunlit-satellite + dark-ground passes ("visible") |
 
@@ -575,7 +576,8 @@ public surface, so it is repeated per tool rather than extracted:
 | `astronomy_get_ephemeris` | `invalid_time_range` | `InvalidParams` | The resolved `stop` is at or before the resolved `start`. Recovery: pass a later `stop`, or omit it for a 24-hour span. |
 | `astronomy_get_ephemeris` | `incomplete_observer` | `InvalidParams` | Exactly one of `latitude` and `longitude` was supplied. Recovery: supply both for a topocentric ephemeris, or neither for a geocentric one. |
 | `astronomy_get_ephemeris` | `invalid_step` | `InvalidParams` | `step` is not a positive count followed by `m`, `h`, `d`, `mo`, or `y`. Recovery: e.g. `"10m"`, `"1h"`, `"1d"`. |
-| `astronomy_get_ephemeris` | `body_not_found` | `NotFound` | Horizons has no match for the designation, or a bare comet name is ambiguous. Recovery: use a record-resolving form — `"433;"` (numbered asteroid), `"DES=1P;CAP"` (periodic comet), or a negative SPK-ID; verify at ssd.jpl.nasa.gov. |
+| `astronomy_get_ephemeris` | `time_out_of_range` | `InvalidParams` | The span falls outside the target's own Horizons data span: Horizons answers `No ephemeris for target "<name>" (prior to\|after) A.D. <date>` with no ephemeris block. The message carries that bound verbatim (e.g. `Horizons has no ephemeris for Mars after A.D. 2599-DEC-31 23:58:50.8164 UT.`). Thrown by `HorizonsService`. Recovery: move `start`/`stop` inside the target's span. |
+| `astronomy_get_ephemeris` | `body_not_found` | `NotFound` | Horizons has no match for the designation (`No matches found.`), or a bare comet name is ambiguous. Neither date failure counts as a designation miss: a refused date (`Cannot interpret date`) and a `No ephemeris` line that names no bound both fall to `horizons_unavailable`, and an out-of-span date is `time_out_of_range`. Recovery: use a record-resolving form — `"433;"` (numbered asteroid), `"DES=1P;CAP"` (periodic comet), or a negative SPK-ID; verify at ssd.jpl.nasa.gov. |
 | `astronomy_get_ephemeris` | `horizons_unavailable` | `ServiceUnavailable` | Horizons API failed after retries. Retryable. |
 | `astronomy_get_satellite_passes` | `invalid_time` | `InvalidParams` | As above, on `start`. |
 | `astronomy_get_satellite_passes` | `time_out_of_range` | `InvalidParams` | `start` is outside the SGP4 high-accuracy span, or more than 30 days from the epoch of the current element set. Checked on the epoch distance alone, before any propagation: SGP4 keeps answering with well-formed positions long past the point where the mean elements describe the orbit, so its own refusal is a sufficient but not a necessary signal. The message names the distance in days. Recovery: request a start within about a month of today. |
@@ -624,12 +626,45 @@ decision was interpretation rather than rejection because the documented contrac
 said UTC and the hosted deployment already runs UTC — so anchoring changes nothing there,
 while rejection would have withdrawn inputs that were being answered correctly.
 
-`astronomy_get_ephemeris` needed the same fix in two places of its own: it uses
-`parseIsoInstant()` only as a parseability gate and forwards the caller's raw string to
-Horizons, so its default-`stop` computation and its range-order guard each re-parsed that
-string with a bare `new Date(...)`. A zoneless `start` therefore produced a `STOP_TIME` that
-moved with the deployment — and in a different frame than the `START_TIME` beside it, since
-Horizons reads a zoneless `START_TIME` as UTC. Both now derive from the parsed instants.
+`astronomy_get_ephemeris` needed the same fix in two places of its own: its default-`stop`
+computation and its range-order guard each re-parsed the caller's string with a bare
+`new Date(...)`, so a zoneless `start` produced a `STOP_TIME` that moved with the
+deployment. Both now derive from the parsed instants.
+
+**Horizons receives the parsed instant, never the caller's string.** Horizons cannot read a
+numeric UTC offset — `2026-10-01T00:00:00-05:00` comes back `Cannot interpret date` — so
+forwarding the raw `start`/`stop` failed a valid request, and the unmatched-designation
+check then misread that refusal as `body_not_found`. `START_TIME` and `STOP_TIME` are now
+the `toISOString()` of the instants `parseIsoInstant()` returned, and `Cannot interpret`
+is no longer a designation-miss signature.
+
+**A date outside the target's Horizons span is a time error, not a miss.** Each target's data
+covers a finite span (Mars ends after A.D. 2599-DEC-31, and the Hubble Space Telescope
+starts at its 1990 launch). Outside it, Horizons answers `No ephemeris for target "<name>"
+(prior to|after) A.D. <date>`. The miss check used to count `No ephemeris` as a designation
+miss, so the recovery told the caller to change a valid designation. That line now raises
+`time_out_of_range` with Horizons' bound quoted in the message. This tool still applies no
+fixed year range of its own, because the bound varies by target and only Horizons knows it.
+
+**The resolved Horizons target is always echoed.** Horizons resolves a bare `COMMAND` by
+its own name search, so a single-word name can land on an unrelated object and succeed —
+`Eros` resolves to Kerberos (904), a moon of Pluto. The output carries `target_name`, parsed
+from the response's `Target body name:` header, beside the echoed `designation` on both
+surfaces, rather than rejecting bare names outright: the tool cannot tell an intended name
+match from a wrong one, but the caller can.
+
+**Well-known satellite names go through a fixed alias table.** CelesTrak's `NAME=` substring
+search cannot reach the objects people ask about most by their everyday names: "ISS" matches
+over a dozen objects, "Hubble" matches unrelated cubesats (the telescope is catalogued as
+`HST`), and no catalog name contains "Tiangong". A small table maps those names to 25544,
+20580, and 48274 before any `NAME=` query; every other name keeps the substring path. A
+fuzzy match was rejected because nothing in the catalog bridges "Hubble" to "HST".
+
+**A satellite pass that rises in the window is followed to its set.** The scan used to stop
+at the window's last step, so a pass still up at that moment was never recorded, and a
+window holding only that pass came back as "nothing visible". The scan now keeps stepping while a pass is open,
+bounded to one orbital period. A pass already underway at `start` stays omitted, since its
+rise lies outside the window.
 
 **A cycle never reports a set before its own rise.** `astronomy_get_rise_set` searched for
 the next rise and the next set independently, both forward from the cursor, so a call made

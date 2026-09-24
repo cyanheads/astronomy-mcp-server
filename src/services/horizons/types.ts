@@ -31,6 +31,13 @@ export interface EphemerisResult {
   dropped: number;
   points: EphemerisPoint[];
   /**
+   * The object Horizons actually resolved the designation to, from the response's
+   * `Target body name:` header with its `{source: …}` tag removed. Horizons resolves a
+   * bare name by its own search, so this can name a different object than the caller
+   * meant (`Eros` → `Kerberos (904)`). Absent when the response carries no such line.
+   */
+  targetName?: string;
+  /**
    * True when Horizons returned more rows than the inline cap. The remaining rows are
    * retrieved by re-calling from the instant one step past the last row returned, never
    * by widening `step` — a wider step answers a different question, dropping samples the

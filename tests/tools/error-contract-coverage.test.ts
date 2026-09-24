@@ -15,7 +15,7 @@
 import type { ErrorContract } from '@cyanheads/mcp-ts-core/errors';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { bodyResource } from '@/mcp-server/resources/definitions/body.resource.js';
 import { findEventsTool } from '@/mcp-server/tools/definitions/find-events.tool.js';
 import { getEphemerisTool } from '@/mcp-server/tools/definitions/get-ephemeris.tool.js';
@@ -25,11 +25,17 @@ import { getSatellitePassesTool } from '@/mcp-server/tools/definitions/get-satel
 import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import { initHorizonsService } from '@/services/horizons/horizons-service.js';
 
 const SEATTLE = { latitude: 47.6062, longitude: -122.3321 };
 
 beforeAll(() => {
   initEphemerisService();
+  initHorizonsService('https://example.test/horizons', 5000);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 /** One definition's declared contract plus the handler source the reasons are checked against. */
@@ -184,5 +190,32 @@ describe('declared recovery reaches both client surfaces', () => {
     expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
     expect(firstText(result)).toContain(`Recovery: ${hint}`);
     expect(firstText(result)).toContain('(reason star_not_found');
+  });
+
+  it('carries a service-thrown reason whose hint is written inline (get_ephemeris / time_out_of_range)', async () => {
+    // HorizonsService writes this hint at its throw site, with no ctx to read the contract
+    // from, so only this equality keeps the declared recovery and the wire hint together.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response('No ephemeris for target "Mars" after A.D. 2599-DEC-31 23:58:50.8164 UT', {
+            status: 200,
+          }),
+      ),
+    );
+    const result = await runToolContract(getEphemerisTool, {
+      designation: '499',
+      start: '9990-01-01T00:00:00Z',
+      stop: '9990-01-02T00:00:00Z',
+    });
+    const hint = declaredRecovery(getEphemerisTool.errors, 'time_out_of_range');
+
+    expect(result.isError).toBe(true);
+    expect(errorEnvelope(result)?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(errorEnvelope(result)?.data?.reason).toBe('time_out_of_range');
+    expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
+    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+    expect(firstText(result)).toContain('(reason time_out_of_range');
   });
 });

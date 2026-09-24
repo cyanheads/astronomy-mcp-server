@@ -79,7 +79,7 @@ export type SatellitePassesOutputType = z.infer<typeof SatellitePassesOutput>;
 export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
   title: 'astronomy-mcp-server: get satellite passes',
   description:
-    "Predict visible passes of a satellite (e.g. the ISS, NORAD 25544) over an observer in the next `days`. Identify the satellite by exactly one of `norad_id` or `name` — supplying both, or neither, is rejected. `name` is matched as a case-insensitive substring of CelesTrak's catalog names, so it resolves only when it picks out a single object: a broader query comes back with the matching objects and their catalog numbers to choose from, and the result echoes the query that resolved it as `resolved_from_name`. Fetches the object's current GP element set from CelesTrak, propagates it with SGP4 in-process, and returns each pass's rise, peak, and set times with azimuths and the peak elevation. Only passes that are naked-eye-plausible are returned — the satellite must be sunlit at peak while the observer's sky is dark. Every returned pass rises within the requested window: a pass already underway at `start` is omitted rather than reported with `start` as its rise, so back up `start` to see it. A `start` further than about a month from the element set's epoch is rejected as out of range on that distance alone, and an element set that will not propagate to a window inside that horizon is rejected as a reentry — so an empty `passes` means only that nothing was visible. CelesTrak publishes only current element sets, so in practice `start` must be within about a month of today. NORAD catalog numbers and catalog names are found at celestrak.org or heavens-above.com. This is a gated, network-backed extension (CelesTrak is keyless but rate-limited; element sets are cached briefly). Default elevation 0 m; pass an IANA timezone for observer-local pass times.",
+    "Predict visible passes of a satellite (e.g. the ISS, NORAD 25544) over an observer in the next `days`. Identify the satellite by exactly one of `norad_id` or `name` — supplying both, or neither, is rejected. A few well-known common names resolve directly to their catalog numbers, ignoring case: ISS or International Space Station (25544), Hubble, Hubble Space Telescope, or HST (20580), and Tiangong, CSS, or Chinese Space Station (48274). Any other `name` is matched as a case-insensitive substring of CelesTrak's catalog names, so it resolves only when it picks out a single object: a broader query comes back with the matching objects and their catalog numbers to choose from. Either way the result echoes the query that resolved it as `resolved_from_name`. Fetches the object's current GP element set from CelesTrak, propagates it with SGP4 in-process, and returns each pass's rise, peak, and set times with azimuths and the peak elevation. Only passes that are naked-eye-plausible are returned — the satellite must be sunlit at peak while the observer's sky is dark. Every returned pass rises within the requested window: a pass already underway at `start` is omitted rather than reported with `start` as its rise, so back up `start` to see it, while a pass still up when the window ends is reported through its actual set. A `start` further than about a month from the element set's epoch is rejected as out of range on that distance alone, and an element set that will not propagate to a window inside that horizon is rejected as a reentry — so an empty `passes` means only that nothing was visible. CelesTrak publishes only current element sets, so in practice `start` must be within about a month of today. NORAD catalog numbers and catalog names are found at celestrak.org or heavens-above.com. This is a gated, network-backed extension (CelesTrak is keyless but rate-limited; element sets are cached briefly). Default elevation 0 m; pass an IANA timezone for observer-local pass times.",
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z
     .object({
@@ -95,7 +95,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
         .string()
         .optional()
         .describe(
-          'Satellite name to resolve against CelesTrak, e.g. "ISS (ZARYA)". Matched as a case-insensitive substring of the catalog name, so give the fullest name you have — a short one matches many objects and is rejected as ambiguous. Mutually exclusive with `norad_id` — supply exactly one.',
+          'Satellite name to resolve, e.g. "ISS (ZARYA)". The common names ISS, International Space Station, Hubble, Hubble Space Telescope, HST, Tiangong, CSS, and Chinese Space Station resolve directly to their catalog numbers, ignoring case and surrounding whitespace. Any other name is matched against CelesTrak as a case-insensitive substring of the catalog name, so give the fullest name you have — a short one matches many objects and is rejected as ambiguous. Mutually exclusive with `norad_id` — supply exactly one.',
         ),
       latitude: z
         .number()
@@ -317,7 +317,9 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
   format: (r) => {
     const lines: string[] = [];
     const nameLabel = r.satellite_name ? `${r.satellite_name} ` : '';
-    lines.push(`## ${nameLabel}(NORAD ${r.norad_id}) — ${r.passes.length} visible passes`);
+    lines.push(
+      `## ${nameLabel}(NORAD ${r.norad_id}) — ${r.passes.length} visible pass${r.passes.length === 1 ? '' : 'es'}`,
+    );
     if (r.resolved_from_name) lines.push(`Resolved from the name query "${r.resolved_from_name}".`);
     if (r.passes.length === 0)
       lines.push('No visible passes in the requested window (sunlit satellite over a dark sky).');

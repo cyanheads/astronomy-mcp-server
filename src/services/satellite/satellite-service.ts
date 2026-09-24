@@ -9,9 +9,11 @@
  *   only when the satellite is sunlit at peak AND the observer's sky is dark — the
  *   ground-darkness gate reuses the core sun-altitude logic. A pass already underway
  *   when the window opens is omitted rather than reported with the query boundary as its
- *   rise. A start beyond the element set's epoch horizon is rejected on that distance
- *   alone, and inside the horizon an element set that will not propagate at all is
- *   rejected as a decayed object — neither reaches the caller as a 200-shaped answer,
+ *   rise, and one still up when the window closes is followed to its set. Well-known
+ *   common names (ISS, Hubble, Tiangong) resolve through a fixed alias table to their
+ *   catalog numbers before any `NAME=` search. A start beyond the element set's epoch
+ *   horizon is rejected on that distance alone, and inside the horizon an element set
+ *   that will not propagate at all is rejected as a decayed object — neither reaches the caller as a 200-shaped answer,
  *   which would read as "nothing visible tonight" or as a pass list built from mean
  *   elements that stopped describing the orbit. Network-touching code carries its own
  *   timeout + retry boundary and degrades loudly; it never substitutes core output. A
@@ -89,6 +91,23 @@ const GROUND_DARK_SUN_ALT = -6;
  * and the match count says so rather than passing a slice off as the whole set.
  */
 const MAX_NAME_CANDIDATES = 20;
+/**
+ * Common names for the objects people ask about most, mapped to their catalog numbers.
+ * CelesTrak's `NAME=` search cannot reach any of them from the everyday name: "ISS"
+ * matches over a dozen objects, "Hubble" matches unrelated cubesats (the telescope is
+ * catalogued as `HST`), and no catalog name contains "Tiangong" (the station is
+ * `CSS (TIANHE)`). Keys are compared after trimming and lower-casing the query.
+ */
+const NAME_ALIASES: ReadonlyMap<string, number> = new Map([
+  ['iss', 25544],
+  ['international space station', 25544],
+  ['hubble', 20580],
+  ['hubble space telescope', 20580],
+  ['hst', 20580],
+  ['tiangong', 48274],
+  ['css', 48274],
+  ['chinese space station', 48274],
+]);
 
 /**
  * Recovery hints, byte-identical to the `recovery` strings the tool declares for the
@@ -153,10 +172,14 @@ export class SatelliteService {
    * `NAME=` as a case-insensitive substring, so a query resolves only when it picks out a
    * single object — either because it matched one, or because exactly one match carries
    * that name outright, which is a request for that object however many longer names
-   * contain it. Anything else comes back as candidates to choose from.
+   * contain it. Anything else comes back as candidates to choose from. A well-known
+   * common name in `NAME_ALIASES` skips the search and resolves by catalog number.
    */
   async resolveByName(name: string, ctx: Context): Promise<ElementSet> {
     const query = name.trim();
+    const aliased = NAME_ALIASES.get(query.toLowerCase());
+    if (aliased !== undefined) return this.fetchElementSet(aliased, ctx);
+
     const cacheKey = `NAME=${encodeURIComponent(query)}`;
     const cached = this.fromCache(cacheKey);
     if (cached) return cached;
@@ -408,6 +431,15 @@ export class SatelliteService {
 
     const passes: SatellitePass[] = [];
     const totalSteps = Math.floor((days * 86400) / STEP_SECONDS);
+    /**
+     * A pass that rises inside the window belongs to it even when it sets after the window
+     * ends, so a scan that reaches its last step mid-pass keeps stepping until the set. One
+     * orbital period bounds that overrun, which covers any pass of an orbit that rises and
+     * sets; an object still up after that (a near-geostationary one) cannot hold the scan
+     * open, and its pass stays unreported as before. `no` is the SGP4 mean motion in
+     * radians per minute.
+     */
+    const overrunSteps = Math.ceil(((2 * Math.PI) / satrec.no) * (60 / STEP_SECONDS));
 
     let inPass = false;
     let riseTime: Date | null = null;
@@ -433,7 +465,7 @@ export class SatelliteService {
     );
     let sawBelowHorizon = priorLook !== null && priorLook.elevation <= 0;
 
-    for (let i = 0; i <= totalSteps; i++) {
+    for (let i = 0; i <= totalSteps || (inPass && i <= totalSteps + overrunSteps); i++) {
       const t = new Date(start.getTime() + i * STEP_SECONDS * 1000);
       const look = this.lookAngles(satrec, t, observerGd);
       if (!look) continue;

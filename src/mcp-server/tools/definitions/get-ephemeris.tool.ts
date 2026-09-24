@@ -81,6 +81,12 @@ function nextStepInstant(instant: string, step: ParsedStep): string | undefined 
 
 export const EphemerisOutput = z.object({
   designation: z.string().describe('The body designation echoed from the request.'),
+  target_name: z
+    .string()
+    .optional()
+    .describe(
+      "The object JPL Horizons resolved the designation to, from its 'Target body name' header — compare it with the intended object, since a bare name can resolve to a different one. Absent when Horizons' response names no target.",
+    ),
   points: z
     .array(
       z
@@ -116,14 +122,14 @@ export type EphemerisOutputType = z.infer<typeof EphemerisOutput>;
 export const getEphemerisTool = tool('astronomy_get_ephemeris', {
   title: 'astronomy-mcp-server: get small-body ephemeris',
   description:
-    'Fetch a time-series ephemeris for a small body (asteroid or comet) or spacecraft from JPL Horizons — RA/Dec, distance, and apparent magnitude over a span, optionally with observer-relative altitude/azimuth. This covers objects the in-process major-body set cannot. The designation is passed to Horizons verbatim, so it must be in a form Horizons resolves to a single record: a numbered asteroid takes a trailing-semicolon record lookup (e.g. "433;" for Eros, "1;" for Ceres), and a periodic comet takes the DES + closest-apparition form (e.g. "DES=1P;CAP" for Halley) — a bare name like "433 Eros" or "1P/Halley" returns no match or an ambiguous record list and is rejected. Spacecraft take their negative SPK-ID. `start` and `stop` are ISO 8601 UTC and `stop` must be after `start`; `step` is a count plus a unit of m, h, d, mo, or y, such as "1d", "1h", or "10m". Supplying observer latitude/longitude yields topocentric coordinates and adds alt/az — supply both or neither. This is a gated, network-backed extension (JPL Horizons is keyless but rate-limited and best-effort); large spans truncate inline at 200 rows, and the truncation notice names the exact `start` to resume from — one step past the last row returned, because Horizons includes the start instant in its output — so re-calling from there continues the series without repeating a sample. Splitting the range into smaller adjacent spans works too; keep the same step either way so no sample is lost.',
+    'Fetch a time-series ephemeris for a small body (asteroid or comet) or spacecraft from JPL Horizons — RA/Dec, distance, and apparent magnitude over a span, optionally with observer-relative altitude/azimuth. This covers objects the in-process major-body set cannot. The designation is passed to Horizons verbatim, so it must be in a form Horizons resolves to a single record: a numbered asteroid takes a trailing-semicolon record lookup (e.g. "433;" for Eros, "1;" for Ceres), and a periodic comet takes the DES + closest-apparition form (e.g. "DES=1P;CAP" for Halley). Spacecraft take their negative SPK-ID. Anything else goes through the Horizons name search: a bare name matching nothing (e.g. "433 Eros") or several records (e.g. "1P/Halley") is rejected, but one matching a single object succeeds even when that object is not the one meant — "Eros" resolves to Kerberos, a moon of Pluto — so compare `target_name`, the object Horizons resolved, with the one intended. `start` and `stop` are ISO 8601 UTC and `stop` must be after `start`; `step` is a count plus a unit of m, h, d, mo, or y, such as "1d", "1h", or "10m". Supplying observer latitude/longitude yields topocentric coordinates and adds alt/az — supply both or neither. This is a gated, network-backed extension (JPL Horizons is keyless but rate-limited and best-effort); large spans truncate inline at 200 rows, and the truncation notice names the exact `start` to resume from — one step past the last row returned, because Horizons includes the start instant in its output — so re-calling from there continues the series without repeating a sample. Splitting the range into smaller adjacent spans works too; keep the same step either way so no sample is lost.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
     designation: z
       .string()
       .min(1)
       .describe(
-        'JPL Horizons target, passed verbatim — use a form that resolves to one record. Numbered asteroid: trailing-semicolon record lookup, e.g. "433;" (Eros), "1;" (Ceres). Periodic comet: DES + closest-apparition flag, e.g. "DES=1P;CAP" (Halley), "DES=2P;CAP" (Encke). Spacecraft: negative SPK-ID, e.g. "-48" (Hubble). A bare name like "433 Eros" or "1P/Halley" fails. Look up designations at ssd.jpl.nasa.gov/tools/sbdb_lookup.html.',
+        'JPL Horizons target, passed verbatim — use a form that resolves to one record. Numbered asteroid: trailing-semicolon record lookup, e.g. "433;" (Eros), "1;" (Ceres). Periodic comet: DES + closest-apparition flag, e.g. "DES=1P;CAP" (Halley), "DES=2P;CAP" (Encke). Spacecraft: negative SPK-ID, e.g. "-48" (Hubble). A bare name like "433 Eros" (no match) or "1P/Halley" (several records) is rejected, but one matching a single object succeeds even when it is not the object meant — check `target_name` in the result. Look up designations at ssd.jpl.nasa.gov/tools/sbdb_lookup.html.',
       ),
     latitude: z
       .number()
@@ -212,6 +218,15 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
         'Pass step as a count plus m, h, d, mo, or y — for example "10m", "1h", or "1d" — then retry.',
     },
     {
+      reason: 'time_out_of_range',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: "The requested span falls outside the target's Horizons data span. The message names the bound Horizons reported, e.g. after A.D. 2599-DEC-31 for Mars.",
+      // Verbatim the hint HorizonsService throws with.
+      recovery:
+        "Move start and stop inside the target's Horizons data span — the message names the bound the request crossed — then retry.",
+      thrownBy: 'service',
+    },
+    {
       reason: 'body_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'JPL Horizons has no match for the designation, or the designation is ambiguous (a bare comet name matches multiple apparition records).',
@@ -265,8 +280,14 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
         { ...ctx.recoveryFor('invalid_time') },
       );
     }
-    const start = input.start ?? startInstant.toISOString();
-    const stop = input.stop ?? stopInstant.toISOString();
+    /**
+     * Horizons receives the parsed instants, never the caller's strings. It cannot read a
+     * numeric UTC offset ("…T00:00:00-05:00" comes back "Cannot interpret date"), and an
+     * offset or zone designator only ever mattered for which instant the string names —
+     * which the parse has already settled.
+     */
+    const start = startInstant.toISOString();
+    const stop = stopInstant.toISOString();
     if (stopInstant.getTime() <= startInstant.getTime()) {
       throw ctx.fail('invalid_time_range', `stop "${stop}" is not after start "${start}".`, {
         ...ctx.recoveryFor('invalid_time_range'),
@@ -347,6 +368,7 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
 
     const out: EphemerisOutputType = {
       designation: result.designation,
+      ...(result.targetName ? { target_name: result.targetName } : {}),
       points: result.points.map((p) => ({
         time_utc: p.timeUtc,
         ra_hours: p.raHours,
@@ -362,7 +384,8 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
 
   format: (r) => {
     const lines: string[] = [];
-    lines.push(`## ${r.designation} — ${r.points.length} points`);
+    const target = r.target_name ? ` (Horizons target: ${r.target_name})` : '';
+    lines.push(`## ${r.designation}${target} — ${r.points.length} points`);
     for (const p of r.points) {
       const altAz =
         p.altitude_degrees === undefined

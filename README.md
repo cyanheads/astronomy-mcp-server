@@ -117,7 +117,9 @@ Design reference: [`docs/design.md`](./docs/design.md).
 
 - Registered only when `ASTRONOMY_ENABLE_HORIZONS` is set; off by default
 - Time-series ephemeris for a small body or spacecraft via JPL Horizons — RA/Dec, distance, magnitude, and optional alt/az when observer `latitude`/`longitude` are both supplied (one alone is rejected)
-- `designation` must resolve to a single Horizons record: numbered asteroid as `"433;"`, periodic comet as `"DES=1P;CAP"`, spacecraft as a negative SPK-ID — a bare name is rejected
+- `designation` should resolve to a single Horizons record: numbered asteroid as `"433;"`, periodic comet as `"DES=1P;CAP"`, spacecraft as a negative SPK-ID — a bare name matching nothing or several records is rejected, and one matching a single object can land on the wrong one (`"Eros"` resolves to Kerberos), so the result carries `target_name`, the object Horizons resolved
+- `start`/`stop` accept a `Z` or numeric UTC offset (a value with neither is read as UTC); Horizons receives the resolved UTC instant
+- No 1900–2100 limit applies, but a span outside the target's own Horizons data is rejected as `time_out_of_range`, and the message gives the bound Horizons reports (e.g. Mars ends after A.D. 2599-DEC-31); an unknown designation is `body_not_found`
 - `step` is a count plus unit (`m`/`h`/`d`/`mo`/`y`, e.g. `"1h"`); `stop` must be after `start` (defaults to a 24h span from now)
 - Truncates inline at 200 rows; the truncation notice names the exact `start` to resume from, one step past the last row returned
 
@@ -126,8 +128,10 @@ Design reference: [`docs/design.md`](./docs/design.md).
 ### `astronomy_get_satellite_passes` <sub>tool</sub>
 
 - Registered only when `ASTRONOMY_ENABLE_SATELLITES` is set; off by default
-- Identify the satellite by exactly one of `norad_id` or `name` (case-insensitive substring match against CelesTrak's catalog) — both or neither is rejected
+- Identify the satellite by exactly one of `norad_id` or `name` — both or neither is rejected
+- `name` resolves the common names ISS / International Space Station (25544), Hubble / Hubble Space Telescope / HST (20580), and Tiangong / CSS / Chinese Space Station (48274) directly; any other name is a case-insensitive substring match against CelesTrak's catalog
 - Fetches the current GP element set from CelesTrak and propagates it with SGP4 in-process; only naked-eye-plausible passes (sunlit at peak, observer sky dark) are returned
+- A pass must rise inside the window: one already up at `start` is omitted, one still up when the window ends is reported through its set
 - `start` must be within about a month of the element set's epoch — older elements no longer describe the orbit, and an element set that won't propagate inside that window is rejected as a reentry
 - Searches the next `days` ahead, default 7, max 10; pass `timezone` for observer-local pass times
 

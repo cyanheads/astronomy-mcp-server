@@ -3,19 +3,51 @@
  *   HTTP API for small-body (asteroid/comet) and spacecraft ephemerides that the
  *   in-process major-body engine cannot cover. The only network-touching code here
  *   besides the satellite extension: it carries its own timeout + retry boundary and
- *   degrades loudly (throws serviceUnavailable / notFound), never substituting core
- *   output. Parses the OBSERVER ephemeris table between Horizons' $$SOE/$$EOE markers.
+ *   degrades loudly (throws serviceUnavailable / notFound / invalidParams), never
+ *   substituting core output. Parses the OBSERVER ephemeris table between Horizons' $$SOE/$$EOE markers.
  * @module services/horizons/horizons-service
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { invalidParams, notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ObserverInput } from '../ephemeris/types.js';
 import type { EphemerisPoint, EphemerisResult } from './types.js';
 
 /** Cap on inline ephemeris rows; beyond this the result truncates with disclosure. */
 const MAX_ROWS = 200;
+
+/**
+ * Horizons' designation-miss signatures. A small-body index search that finds nothing
+ * prints "No matches found."; one that finds several prints its "Matching small-bodies"
+ * list with no ephemeris. Two date failures are deliberately absent, because the
+ * designation resolved in both and blaming it would send the caller to change the one
+ * input that was right: a refused START_TIME/STOP_TIME ("Cannot interpret date"), and a
+ * span outside the target's data ("No ephemeris for target …", matched by `OUT_OF_SPAN`).
+ */
+const DESIGNATION_MISS = /No matches found|Matching small-bodies/i;
+
+/**
+ * The line Horizons prints when the requested span leaves the target's data, e.g.
+ * `No ephemeris for target "Mars" after A.D. 2599-DEC-31 23:58:50.8164 UT`. Captures the
+ * target name, the direction, and the bound (era included) exactly as Horizons wrote them.
+ */
+const OUT_OF_SPAN =
+  /^No ephemeris for target "([^"]*)" (prior to|after) ((?:A\.D\.|B\.C\.) \S.*?)[ \t]*$/m;
+
+/**
+ * Recovery hint for a span outside the target's data, byte-identical to the `recovery`
+ * the tool declares for `time_out_of_range`. The bound itself rides in the message.
+ */
+const OUT_OF_SPAN_RECOVERY =
+  "Move start and stop inside the target's Horizons data span — the message names the bound the request crossed — then retry.";
+
+/**
+ * The header line naming the object Horizons resolved, e.g.
+ * "Target body name: 433 Eros (A898 PA)              {source: JPL#659}". The capture is
+ * the name alone, without the padding and the trailing `{source: …}` tag.
+ */
+const TARGET_BODY_NAME = /^Target body name:[ \t]*(.*?)[ \t]*(?:\{source:[^}]*\})?[ \t]*$/m;
 
 export class HorizonsService {
   constructor(
@@ -123,9 +155,15 @@ export class HorizonsService {
   /** Parse the CSV OBSERVER table between $$SOE and $$EOE. */
   private parse(designation: string, text: string, hasObserver: boolean): EphemerisResult {
     const hasBlock = text.includes('$$SOE');
-    const looksUnmatched =
-      /No matches found|Cannot interpret|No ephemeris|Matching small-bodies/i.test(text);
-    if (looksUnmatched && !hasBlock) {
+    const outOfSpan = hasBlock ? null : OUT_OF_SPAN.exec(text);
+    if (outOfSpan) {
+      const [, target, direction, bound] = outOfSpan;
+      throw invalidParams(`Horizons has no ephemeris for ${target} ${direction} ${bound}.`, {
+        reason: 'time_out_of_range',
+        recovery: { hint: OUT_OF_SPAN_RECOVERY },
+      });
+    }
+    if (DESIGNATION_MISS.test(text) && !hasBlock) {
       throw notFound(`JPL Horizons has no match for designation "${designation}".`, {
         reason: 'body_not_found',
         recovery: {
@@ -173,7 +211,14 @@ export class HorizonsService {
       });
     }
 
-    return { designation, points, truncated, dropped };
+    const targetName = TARGET_BODY_NAME.exec(text)?.[1];
+    return {
+      designation,
+      points,
+      truncated,
+      dropped,
+      ...(targetName ? { targetName } : {}),
+    };
   }
 
   /**
