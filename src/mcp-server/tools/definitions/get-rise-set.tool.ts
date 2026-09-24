@@ -27,24 +27,28 @@ const TwilightPairSchema = z.object({
     .string()
     .nullable()
     .describe(
-      'Dawn (Sun ascending through the depth) in ISO 8601 UTC, or null if it does not occur.',
+      "Dawn (Sun ascending through the depth) in ISO 8601 UTC, or null if it does not occur. This is the morning after the cycle's set, ending the night that begins at the dusk beside it — a day later than the cycle's rise, not the dawn before it.",
     ),
   dusk_utc: z
     .string()
     .nullable()
     .describe(
-      'Dusk (Sun descending through the depth) in ISO 8601 UTC, or null if it does not occur.',
+      "Dusk (Sun descending through the depth) in ISO 8601 UTC, or null if it does not occur. This is the evening of the cycle's set.",
     ),
   dawn_local: z
     .string()
     .nullable()
     .optional()
-    .describe('Dawn in observer-local time, present only when a timezone was supplied.'),
+    .describe(
+      "Dawn in observer-local time — the morning after the cycle's set — present only when a timezone was supplied.",
+    ),
   dusk_local: z
     .string()
     .nullable()
     .optional()
-    .describe('Dusk in observer-local time, present only when a timezone was supplied.'),
+    .describe(
+      "Dusk in observer-local time — the evening of the cycle's set — present only when a timezone was supplied.",
+    ),
 });
 
 export const RiseSetOutput = z.object({
@@ -93,16 +97,20 @@ export const RiseSetOutput = z.object({
             ),
           twilight: z
             .object({
-              civil: TwilightPairSchema.describe('Civil twilight (Sun at −6°) dawn and dusk.'),
+              civil: TwilightPairSchema.describe(
+                'Civil twilight (Sun at −6°): dusk and the following dawn.',
+              ),
               nautical: TwilightPairSchema.describe(
-                'Nautical twilight (Sun at −12°) dawn and dusk.',
+                'Nautical twilight (Sun at −12°): dusk and the following dawn.',
               ),
               astronomical: TwilightPairSchema.describe(
-                'Astronomical twilight (Sun at −18°) dawn and dusk — the dark-sky window.',
+                'Astronomical twilight (Sun at −18°): dusk and the following dawn, bounding the dark-sky window.',
               ),
             })
             .optional()
-            .describe('The three twilight pairs. Present only when body is "sun".'),
+            .describe(
+              "The three twilight pairs, present only when body is \"sun\". Each pair spans one night: dusk is the evening of this cycle's set and dawn is the following morning, so a cycle's dawn falls a day after its rise. The dawn before a given sunrise is in the previous cycle's pair — start the search a day earlier to get it.",
+            ),
           note: z
             .string()
             .optional()
@@ -120,7 +128,7 @@ export type RiseSetOutputType = z.infer<typeof RiseSetOutput>;
 export const getRiseSetTool = tool('astronomy_get_rise_set', {
   title: 'astronomy-mcp-server: get rise/set times',
   description:
-    'Compute rise, set, and culmination (transit) times for a body at an observer location, plus the maximum altitude at culmination. For the Sun, also returns the three twilight pairs (civil −6°, nautical −12°, astronomical −18°) so a single call answers "when does the sun set and when is it truly dark." Searches forward from `start` (default today) and returns the next `count` cycles (default 1). When the body is already above the horizon at `start`, the first cycle is the interval in progress: its `set` is the imminent one and its `rise` is null, since that rise precedes the search — so a set is never reported earlier than the rise beside it. Circumpolar or never-rises situations are reported as null rise/set fields with an explanatory note rather than an error — the fact is the answer. Default elevation is 0 m; pass an IANA `timezone` for observer-local times. This server does not geocode — resolve coordinates upstream first.',
+    'Compute rise, set, and culmination (transit) times for a body at an observer location, plus the maximum altitude at culmination. For the Sun, also returns the three twilight pairs (civil −6°, nautical −12°, astronomical −18°) so a single call answers "when does the sun set and when is it truly dark." Each pair covers the night after the cycle\'s set — dusk that evening, dawn the next morning — so the dawn listed beside a sunrise is the following day\'s; for the dawn before a sunrise, read the previous cycle or start a day earlier. Searches forward from `start` (default today) and returns the next `count` cycles (default 1). When the body is already above the horizon at `start`, the first cycle is the interval in progress: its `set` is the imminent one and its `rise` is null, since that rise precedes the search — so a set is never reported earlier than the rise beside it. Circumpolar or never-rises situations are reported as null rise/set fields with an explanatory note rather than an error — the fact is the answer. Default elevation is 0 m; pass an IANA `timezone` for observer-local times. This server does not geocode — resolve coordinates upstream first.',
   annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
     body: z

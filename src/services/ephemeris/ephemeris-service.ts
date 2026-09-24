@@ -11,6 +11,7 @@
 
 import { invalidParams, notFound } from '@cyanheads/mcp-ts-core/errors';
 import {
+  AngleFromSun,
   type Apsis,
   ApsisKind,
   type AstroTime,
@@ -49,7 +50,7 @@ import {
 } from 'astronomy-engine';
 import { BODY_META } from './body-data.js';
 import { parseIsoInstant } from './iso-time.js';
-import { STAR_CATALOG } from './star-catalog.js';
+import { CONSTELLATION_GENITIVES, GREEK_LETTER_NAMES, STAR_CATALOG } from './star-catalog.js';
 import type {
   BodyName,
   CatalogStar,
@@ -88,6 +89,13 @@ const KM_PER_AU = 149597870.69098932;
 /** Minutes per day, for turning the engine's semi-durations into day offsets. */
 const MINUTES_PER_DAY = 1440;
 
+/**
+ * Angular distance from the Sun, in degrees, inside which a body is reported lost in the
+ * Sun's glare — a conventional naked-eye cutoff, inside which the planets are rarely seen
+ * even from a twilit horizon.
+ */
+const GLARE_ELONGATION_DEG = 15;
+
 /** Twilight depth boundaries in degrees of Sun altitude. */
 const CIVIL_DEG = -6;
 const NAUTICAL_DEG = -12;
@@ -103,7 +111,7 @@ const RISE_SET_WINDOW_DAYS = 2;
 /** Longest synodic month, rounded up — the widest a new-moon look-back needs to be. */
 const MAX_SYNODIC_MONTH_DAYS = 29.9;
 
-/** Mean synodic month, for deriving an age from the phase angle. */
+/** Mean synodic month, for deriving an age from the phase longitude. */
 const MEAN_SYNODIC_MONTH_DAYS = 29.530588;
 
 /** The eight planets Earth can be in conjunction or opposition with. */
@@ -277,17 +285,29 @@ export class EphemerisService {
 
   // ---- Star resolution -----------------------------------------------------
 
-  /** Resolve a star name/designation (case-insensitive) to a catalog entry, or throw. */
+  /**
+   * Resolve a star name or Bayer designation (case- and spacing-insensitive) to a catalog
+   * entry. A designation may spell the Greek letter out or write it as a symbol, and give
+   * the constellation as its genitive or IAU abbreviation — `Alpha Canis Majoris`,
+   * `Alpha CMa`, `α CMa`, and `α Canis Majoris` all resolve to Sirius. A miss throws
+   * `star_not_found` listing every catalog star, in the message and as `catalog_stars`.
+   */
   lookupStar(name: string): CatalogStar {
-    const key = name.trim().toLowerCase();
-    const hit = this.starIndex.get(key) ?? this.designationIndex.get(key);
+    const words = name.trim().toLowerCase().split(/\s+/);
+    const hit =
+      this.starIndex.get(words.join(' ')) ?? this.designationIndex.get(canonicalDesignation(words));
     if (!hit) {
-      throw notFound(`Star "${name}" is not in the bundled catalog.`, {
-        reason: 'star_not_found',
-        recovery: {
-          hint: 'Check the spelling or use a common name / Bayer designation, e.g. "Sirius" or "Polaris".',
+      const catalogStars = STAR_CATALOG.map((s) => s.name);
+      throw notFound(
+        `Star "${name}" is not in the bundled catalog. It holds these ${catalogStars.length} stars: ${catalogStars.join(', ')}.`,
+        {
+          reason: 'star_not_found',
+          recovery: {
+            hint: 'Pick a star from the catalog this error lists, by common name or Bayer designation (e.g. "Sirius", "Alpha CMa", "α Canis Majoris"). A star outside the catalog cannot be located.',
+          },
+          catalog_stars: catalogStars,
         },
-      });
+      );
     }
     return hit;
   }
@@ -366,6 +386,8 @@ export class EphemerisService {
       angularDiameterArcsec: angularDiameter,
       phaseAngleDegrees: phaseAngle,
       illuminatedFraction: illuminated,
+      // Defined for every target here — the engine rejects only Body.Earth, never a position() target.
+      sunElongationDegrees: AngleFromSun(engineBody, time),
       constellation: { abbreviation: con.symbol, name: con.name },
     };
     if (timezone) pos.timeLocal = this.formatLocal(date, timezone);
@@ -500,10 +522,10 @@ export class EphemerisService {
   /** Moon phase, illumination, age, and the next four quarter phases. */
   moonPhase(date: Date, timezone?: string): MoonPhaseResult {
     const time = MakeTime(date);
-    const phaseAngle = MoonPhase(time);
+    const phaseLongitude = MoonPhase(time);
     const illum = Illumination(Body.Moon, time);
 
-    // Age = days since the previous new moon. New moon is phase-angle 0; search
+    // Age = days since the previous new moon. New moon is phase longitude 0; search
     // backward by stepping to the prior new-moon longitude crossing.
     const ageDays = this.moonAgeDays(time);
 
@@ -521,9 +543,9 @@ export class EphemerisService {
 
     const result: MoonPhaseResult = {
       timeUtc: time.toString(),
-      phaseAngleDegrees: phaseAngle,
+      phaseLongitudeDegrees: phaseLongitude,
       illuminatedFraction: illum.phase_fraction,
-      phaseName: phaseNameFromAngle(phaseAngle),
+      phaseName: phaseNameFromLongitude(phaseLongitude),
       ageDays,
       nextQuarters: quarters,
     };
@@ -541,7 +563,7 @@ export class EphemerisService {
     const window = MAX_SYNODIC_MONTH_DAYS + 1;
     const first = SearchMoonPhase(0, time.AddDays(-MAX_SYNODIC_MONTH_DAYS).date, window);
     if (!first || first.ut > time.ut) {
-      // Fallback: derive the age from the phase angle if the search overshoots.
+      // Fallback: derive the age from the phase longitude if the search overshoots.
       return (MoonPhase(time) / 360) * MEAN_SYNODIC_MONTH_DAYS;
     }
     const second = SearchMoonPhase(0, first.AddDays(1).date, window);
@@ -928,7 +950,7 @@ export class EphemerisService {
     const bodies: VisibleBody[] = candidates.map((pos, idx) => ({
       ...pos,
       rank: idx + 1,
-      visibilityNote: visibilityNote(pos),
+      visibilityNote: visibilityNote(pos, skyCondition),
     }));
 
     return { bodies, skyCondition, sunAltitudeDegrees: sunAlt };
@@ -964,6 +986,30 @@ function angularDiameterArcsec(radiusKm: number, distanceAu: number): number {
   return radians * (180 / Math.PI) * 3600;
 }
 
+/** Lower-cased Greek letter symbol → spelled-out name, e.g. `α` → `alpha`. */
+const GREEK_LETTERS = new Map(
+  Object.entries(GREEK_LETTER_NAMES).map(([symbol, spelled]) => [symbol, spelled.toLowerCase()]),
+);
+
+/** Lower-cased IAU abbreviation → lower-cased genitive, e.g. `cma` → `canis majoris`. */
+const GENITIVES = new Map(
+  Object.entries(CONSTELLATION_GENITIVES).map(([abbr, genitive]) => [
+    abbr.toLowerCase(),
+    genitive.toLowerCase(),
+  ]),
+);
+
+/**
+ * Rewrite a lower-cased, whitespace-split Bayer designation into the catalog's own form
+ * (`<letter name> <constellation genitive>`): a Greek symbol becomes its name, an IAU
+ * abbreviation its genitive. Anything else passes through, so an input that is not a
+ * designation simply misses the index.
+ */
+function canonicalDesignation([letter = '', ...constellation]: string[]): string {
+  const rest = constellation.join(' ');
+  return `${GREEK_LETTERS.get(letter) ?? letter} ${GENITIVES.get(rest) ?? rest}`;
+}
+
 /** Map a MoonQuarter index (0..3) to a quarter name. */
 function quarterName(index: number): QuarterName {
   switch (index) {
@@ -978,9 +1024,9 @@ function quarterName(index: number): QuarterName {
   }
 }
 
-/** Human phase name from the Moon's phase angle (0=new, 90=first, 180=full, 270=last). */
-function phaseNameFromAngle(angle: number): string {
-  const a = ((angle % 360) + 360) % 360;
+/** Human phase name from the Moon–Sun longitude difference (0=new, 90=first, 180=full, 270=last). */
+function phaseNameFromLongitude(longitude: number): string {
+  const a = ((longitude % 360) + 360) % 360;
   if (a < 22.5 || a >= 337.5) return 'New Moon';
   if (a < 67.5) return 'Waxing Crescent';
   if (a < 112.5) return 'First Quarter';
@@ -1022,19 +1068,41 @@ function brightnessAdjective(mag: number | null): string {
   return 'very faint';
 }
 
-/** Deterministic, server-computed visibility headline — real values only. */
-function visibilityNote(pos: SkyPosition): string {
+/**
+ * Deterministic, server-computed visibility headline — real values only. The brightness
+ * adjective describes a body against a dark sky, so a condition that hides the body replaces
+ * it: daylight, or sitting within `GLARE_ELONGATION_DEG` of the Sun. A civil-twilight sky dims
+ * the view without hiding a bright body, so it follows the adjective as a caveat. The Sun is
+ * exempt from all of it. The Moon and a negative-magnitude Venus are naked-eye objects in a
+ * blue sky, so they skip the sky-condition caveats — but not glare, since beside the Sun's
+ * disc neither can be seen.
+ */
+function visibilityNote(pos: SkyPosition, sky: SkyCondition): string {
   const alt = pos.horizontal.altitudeDegrees;
   const octant = compassOctant(pos.horizontal.azimuthDegrees);
   const magPart = pos.magnitude !== null ? `mag ${pos.magnitude.toFixed(1)}, ` : '';
-  const adjective = brightnessAdjective(pos.magnitude);
-  const adjPart = adjective ? ` — ${adjective}` : '';
   const altPhrase =
     alt < 0
       ? `${Math.abs(alt).toFixed(0)}° below the ${octant} horizon`
       : `${alt.toFixed(0)}° above the ${octant} horizon`;
   const name = pos.body.charAt(0).toUpperCase() + pos.body.slice(1);
-  return `${name}, ${magPart}${altPhrase}${adjPart}`;
+  const headline = `${name}, ${magPart}${altPhrase}`;
+
+  const isSun = pos.body === 'sun';
+  const seenInDaylight =
+    isSun ||
+    pos.body === 'moon' ||
+    (pos.body === 'venus' && pos.magnitude !== null && pos.magnitude < 0);
+  const inDaylight = !seenInDaylight && sky === 'daylight';
+  const inGlare = !isSun && pos.sunElongationDegrees < GLARE_ELONGATION_DEG;
+  const adjective = inDaylight || inGlare ? '' : brightnessAdjective(pos.magnitude);
+  const terms = [
+    adjective,
+    inDaylight ? 'daylight, not naked-eye visible' : '',
+    !seenInDaylight && sky === 'civil_twilight' ? 'civil twilight, sky still bright' : '',
+    inGlare ? `${pos.sunElongationDegrees.toFixed(0)}° from the Sun, lost in glare` : '',
+  ].filter(Boolean);
+  return terms.length > 0 ? `${headline} — ${terms.join('; ')}` : headline;
 }
 
 /**

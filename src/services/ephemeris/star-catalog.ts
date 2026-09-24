@@ -4,6 +4,8 @@
  *   apparent magnitude. Feeds astronomy-engine's DefineStar so list_visible and
  *   get_sky_position can answer for named stars. Static asset, no upstream; loaded
  *   once at module init. Coordinates from the Hipparcos / Yale Bright Star catalogs.
+ *   Also holds the Greek-letter and constellation-abbreviation tables that let a Bayer
+ *   designation be written `α CMa` or `Alpha CMa` as well as `Alpha Canis Majoris`.
  * @module services/ephemeris/star-catalog
  */
 
@@ -273,3 +275,63 @@ export const STAR_CATALOG: readonly CatalogStar[] = [
     magnitude: 1.98,
   },
 ];
+
+/**
+ * Greek letter symbol → the spelled-out name every catalog `designation` leads with, so a
+ * Bayer designation written `α CMa` resolves like `Alpha CMa`.
+ */
+export const GREEK_LETTER_NAMES: Readonly<Record<string, string>> = {
+  α: 'Alpha',
+  β: 'Beta',
+  γ: 'Gamma',
+  δ: 'Delta',
+  ε: 'Epsilon',
+  ζ: 'Zeta',
+  η: 'Eta',
+  θ: 'Theta',
+  ι: 'Iota',
+  κ: 'Kappa',
+  λ: 'Lambda',
+  μ: 'Mu',
+  ν: 'Nu',
+  ξ: 'Xi',
+  ο: 'Omicron',
+  π: 'Pi',
+  ρ: 'Rho',
+  σ: 'Sigma',
+  τ: 'Tau',
+  υ: 'Upsilon',
+  φ: 'Phi',
+  χ: 'Chi',
+  ψ: 'Psi',
+  ω: 'Omega',
+};
+
+/**
+ * IAU three-letter constellation abbreviation → the genitive every catalog `designation`
+ * ends with, for the constellations the catalog draws from. A star added from a new
+ * constellation needs its row here for `Alpha <abbr>` to resolve.
+ */
+export const CONSTELLATION_GENITIVES: Readonly<Record<string, string>> = {
+  Aql: 'Aquilae',
+  Aur: 'Aurigae',
+  Boo: 'Bootis',
+  CMa: 'Canis Majoris',
+  CMi: 'Canis Minoris',
+  Car: 'Carinae',
+  Cen: 'Centauri',
+  Cru: 'Crucis',
+  Cyg: 'Cygni',
+  Eri: 'Eridani',
+  Gem: 'Geminorum',
+  Leo: 'Leonis',
+  Lyr: 'Lyrae',
+  Ori: 'Orionis',
+  Per: 'Persei',
+  PsA: 'Piscis Austrini',
+  Sco: 'Scorpii',
+  Tau: 'Tauri',
+  UMa: 'Ursae Majoris',
+  UMi: 'Ursae Minoris',
+  Vir: 'Virginis',
+};

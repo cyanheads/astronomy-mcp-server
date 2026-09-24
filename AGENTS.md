@@ -19,9 +19,9 @@ Observational astronomy, computed in-process. The core is keyless and offline �
 
 | Tool | What it computes |
 |:-----|:-----------------|
-| `astronomy_get_sky_position` | Apparent topocentric position of one body or named star — equatorial / horizontal / ecliptic, magnitude, angular diameter, phase, constellation |
+| `astronomy_get_sky_position` | Apparent topocentric position of one body or named star — equatorial / horizontal / ecliptic, magnitude, angular diameter, phase, Sun elongation, constellation |
 | `astronomy_get_rise_set` | Rise / set / transit cycles, plus twilight bands for the Sun; circumpolar / never-rises notes |
-| `astronomy_get_moon_phase` | Phase angle, illumination, synodic age, next four quarter phases |
+| `astronomy_get_moon_phase` | Phase longitude, illumination, synodic age, next four quarter phases |
 | `astronomy_find_events` | Next N of: equinox, solstice, moon_quarter, lunar/solar eclipse, opposition, conjunction, max_elongation, perigee_apogee |
 | `astronomy_list_visible` | One-call "what is up now" — naked-eye bodies (+ optional catalog stars) above the horizon, ranked, with a sky-condition gate |
 
@@ -61,7 +61,7 @@ import { getEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 export const getMoonPhaseTool = tool('astronomy_get_moon_phase', {
   title: 'astronomy-mcp-server: get moon phase',
   description:
-    'Report the Moon phase for an instant: illuminated fraction, phase name, synodic age, phase angle, and the next four quarter phases.',
+    'Report the Moon phase for an instant: illuminated fraction, phase name, synodic age, phase longitude, and the next four quarter phases.',
   annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
     time: z.string().optional().describe('Instant to evaluate as an ISO 8601 UTC string. Defaults to now.'),

@@ -35,9 +35,9 @@ Observational astronomy computed in-process from [`astronomy-engine`](https://gi
 
 | Tool | Description |
 |:---|:---|
-| `astronomy_get_sky_position` | Apparent position of one body or named star for an observer and instant — equatorial (RA/Dec), horizontal (alt/az), ecliptic, plus distance, magnitude, angular diameter, phase, and constellation. |
+| `astronomy_get_sky_position` | Apparent position of one body or named star for an observer and instant — equatorial (RA/Dec), horizontal (alt/az), ecliptic, plus distance, magnitude, angular diameter, phase, angular distance from the Sun, and constellation. |
 | `astronomy_get_rise_set` | Rise, set, and culmination times for a body at a location, with maximum altitude at transit. For the Sun, also the three twilight pairs (civil/nautical/astronomical). |
-| `astronomy_get_moon_phase` | Moon phase for an instant: illuminated fraction, phase name, synodic age, phase angle, and the next four quarter phases with timestamps. |
+| `astronomy_get_moon_phase` | Moon phase for an instant: illuminated fraction, phase name, synodic age, phase longitude, and the next four quarter phases with timestamps. |
 | `astronomy_find_events` | Forward search for the next occurrences of one sky-event class: eclipses, equinoxes, solstices, moon quarters, oppositions, conjunctions, greatest elongations, and apsides. |
 | `astronomy_list_visible` | The one-call "what's up right now" answer: every naked-eye body (and optional bright stars) above the horizon, ranked, annotated, and gated by the Sun's altitude into daylight/twilight/dark. |
 | `astronomy_get_ephemeris` | *(gated extension)* Time-series ephemeris for a small body (asteroid/comet) or spacecraft via JPL Horizons — covers what the in-process major-body set cannot. Off by default. |
@@ -64,7 +64,8 @@ Design reference: [`docs/design.md`](./docs/design.md).
 ### `astronomy_get_sky_position` <sub>tool</sub>
 
 - Target one solar-system body (`body`) or a named bright star (`star`, takes precedence over `body`) — one of the two is required
-- Returns equatorial (RA/Dec), refraction-corrected horizontal (alt/az), and ecliptic coordinates plus distance, magnitude, angular diameter, phase angle, illuminated fraction, and constellation in one call
+- `star` draws on a bundled 32-star catalog (about 30 of the brightest stars plus Polaris) by common name or Bayer designation, with the Greek letter spelled out or as a symbol and the constellation as genitive or IAU abbreviation — `Alpha Canis Majoris`, `Alpha CMa`, and `α CMa` all resolve to Sirius; a miss lists every catalog star
+- Returns equatorial (RA/Dec), refraction-corrected horizontal (alt/az), and ecliptic coordinates plus distance, magnitude, angular diameter, phase angle, illuminated fraction, `sun_elongation_degrees` (angular distance from the Sun), and constellation in one call
 - For a solar-system body, also inlines its `astronomy://body/{body}` reference card (type, mean radius, naked-eye visibility) — absent for a star, which has no card
 - `magnitude`, `angular_diameter_arcsec`, `phase_angle_degrees`, and `illuminated_fraction` are `null`, never fabricated, where the engine can't compute them
 - Default elevation 0 m, default time now; pass `timezone` for observer-local output alongside UTC
@@ -74,7 +75,7 @@ Design reference: [`docs/design.md`](./docs/design.md).
 ### `astronomy_get_rise_set` <sub>tool</sub>
 
 - Searches forward from `start` (default now) and returns the next `count` cycles — default 1, max 31
-- For `body: "sun"`, each cycle also carries the three twilight pairs (civil −6°, nautical −12°, astronomical −18°) as dawn/dusk times
+- For `body: "sun"`, each cycle also carries the three twilight pairs (civil −6°, nautical −12°, astronomical −18°), each covering the night after that cycle's set: `dusk` that evening, `dawn` the following morning — so the dawn listed beside a sunrise is the next day's, and the dawn before it is in the previous cycle
 - Circumpolar or never-rises situations return `null` rise/set fields with an explanatory `note`, not an error
 - When the body is already up at `start`, that cycle's `rise` is `null` (it precedes the search) so a `set` is never reported earlier than its paired `rise`
 - Default elevation 0 m; pass `timezone` for observer-local times alongside UTC
@@ -84,7 +85,8 @@ Design reference: [`docs/design.md`](./docs/design.md).
 ### `astronomy_get_moon_phase` <sub>tool</sub>
 
 - Geocentric — no observer location needed
-- Returns illuminated fraction, phase angle, phase name, synodic age in days, and the next four quarter phases (new/first/full/last) in one call
+- Returns illuminated fraction, phase name, synodic age in days, and the next four quarter phases (new/first/full/last) in one call
+- `phase_longitude_degrees` is the Moon–Sun ecliptic-longitude difference (0 new, 90 first quarter, 180 full, 270 last quarter) — not the Sun–body–observer `phase_angle_degrees` of `astronomy_get_sky_position`, which reads 0 at full moon
 - `time` defaults to now; pass `timezone` for observer-local timestamps alongside UTC
 
 ---
@@ -106,7 +108,8 @@ Design reference: [`docs/design.md`](./docs/design.md).
 ### `astronomy_list_visible` <sub>tool</sub>
 
 - One call for every naked-eye solar-system body (plus, with `include_stars`, the bundled bright stars) above the horizon, ranked brightest-and-highest first
-- Each body carries a deterministic `visibility_note` computed from real magnitude and altitude
+- Each body carries a deterministic `visibility_note` computed from real magnitude and altitude, plus its `sun_elongation_degrees`
+- The note states when conditions hide or dim a body — daylight, civil twilight, or within 15° of the Sun (lost in glare); the Sun, the Moon, and a negative-magnitude Venus take no daylight or twilight caveat
 - Returns the whole-sky `sky_condition` (`daylight` / `civil_twilight` / `nautical_twilight` / `astronomical_twilight` / `dark`) and the Sun's altitude alongside the list
 - `time` is a single evaluation instant, not a window; `min_altitude` (default 0) filters out bodies grazing the horizon
 - Default elevation 0 m; pass `timezone` for observer-local times per body
@@ -167,7 +170,7 @@ Astronomy-specific:
 Agent-friendly output:
 
 - Preserves uncertainty — magnitude, angular diameter, phase, and illuminated fraction are `null` (never fabricated or zeroed) where the engine can't compute them, and `format()` renders "unavailable" rather than inventing a value
-- Deterministic visibility notes — `astronomy_list_visible`'s plain-language headline is computed from real magnitude and altitude, never a synthetic confidence score
+- Deterministic visibility notes — `astronomy_list_visible`'s plain-language headline is computed from real magnitude, altitude, sky condition, and distance from the Sun, never a synthetic confidence score
 - Typed error contracts with recovery hints — out-of-range time, missing observer/body, unresolved designation — so callers can correct and retry
 - Rounded-plus-exact dual values — `format()` pairs a rounded display figure with its exact counterpart in brackets (e.g. `RA 4.4116 h [4.411597993526305]`), dropped only when the rounding already round-trips, so a `content[]`-only client never needs a second call to recover full precision
 

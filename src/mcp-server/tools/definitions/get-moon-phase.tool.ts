@@ -1,6 +1,6 @@
 /**
  * @fileoverview astronomy_get_moon_phase — illuminated fraction, phase name, age,
- *   phase angle, and the next four lunar quarters for a given instant.
+ *   phase longitude, and the next four lunar quarters for a given instant.
  * @module mcp-server/tools/definitions/get-moon-phase.tool
  */
 
@@ -25,10 +25,10 @@ export const MoonPhaseOutput = z.object({
     .describe(
       'The same instant in the observer-local timezone with offset, present only when a timezone was supplied.',
     ),
-  phase_angle_degrees: z
+  phase_longitude_degrees: z
     .number()
     .describe(
-      'Moon phase angle in degrees: 0 = new, 90 = first quarter, 180 = full, 270 = last quarter.',
+      "The Moon's ecliptic longitude minus the Sun's, in degrees [0,360): 0 = new, 90 = first quarter, 180 = full, 270 = last quarter. Not the Sun–body–observer phase angle astronomy_get_sky_position reports as phase_angle_degrees, which reads 0 at full moon.",
     ),
   illuminated_fraction: z.number().describe('Fraction of the lunar disc illuminated, 0 to 1.'),
   phase_name: z
@@ -62,7 +62,7 @@ export type MoonPhaseOutputType = z.infer<typeof MoonPhaseOutput>;
 export const getMoonPhaseTool = tool('astronomy_get_moon_phase', {
   title: 'astronomy-mcp-server: get moon phase',
   description:
-    'Report the Moon phase for an instant: illuminated fraction, phase name, synodic age in days since the new moon, phase angle, and the next four quarter phases (new, first quarter, full, last quarter) with timestamps. Answers "what is the moon phase tonight" and "when is the next full moon" in one call without iteration. The time defaults to now; pass an IANA `timezone` to also receive observer-local timestamps. The phase is geocentric — no observer location is needed.',
+    'Report the Moon phase for an instant: illuminated fraction, phase name, synodic age in days since the new moon, phase longitude (the Moon–Sun ecliptic-longitude difference, 180° at full), and the next four quarter phases (new, first quarter, full, last quarter) with timestamps. Answers "what is the moon phase tonight" and "when is the next full moon" in one call without iteration. The time defaults to now; pass an IANA `timezone` to also receive observer-local timestamps. The phase is geocentric — no observer location is needed.',
   annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
     time: z
@@ -120,7 +120,7 @@ export const getMoonPhaseTool = tool('astronomy_get_moon_phase', {
     const out: MoonPhaseOutputType = {
       time_utc: phase.timeUtc,
       ...(phase.timeLocal ? { time_local: phase.timeLocal } : {}),
-      phase_angle_degrees: phase.phaseAngleDegrees,
+      phase_longitude_degrees: phase.phaseLongitudeDegrees,
       illuminated_fraction: phase.illuminatedFraction,
       phase_name: phase.phaseName,
       age_days: phase.ageDays,
@@ -139,7 +139,7 @@ export const getMoonPhaseTool = tool('astronomy_get_moon_phase', {
     lines.push(`**Time (UTC):** ${r.time_utc}`);
     if (r.time_local) lines.push(`**Time (local):** ${r.time_local}`);
     lines.push(`**Illuminated:** ${pct(r.illuminated_fraction, 1)}`);
-    lines.push(`**Phase angle:** ${num(r.phase_angle_degrees, 1, '°')}`);
+    lines.push(`**Phase longitude:** ${num(r.phase_longitude_degrees, 1, '°')}`);
     lines.push(`**Age:** ${num(r.age_days, 1, ' days')} since new moon`);
     lines.push('**Next quarters:**');
     for (const q of r.next_quarters) {

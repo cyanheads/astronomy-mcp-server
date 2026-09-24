@@ -26,6 +26,7 @@ import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-posit
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
 import { num } from '@/mcp-server/tools/format-numbers.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import { STAR_CATALOG } from '@/services/ephemeris/star-catalog.js';
 import { captureThrown } from '../helpers/capture-thrown.js';
 import {
   displayValuesOf,
@@ -83,6 +84,27 @@ describe('astronomy_get_sky_position — error contracts', () => {
     });
     expect(err?.data?.reason).toBe('star_not_found');
     expect(err?.code).toBe(JsonRpcErrorCode.NotFound);
+  });
+
+  it('lists the whole star catalog on star_not_found, on both client surfaces', async () => {
+    // "Toliman" is a real name for Alpha Centauri, but not the catalog's — alternate proper
+    // names stay a miss, and the miss names what the catalog does hold.
+    const result = await runToolContract(getSkyPositionTool, { star: 'Toliman', ...SEATTLE });
+    const names = STAR_CATALOG.map((s) => s.name);
+    const envelope = errorEnvelope(result) as
+      | (ReturnType<typeof errorEnvelope> & { data?: { catalog_stars?: string[] } })
+      | undefined;
+    expect(result.isError).toBe(true);
+    expect(envelope?.data?.reason).toBe('star_not_found');
+    expect(envelope?.data?.catalog_stars).toEqual(names);
+    const text = firstText(result);
+    for (const name of names) {
+      expect(envelope?.message).toContain(name);
+      expect(text).toContain(name);
+    }
+    expect(text).toContain(
+      `Recovery: ${declaredRecovery(getSkyPositionTool.errors, 'star_not_found')}`,
+    );
   });
 
   it('rejects an unknown timezone with a recovery hint', () => {
@@ -170,7 +192,7 @@ describe('astronomy_get_moon_phase', () => {
     const block = getMoonPhaseTool.format!(result)[0];
     const text = block && block.type === 'text' ? block.text : '';
     expect(displayValuesOf(text)).not.toMatch(/\.\d{4,}/);
-    expectExactCarried(text, result.phase_angle_degrees);
+    expectExactCarried(text, result.phase_longitude_degrees);
     expectExactCarried(text, result.age_days);
     // Illumination renders as a percentage, so its exact value is labelled a
     // fraction — the two differ by 100x and must not be confused.

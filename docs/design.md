@@ -17,11 +17,11 @@ idea sketch — not renamed, added, or dropped.
 
 | Tool | Summary | readOnlyHint | openWorldHint | Key inputs | Output shape |
 |---|---|---|---|---|---|
-| `astronomy_get_sky_position` | Apparent position of one body for an observer + time: equatorial (RA/Dec), horizontal (alt/az), ecliptic lon/lat, distance, magnitude, angular diameter, phase angle/fraction, constellation. For a solar-system body it also carries that body card (type, mean radius, naked-eye) inline, so a resource-less client reaches it without a second surface; absent for a catalog star. The atomic "where is X right now." Topocentric by default. | `true` | `false` | `body`, `star?`, `latitude`, `longitude`, `elevation?`, `time?`, `timezone?` | single position record |
-| `astronomy_get_rise_set` | Rise, set, and culmination (transit) times for a body at a location/date, plus max altitude at transit. For the Sun, also the three twilight pairs (civil/nautical/astronomical). Searches forward from `start`; returns the next `count` cycles (default 1). A body already above the horizon at `start` yields a partial first cycle (null `rise`, the imminent `set`) rather than a set paired with the following day's rise. | `true` | `false` | `body`, `latitude`, `longitude`, `elevation?`, `start?`, `count?`, `timezone?` | array of rise/set/transit events |
-| `astronomy_get_moon_phase` | Moon phase for a date: illuminated fraction, phase name, age (days since new), phase angle, and the next four quarter phases (new/first/full/last) with timestamps. | `true` | `false` | `time?`, `timezone?` | phase record + next 4 quarters |
+| `astronomy_get_sky_position` | Apparent position of one body for an observer + time: equatorial (RA/Dec), horizontal (alt/az), ecliptic lon/lat, distance, magnitude, angular diameter, phase angle/fraction, angular distance from the Sun, constellation. For a solar-system body it also carries that body card (type, mean radius, naked-eye) inline, so a resource-less client reaches it without a second surface; absent for a catalog star. The atomic "where is X right now." Topocentric by default. | `true` | `false` | `body`, `star?`, `latitude`, `longitude`, `elevation?`, `time?`, `timezone?` | single position record |
+| `astronomy_get_rise_set` | Rise, set, and culmination (transit) times for a body at a location/date, plus max altitude at transit. For the Sun, also the three twilight pairs (civil/nautical/astronomical), each a dusk and the following dawn. Searches forward from `start`; returns the next `count` cycles (default 1). A body already above the horizon at `start` yields a partial first cycle (null `rise`, the imminent `set`) rather than a set paired with the following day's rise. | `true` | `false` | `body`, `latitude`, `longitude`, `elevation?`, `start?`, `count?`, `timezone?` | array of rise/set/transit events |
+| `astronomy_get_moon_phase` | Moon phase for a date: illuminated fraction, phase name, age (days since new), phase longitude (Moon–Sun ecliptic-longitude difference), and the next four quarter phases (new/first/full/last) with timestamps. | `true` | `false` | `time?`, `timezone?` | phase record + next 4 quarters |
 | `astronomy_find_events` | Search upcoming sky events from a start time, consolidated by an `event` enum. Both eclipse classes take an optional observer: solar eclipses are global without one (peak location for total/annular) and local with one; lunar contact times are geocentric, and an observer adds local visibility + the Moon's altitude at each contact. The rest are geocentric. Returns the next `count` occurrences (default 1), stopping at the end of 2100. `body` is required for `opposition`, `conjunction`, `max_elongation`, and `perigee_apogee`. | `true` | `false` | `event`, `start?`, `count?`, `body?`, `latitude?`, `longitude?`, `elevation?`, `timezone?` | array of event records |
-| `astronomy_list_visible` | Workflow flagship. For a location + instant, iterate every naked-eye body (sun, moon, planets; optional bundled bright stars), compute alt/az, filter to above-horizon, return a ranked "what's up" list with a visibility note. Sun-altitude gate flags daylight/twilight/dark. `time` is a single evaluation instant, not a window — for "tonight" pick a time after astronomical dusk. | `true` | `false` | `latitude`, `longitude`, `elevation?`, `time?`, `timezone?`, `min_altitude?`, `include_stars?` | ranked visible-body list + sky condition |
+| `astronomy_list_visible` | Workflow flagship. For a location + instant, iterate every naked-eye body (sun, moon, planets; optional bundled bright stars), compute alt/az, filter to above-horizon, return a ranked "what's up" list with a visibility note and each body's angular distance from the Sun. Sun-altitude gate flags daylight/twilight/dark, and the note says when daylight, civil twilight, or the Sun's glare hides or dims a body. `time` is a single evaluation instant, not a window — for "tonight" pick a time after astronomical dusk. | `true` | `false` | `latitude`, `longitude`, `elevation?`, `time?`, `timezone?`, `min_altitude?`, `include_stars?` | ranked visible-body list + sky condition |
 | `astronomy_get_ephemeris` | *(extension, gated)* Ephemeris for a small body (asteroid/comet) or spacecraft via JPL Horizons. The designation is passed to Horizons verbatim and must resolve to one record: numbered asteroid as `433;` (trailing semicolon), periodic comet as `DES=1P;CAP` (DES + closest-apparition), spacecraft as a negative SPK-ID — a bare name goes through the Horizons name search, which rejects one matching nothing (`433 Eros`) or several records (`1P/Halley`) but accepts one matching a single object even when it is the wrong one (`Eros` → Kerberos), so the output carries `target_name`, the object Horizons resolved. RA/Dec, distance, magnitude over a time span. Covers what the major-body set can't. `start`/`stop` are ISO 8601 (UTC, or with a `Z`/numeric offset) and reach Horizons as the resolved UTC instant; `step` is a Horizons step string (e.g. `"1d"`, `"1h"`, `"10m"`). | `true` | `true` | `designation`, `latitude?`, `longitude?`, `elevation?`, `start?`, `stop?`, `step?` | time-series of positions |
 | `astronomy_get_satellite_passes` | *(extension, gated)* Visible passes of a satellite (ISS, by NORAD catalog number or catalog name) over an observer in the next `days` (default 7). Fetches the GP element set from CelesTrak as OMM JSON, propagates with SGP4 (offline), returns pass start/peak/end with alt/az; only sunlit-satellite + dark-ground passes are "visible." Exactly one of `norad_id` and `name` is required; a fixed alias table resolves the common names ISS / International Space Station, Hubble / Hubble Space Telescope / HST, and Tiangong / CSS / Chinese Space Station to their catalog numbers, and any other `name` is a case-insensitive substring match, so a broad one is rejected with the matching objects to choose from. A pass rising inside the window is reported through its set even when that falls after the window ends. NORAD IDs and names are found at celestrak.org or heavens-above.com. | `true` | `true` | one of `norad_id` / `name`, plus `latitude`, `longitude`, `elevation?`, `days?`, `start?`, `timezone?` | array of visible passes |
 
@@ -155,7 +155,10 @@ type Body =
 // When `star` is provided, `body` should be omitted (or the handler treats `star` as
 // taking precedence). `star` is a z.string().optional() accepting a common name or
 // Bayer designation (e.g. "Sirius", "Alpha Centauri", "Polaris") — matched
-// case-insensitively against the bundled catalog. Unknown names throw `body_not_found`.
+// case-insensitively against the bundled 32-star catalog. A designation's Greek letter may
+// be a symbol (α) and its constellation an IAU abbreviation (CMa): "α CMa", "Alpha CMa", and
+// "Alpha Canis Majoris" all resolve to Sirius. Unknown names throw `star_not_found`, listing
+// every catalog star.
 // Valid only on `astronomy_get_sky_position`; `astronomy_list_visible` uses
 // `include_stars` (boolean, default false) to include all catalog stars above the horizon.
 ```
@@ -182,6 +185,7 @@ type Body =
   angular_diameter_arcsec: number | null;  // 2*atan(radius_km / (dist_au*AU_KM)), null for point sources
   phase_angle_degrees: number | null;      // Illumination().phase_angle
   illuminated_fraction: number | null;     // Illumination().phase_fraction, 0..1
+  sun_elongation_degrees: number;          // AngleFromSun(body, t), geocentric, 0..180; 0 for the Sun
   constellation: { abbreviation: string; name: string };  // Constellation(ra, dec)
 }
 ```
@@ -195,7 +199,8 @@ type Body =
   transit_utc: string | null;       // SearchHourAngle(hourAngle=0)
   transit_altitude_degrees: number | null;  // max altitude at culmination
   rise_local?: string; set_local?: string; transit_local?: string;  // iff timezone supplied
-  // Sun-only, present when body === 'sun':
+  // Sun-only, present when body === 'sun'. Each pair spans the night after this cycle's set:
+  // dusk that evening, dawn the following morning (a day after this cycle's rise).
   twilight?: {
     civil:        { dawn_utc: string | null; dusk_utc: string | null; dawn_local?: string | null; dusk_local?: string | null };  // SearchAltitude(-6)
     nautical:     { dawn_utc: string | null; dusk_utc: string | null; dawn_local?: string | null; dusk_local?: string | null };  // SearchAltitude(-12)
@@ -211,7 +216,7 @@ type Body =
 ```ts
 {
   time_utc: string;
-  phase_angle_degrees: number;      // MoonPhase(t), 0=new 90=first 180=full 270=last
+  phase_longitude_degrees: number;  // MoonPhase(t): Moon−Sun ecliptic longitude, 0=new 90=first 180=full 270=last
   illuminated_fraction: number;     // Illumination(Moon).phase_fraction, 0..1
   phase_name: string;               // derived: New, Waxing Crescent, First Quarter, … Waning Crescent
   age_days: number;                 // days since previous new moon (synodic age)
@@ -278,6 +283,7 @@ include_stars: boolean // include catalog bright stars in the output, default fa
   …SkyPosition,
   rank: number;               // 1-based, brightest-and-highest first
   visibility_note: string;    // "Venus, mag -4.1, 12° above the WSW horizon — very bright"
+                              // "Mars, mag 1.2, 35° above the W horizon — daylight, not naked-eye visible"
 }
 // envelope adds:
 {
@@ -555,7 +561,7 @@ public surface, so it is repeated per tool rather than extracted:
 | `astronomy_get_sky_position` | `invalid_time` | `InvalidParams` | `time` is not a strict ISO 8601 instant, or names a calendar date that does not exist (`2026-02-30`). Recovery: pass an ISO 8601 UTC instant with a real calendar date. |
 | `astronomy_get_sky_position` | `time_out_of_range` | `InvalidParams` | Requested instant is outside `astronomy-engine`'s high-accuracy span (≈1900–2100). Recovery: use a date between 1900 and 2100. |
 | `astronomy_get_sky_position` | `invalid_timezone` | `InvalidParams` | `timezone` is not an IANA zone this runtime knows. Recovery: pass a zone like `America/Los_Angeles` or `UTC`. |
-| `astronomy_get_sky_position` | `star_not_found` | `NotFound` | `star` supplied but the name is not in the bundled catalog. Recovery: check spelling or use a common name / Bayer designation (e.g. "Sirius", "Polaris"). |
+| `astronomy_get_sky_position` | `star_not_found` | `NotFound` | `star` supplied but the name is not in the bundled catalog. The message and `data.catalog_stars` list every catalog star. Recovery: pick one of those by common name or Bayer designation (e.g. "Sirius", "Alpha CMa", "α Canis Majoris"). |
 | `astronomy_get_sky_position` | `body_required` | `InvalidParams` | Neither `body` nor `star` was supplied. Recovery: name one of the two. |
 | `astronomy_get_rise_set` | `invalid_time` | `InvalidParams` | As above, on `start`. |
 | `astronomy_get_rise_set` | `time_out_of_range` | `InvalidParams` | As above, on the requested start instant. |
@@ -680,6 +686,39 @@ resume cursor, which sits between sunset and dusk, so each cycle carried the pre
 evening's twilight. The cursor now resumes just past the cycle's set, and the twilight is
 anchored to the cycle's own rise.
 
+**A cycle's twilight is the night after its set.** Each pair holds that evening's dusk and
+the following morning's dawn, so the dawn listed beside a sunrise is a day later than it.
+That pairing answers "when is it dark tonight", the question the stargazing workflow asks,
+so it is documented on every twilight field rather than changed. The dawn before a given
+sunrise is the previous cycle's; no separate preceding-dawn field is returned.
+
+**The Moon's phase longitude is not a phase angle.** `astronomy_get_moon_phase` reported
+`MoonPhase()` — the Moon's ecliptic longitude minus the Sun's, 180 at full — under
+`phase_angle_degrees`, the name `astronomy_get_sky_position` and `astronomy_list_visible`
+use for the Sun–body–observer angle from `Illumination()`, 0 at full. The moon-phase field is
+now `phase_longitude_degrees`, with no alias: a deprecated duplicate would have kept one wire
+name meaning two opposite quantities for as long as it lived.
+
+**Star lookups normalize Bayer spellings, not proper-name aliases.** Every catalog
+designation is `<Greek letter name> <constellation genitive>`, so two small tables — Greek
+symbols, and IAU abbreviations for the catalog's constellations — let `α CMa`, `Alpha CMa`, and
+`α Canis Majoris` reach the same index entry. Alternate proper names (`Toliman`) stay a miss,
+because each would be a hand-kept alias with no rule behind it. A miss lists all 32 catalog
+stars in the message and in `data.catalog_stars`, so a caller can tell a misspelling from a
+star that is not bundled; a catalog resource was rejected because only resource-capable
+clients would see it.
+
+**Visibility notes follow the sky, not magnitude alone.** `visibility_note` is the headline an
+agent reads, and it used to call Mercury "bright" at 13:00 local. A body in daylight now reads
+"daylight, not naked-eye visible"; one within 15° of the Sun (`GLARE_ELONGATION_DEG`, from the
+new `sun_elongation_degrees`, `AngleFromSun()`) reads "N° from the Sun, lost in glare"; either
+replaces the brightness adjective. Civil twilight dims without hiding a bright body, so it
+follows the adjective as a caveat. The Sun takes no caveat. The Moon and a negative-magnitude
+Venus are seen in a blue sky, so they skip the daylight and twilight caveats — but not glare:
+at the 2026-01-06 superior conjunction Venus sits about 1° from the Sun, where "very bright"
+would be wrong. Nautical and darker skies keep the original wording; a limiting-magnitude model
+for twilight sky brightness is out of scope.
+
 ## Output Design Notes
 
 - **Capped lists disclose their counts.** `astronomy_get_rise_set` (`count`) and
@@ -709,7 +748,8 @@ anchored to the cycle's own rise.
   brackets rather than replacing it, so readability and recoverability are not traded
   against each other.
 - **`visibility_note` is server-computed prose, not a fabricated metric.** It's a
-  deterministic rendering of real values (magnitude, altitude, compass octant from azimuth) —
+  deterministic rendering of real values (magnitude, altitude, compass octant from azimuth,
+  sky condition, distance from the Sun) —
   no synthetic "confidence score." The brightness adjective maps from actual magnitude
   thresholds.
 

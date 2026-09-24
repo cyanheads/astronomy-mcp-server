@@ -10,6 +10,7 @@ import { getServerConfig } from '@/config/server-config.js';
 import { num, pct, sig } from '@/mcp-server/tools/format-numbers.js';
 import { BODY_META } from '@/services/ephemeris/body-data.js';
 import { getEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import { STAR_CATALOG } from '@/services/ephemeris/star-catalog.js';
 import { BODY_NAMES } from '@/services/ephemeris/types.js';
 
 export const SkyPositionOutput = z.object({
@@ -79,6 +80,11 @@ export const SkyPositionOutput = z.object({
     .number()
     .nullable()
     .describe('Fraction of the disc illuminated, 0 to 1. Null when not applicable.'),
+  sun_elongation_degrees: z
+    .number()
+    .describe(
+      "Angular distance from the Sun in degrees [0,180], seen from Earth's center. A body within about 15° of the Sun is lost in its glare. 0 for the Sun itself.",
+    ),
   constellation: z
     .object({
       abbreviation: z.string().describe('IAU 3-letter constellation abbreviation, e.g. "Ori".'),
@@ -92,7 +98,7 @@ export type SkyPositionOutputType = z.infer<typeof SkyPositionOutput>;
 export const getSkyPositionTool = tool('astronomy_get_sky_position', {
   title: 'astronomy-mcp-server: get sky position',
   description:
-    'Compute the apparent topocentric position of one solar-system body (sun, moon, mercury through neptune, pluto) or a named bright star for an observer location and instant. Returns equatorial (RA/Dec), refraction-corrected horizontal (altitude/azimuth), and ecliptic coordinates, plus distance, apparent magnitude, angular diameter, phase angle, illuminated fraction, and the constellation it falls in. For a solar-system body it also returns that body card — classification, mean radius, naked-eye visibility — the same values served at astronomy://body/{body}, so a client without resource support does not need a second surface to reach them; a catalog star has no card and the field is absent. Positions are parallax- and aberration-corrected for the given observer; default elevation is 0 m and the default time is now. Supply `star` (e.g. "Sirius", "Polaris") instead of `body` to target a catalog star; `body` is ignored when `star` is set. Pass an IANA `timezone` to also receive the observer-local time. This server does not geocode — resolve a place name to latitude/longitude upstream first.',
+    'Compute the apparent topocentric position of one solar-system body (sun, moon, mercury through neptune, pluto) or a named bright star for an observer location and instant. Returns equatorial (RA/Dec), refraction-corrected horizontal (altitude/azimuth), and ecliptic coordinates, plus distance, apparent magnitude, angular diameter, phase angle, illuminated fraction, angular distance from the Sun, and the constellation it falls in. For a solar-system body it also returns that body card — classification, mean radius, naked-eye visibility — the same values served at astronomy://body/{body}, so a client without resource support does not need a second surface to reach them; a catalog star has no card and the field is absent. Positions are parallax- and aberration-corrected for the given observer; default elevation is 0 m and the default time is now. Supply `star` (e.g. "Sirius", "Polaris") instead of `body` to target a catalog star; `body` is ignored when `star` is set. Pass an IANA `timezone` to also receive the observer-local time. This server does not geocode — resolve a place name to latitude/longitude upstream first.',
   annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
     body: z
@@ -103,7 +109,7 @@ export const getSkyPositionTool = tool('astronomy_get_sky_position', {
       .string()
       .optional()
       .describe(
-        'Named bright star to locate (common name or Bayer designation, e.g. "Sirius", "Alpha Centauri"). Takes precedence over `body`.',
+        `Named star to locate, from a bundled catalog of ${STAR_CATALOG.length} stars — about 30 of the brightest naked-eye stars plus Polaris, not an arbitrary star. Accepts a common name or Bayer designation, with the Greek letter spelled out or as a symbol and the constellation as its genitive or IAU abbreviation (e.g. "Sirius", "Alpha Centauri", "α CMa"). A name outside the catalog fails with the full list of catalog stars. Takes precedence over \`body\`.`,
       ),
     latitude: z
       .number()
@@ -162,10 +168,10 @@ export const getSkyPositionTool = tool('astronomy_get_sky_position', {
     {
       reason: 'star_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The `star` name is not present in the bundled bright-star catalog.',
+      when: 'The `star` name is not present in the bundled bright-star catalog. The error lists every catalog star, in the message and as `catalog_stars`.',
       // Verbatim the hint EphemerisService.lookupStar() throws with.
       recovery:
-        'Check the spelling or use a common name / Bayer designation, e.g. "Sirius" or "Polaris".',
+        'Pick a star from the catalog this error lists, by common name or Bayer designation (e.g. "Sirius", "Alpha CMa", "α Canis Majoris"). A star outside the catalog cannot be located.',
       thrownBy: 'service',
     },
     {
@@ -247,6 +253,7 @@ function toOutput(
     angular_diameter_arcsec: pos.angularDiameterArcsec,
     phase_angle_degrees: pos.phaseAngleDegrees,
     illuminated_fraction: pos.illuminatedFraction,
+    sun_elongation_degrees: pos.sunElongationDegrees,
     constellation: pos.constellation,
   };
 }
@@ -276,6 +283,7 @@ export function formatPosition(r: SkyPositionOutputType): string {
   lines.push(
     `**Illuminated fraction:** ${r.illuminated_fraction === null ? 'unavailable' : pct(r.illuminated_fraction, 1)}`,
   );
+  lines.push(`**Sun elongation:** ${num(r.sun_elongation_degrees, 1, '°')}`);
   lines.push(`**Constellation:** ${r.constellation.name} (${r.constellation.abbreviation})`);
   if (r.body_metadata) {
     lines.push(

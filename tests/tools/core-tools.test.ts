@@ -15,6 +15,7 @@ import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-posit
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
 import { BODY_META } from '@/services/ephemeris/body-data.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import { STAR_CATALOG } from '@/services/ephemeris/star-catalog.js';
 import { captureRejected } from '../helpers/capture-thrown.js';
 import { expectExactCarried, expectRoundedDisplay } from '../helpers/content-parity.js';
 
@@ -150,6 +151,40 @@ describe('astronomy_get_sky_position', () => {
     if (result.illuminated_fraction !== null) {
       expect(text).toContain(`[fraction ${result.illuminated_fraction}]`);
     }
+    expect(text).toContain(`**Sun elongation:** ${result.sun_elongation_degrees.toFixed(1)}°`);
+    expectExactCarried(text, result.sun_elongation_degrees);
+  });
+
+  it('reports the angular distance from the Sun', async () => {
+    const ctx = createMockContext({ errors: getSkyPositionTool.errors });
+    const at = async (raw: Record<string, unknown>) =>
+      getSkyPositionTool.handler(
+        getSkyPositionTool.input.parse({ ...SEATTLE, time: '2026-09-23T20:00:00Z', ...raw }),
+        ctx,
+      );
+    expect((await at({ body: 'mercury' })).sun_elongation_degrees).toBeCloseTo(19.9, 1);
+    expect((await at({ body: 'sun' })).sun_elongation_degrees).toBe(0);
+    const star = await at({ star: 'Polaris' });
+    expect(star.sun_elongation_degrees).toBeGreaterThan(0);
+    expect(star).toEqual(expect.schemaMatching(getSkyPositionTool.output));
+  });
+
+  it('resolves an abbreviated Bayer designation to the catalog star', async () => {
+    const ctx = createMockContext({ errors: getSkyPositionTool.errors });
+    for (const star of ['Alpha CMa', 'α CMa', 'α Canis Majoris']) {
+      const result = await getSkyPositionTool.handler(
+        getSkyPositionTool.input.parse({ star, ...SEATTLE }),
+        ctx,
+      );
+      expect(result.body, star).toBe('Sirius');
+    }
+  });
+
+  it('states the star catalog_s size and scope on the `star` input', () => {
+    const description = getSkyPositionTool.input.shape.star.description ?? '';
+    expect(description).toContain(`${STAR_CATALOG.length}`);
+    expect(description).toMatch(/Polaris/);
+    expect(description).toMatch(/not an arbitrary star/i);
   });
 });
 
@@ -160,6 +195,36 @@ describe('astronomy_get_moon_phase', () => {
     const result = await getMoonPhaseTool.handler(input, ctx);
     expect(result).toEqual(expect.schemaMatching(getMoonPhaseTool.output));
     expect(result.next_quarters).toHaveLength(4);
+  });
+
+  /**
+   * `phase_angle_degrees` meant opposite things on two tools: the Sun–body–observer angle
+   * (0 = full) on sky_position / list_visible, and the Moon–Sun longitude difference
+   * (180 = full) here. The moon-phase field is renamed so each name has one meaning.
+   */
+  it('reports phase_longitude_degrees on both surfaces, distinct from sky_position_s phase angle', async () => {
+    const time = '2026-09-26T16:49:32Z';
+    const result = await getMoonPhaseTool.handler(
+      getMoonPhaseTool.input.parse({ time }),
+      createMockContext({ errors: getMoonPhaseTool.errors }),
+    );
+    expect(result.phase_longitude_degrees).toBeCloseTo(180, 3);
+    expect(result.phase_name).toBe('Full Moon');
+    expect(result).not.toHaveProperty('phase_angle_degrees');
+    expect(Object.keys(getMoonPhaseTool.output.shape)).not.toContain('phase_angle_degrees');
+
+    const block = getMoonPhaseTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text).toContain(`**Phase longitude:** ${result.phase_longitude_degrees.toFixed(1)}°`);
+    expectExactCarried(text, result.phase_longitude_degrees);
+    expect(text).not.toMatch(/phase angle/i);
+
+    // The same instant on sky_position: its phase angle is near 0 at full moon.
+    const moon = await getSkyPositionTool.handler(
+      getSkyPositionTool.input.parse({ body: 'moon', latitude: 0, longitude: 0, time }),
+      createMockContext({ errors: getSkyPositionTool.errors }),
+    );
+    expect(moon.phase_angle_degrees!).toBeLessThan(5);
   });
 });
 
@@ -249,6 +314,33 @@ describe('astronomy_list_visible', () => {
     // content[]-only clients receive them.
     expect(result.sky_condition).toBe('daylight');
     expect(result.total_count).toBe(result.bodies.length);
+  });
+
+  it('carries each body_s Sun elongation on both surfaces and daylight-aware notes', async () => {
+    // 13:00 local in Seattle with the Sun at ~42°: Mercury (~20° from the Sun) and Mars
+    // used to read "bright" and "easily visible".
+    const result = await listVisibleTool.handler(
+      listVisibleTool.input.parse({ ...SEATTLE, time: '2026-09-23T20:00:00Z' }),
+      createMockContext({ errors: listVisibleTool.errors }),
+    );
+    expect(result).toEqual(expect.schemaMatching(listVisibleTool.output));
+    expect(result.sky_condition).toBe('daylight');
+    const block = listVisibleTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    for (const b of result.bodies) {
+      expect(b.sun_elongation_degrees, b.body).toBeTypeOf('number');
+      expect(text).toContain(`elong ${b.sun_elongation_degrees.toFixed(1)}°`);
+      expectExactCarried(text, b.sun_elongation_degrees);
+    }
+    for (const body of ['mercury', 'mars']) {
+      const hit = result.bodies.find((b) => b.body === body)!;
+      expect(hit.visibility_note).toContain('daylight, not naked-eye visible');
+      expect(text).toContain(`${hit.rank}. ${body} — ${hit.visibility_note}`);
+    }
+    expect(result.bodies.find((b) => b.body === 'mercury')!.sun_elongation_degrees).toBeCloseTo(
+      19.9,
+      1,
+    );
   });
 });
 

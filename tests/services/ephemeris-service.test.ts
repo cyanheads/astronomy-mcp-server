@@ -10,6 +10,7 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { EphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import { STAR_CATALOG } from '@/services/ephemeris/star-catalog.js';
 import type { EventBodyName, EventName } from '@/services/ephemeris/types.js';
 import { captureThrown } from '../helpers/capture-thrown.js';
 
@@ -31,9 +32,26 @@ describe('moonPhase', () => {
     const result = svc.moonPhase(new Date('2024-04-23T23:49:00Z'));
     expect(result.phaseName).toBe('Full Moon');
     expect(result.illuminatedFraction).toBeGreaterThan(0.99);
-    // Phase angle near 180° at full moon.
-    expect(Math.abs(result.phaseAngleDegrees - 180)).toBeLessThan(3);
+    // The Moon–Sun ecliptic-longitude difference is near 180° at full moon.
+    expect(Math.abs(result.phaseLongitudeDegrees - 180)).toBeLessThan(3);
     expect(result.nextQuarters).toHaveLength(4);
+  });
+
+  it('reports the longitude difference, the inverse of the Sun-Moon-observer phase angle', () => {
+    // The 2026-09-26 full moon. The longitude difference reads 180 at full; the phase angle
+    // position() reports reads near 0 at the same instant. One field name meaning both was
+    // the defect, so the two are pinned side by side.
+    const instant = new Date('2026-09-26T16:49:32Z');
+    const phase = svc.moonPhase(instant);
+    expect(phase.phaseLongitudeDegrees).toBeCloseTo(180, 3);
+    expect(phase.phaseName).toBe('Full Moon');
+    expect(phase).not.toHaveProperty('phaseAngleDegrees');
+    const pos = svc.position(
+      { kind: 'body', body: 'moon' },
+      { latitude: 0, longitude: 0, elevation: 0 },
+      instant,
+    );
+    expect(pos.phaseAngleDegrees).toBeLessThan(5);
   });
 
   it('reports a new moon near 2024-04-08T18:21Z (the eclipse new moon)', () => {
@@ -591,6 +609,25 @@ describe('position', () => {
     expect(pos.constellation.abbreviation).toBe('CMa');
   });
 
+  it('reports each target_s angular distance from the Sun', () => {
+    // Seattle, 13:00 local on 2026-09-23: Mercury sits ~20° from the Sun.
+    const instant = new Date('2026-09-23T20:00:00Z');
+    const at = (body: 'sun' | 'mercury' | 'mars' | 'moon') =>
+      svc.position({ kind: 'body', body }, SEATTLE, instant).sunElongationDegrees;
+    expect(at('sun')).toBe(0);
+    expect(at('mercury')).toBeCloseTo(19.9, 1);
+    expect(at('mars')).toBeCloseTo(63.4, 1);
+    expect(at('moon')).toBeCloseTo(145.3, 1);
+    // A catalog star in a DefineStar slot has a real elongation too.
+    const sirius = svc.position(
+      { kind: 'star', star: svc.resolveStarTarget('Sirius') },
+      SEATTLE,
+      instant,
+    );
+    expect(sirius.sunElongationDegrees).toBeGreaterThan(0);
+    expect(sirius.sunElongationDegrees).toBeLessThanOrEqual(180);
+  });
+
   it('attaches a local time when a timezone is supplied', () => {
     const pos = svc.position(
       { kind: 'body', body: 'mars' },
@@ -696,6 +733,50 @@ describe('riseSet', () => {
       ).toBeGreaterThan(0);
       expect(afterSetMinutes).toBeLessThan(120);
     }
+  });
+
+  /**
+   * Each cycle's twilight covers the night after its set: dusk that evening, dawn the next
+   * morning. The dawn beside a cycle's sunrise is therefore a day later than that sunrise,
+   * and the dawn before the sunrise belongs to the previous cycle's pair. The tool and
+   * README document that pairing; this pins it so the documentation cannot drift from it.
+   */
+  it('pairs each cycle_s dusk with the following morning_s dawn', () => {
+    // 07:00Z is 00:00 local in Seattle, before the 2026-09-23 sunrise.
+    const cycles = svc.riseSet(
+      'sun',
+      SEATTLE,
+      new Date('2026-09-23T07:00:00Z'),
+      3,
+      'America/Los_Angeles',
+    );
+    expect(cycles).toHaveLength(3);
+    for (const [i, cycle] of cycles.entries()) {
+      const rise = Date.parse(cycle.riseUtc as string);
+      const set = Date.parse(cycle.setUtc as string);
+      for (const depth of ['civil', 'nautical', 'astronomical'] as const) {
+        const pair = cycle.twilight![depth];
+        const dusk = Date.parse(pair.duskUtc as string);
+        const dawn = Date.parse(pair.dawnUtc as string);
+        const label = `cycle ${i} ${depth}`;
+        // Dusk falls on the evening of this cycle's set, dawn after it — never before the rise.
+        expect(dusk, label).toBeGreaterThan(set);
+        expect(dawn, label).toBeGreaterThan(dusk);
+        expect(dawn - rise, label).toBeGreaterThan(20 * 3600 * 1000);
+        // The dawn opens the next cycle's day: it precedes that cycle's rise within hours.
+        const next = cycles[i + 1];
+        if (next) {
+          const lead = Date.parse(next.riseUtc as string) - dawn;
+          expect(lead, label).toBeGreaterThan(0);
+          expect(lead, label).toBeLessThan(3 * 3600 * 1000);
+        }
+      }
+    }
+    // The measured repro: rise and set on 23 September local, civil dawn on the 24th.
+    const civil = cycles[0]!.twilight!.civil;
+    expect(cycles[0]!.riseLocal?.slice(0, 10)).toBe('2026-09-23');
+    expect(civil.duskLocal?.slice(0, 10)).toBe('2026-09-23');
+    expect(civil.dawnLocal?.slice(0, 10)).toBe('2026-09-24');
   });
 
   it('reports the Sun as circumpolar at the North Pole in June', () => {
@@ -814,6 +895,204 @@ describe('listVisible', () => {
     expect(names).not.toContain('pluto');
     expect(names).not.toContain('uranus');
     expect(names).toContain('saturn');
+  });
+});
+
+/**
+ * `visibility_note` is the at-a-glance headline, so it has to reflect the conditions. It
+ * used to rank Mercury "bright" and Mars "easily visible" at 13:00 local with the Sun at
+ * 42° and Mercury 20° from it — neither is a naked-eye object then.
+ */
+describe('listVisible — daylight- and glare-aware visibility notes', () => {
+  /** The note for one body at one Seattle instant, with the sky condition that produced it. */
+  const noteAt = (iso: string, body: string) => {
+    const result = svc.listVisible(SEATTLE, new Date(iso), {
+      minAltitude: 0,
+      includeStars: true,
+    });
+    const hit = result.bodies.find((b) => b.body === body);
+    expect(hit, `${body} above the horizon at ${iso}`).toBeDefined();
+    return { note: hit!.visibilityNote, sky: result.skyCondition, pos: hit! };
+  };
+
+  /** The wording a body well clear of the Sun in a dark or twilight sky has always had. */
+  const PLAIN_NOTE =
+    /^[A-Z][\w ]*, mag -?\d+\.\d, \d+° (above|below) the [NESW]{1,2} horizon — (very bright|bright|easily visible|faint|very faint)$/;
+
+  const DAYLIGHT = '2026-09-23T20:00:00Z';
+
+  it('stops calling Mercury and Mars visible in daylight (the Seattle regression)', () => {
+    for (const body of ['mercury', 'mars']) {
+      const { note, sky } = noteAt(DAYLIGHT, body);
+      expect(sky).toBe('daylight');
+      expect(note).toContain('daylight, not naked-eye visible');
+      expect(note).not.toMatch(/bright|easily visible|faint/);
+    }
+    // Mercury's ~20° elongation clears the glare threshold, so daylight is the reason given.
+    expect(noteAt(DAYLIGHT, 'mercury').note).not.toContain('glare');
+  });
+
+  it('flags a daylight star as not naked-eye visible too', () => {
+    expect(noteAt(DAYLIGHT, 'Arcturus').note).toContain('daylight, not naked-eye visible');
+  });
+
+  it('keeps the Sun and a negative-magnitude Venus bright in daylight', () => {
+    const sun = noteAt(DAYLIGHT, 'sun');
+    expect(sun.note).toMatch(/— very bright$/);
+    const venus = noteAt(DAYLIGHT, 'venus');
+    expect(venus.pos.magnitude!).toBeLessThan(0);
+    expect(venus.note).toMatch(/— very bright$/);
+    expect(venus.note).not.toContain('daylight');
+  });
+
+  it('keeps a daytime Moon well clear of the Sun bright', () => {
+    const moon = noteAt('2026-01-01T00:00:00Z', 'moon');
+    expect(moon.sky).toBe('daylight');
+    expect(moon.pos.sunElongationDegrees).toBeGreaterThan(90);
+    expect(moon.note).toMatch(/— very bright$/);
+  });
+
+  it('marks a body under 15° from the Sun as lost in glare', () => {
+    // Mercury ~11.6° from the Sun, low in the morning civil twilight.
+    const { note, sky, pos } = noteAt('2026-01-01T15:45:00Z', 'mercury');
+    expect(sky).toBe('civil_twilight');
+    expect(pos.sunElongationDegrees).toBeLessThan(15);
+    expect(note).toContain(`${pos.sunElongationDegrees.toFixed(0)}° from the Sun, lost in glare`);
+    expect(note).not.toMatch(/— (very bright|bright|easily visible|faint|very faint)/);
+  });
+
+  it('marks Venus lost in glare at superior conjunction, whatever its magnitude', () => {
+    // 2026-01-01 Venus sits ~1.3° from the Sun. Its daylight exemption answers "can a
+    // bright Venus be seen in a blue sky", not "can it be seen beside the Sun's disc".
+    const { note, pos } = noteAt('2026-01-01T17:00:00Z', 'venus');
+    expect(pos.magnitude!).toBeLessThan(0);
+    expect(pos.sunElongationDegrees).toBeLessThan(2);
+    expect(note).toContain('from the Sun, lost in glare');
+    expect(note).not.toContain('very bright');
+  });
+
+  it('notes a civil-twilight sky while keeping the brightness', () => {
+    const { note, sky, pos } = noteAt('2026-01-01T00:45:00Z', 'saturn');
+    expect(sky).toBe('civil_twilight');
+    expect(pos.sunElongationDegrees).toBeGreaterThan(15);
+    expect(note).toMatch(/— easily visible; civil twilight, sky still bright$/);
+  });
+
+  it('keeps today_s wording in a dark sky and in deeper twilight', () => {
+    for (const iso of ['2024-01-15T11:00:00Z', '2026-01-01T02:00:00Z']) {
+      const result = svc.listVisible(SEATTLE, new Date(iso), {
+        minAltitude: 0,
+        includeStars: true,
+      });
+      expect(['nautical_twilight', 'astronomical_twilight', 'dark']).toContain(result.skyCondition);
+      expect(result.bodies.length).toBeGreaterThan(5);
+      for (const b of result.bodies) {
+        expect(b.visibilityNote, `${iso} ${b.body}`).toMatch(PLAIN_NOTE);
+      }
+    }
+  });
+});
+
+/**
+ * Every catalog entry by its common name and by three spellings of its Bayer designation:
+ * the Greek letter spelled out or as a symbol, the constellation as genitive or IAU
+ * abbreviation. Written out rather than derived from the catalog, so the expectation is
+ * independent of the normalization table it checks.
+ */
+const CATALOG_BAYER: ReadonlyArray<readonly [string, string, string]> = [
+  ['Sirius', 'α', 'CMa'],
+  ['Canopus', 'α', 'Car'],
+  ['Rigil Kentaurus', 'α', 'Cen'],
+  ['Arcturus', 'α', 'Boo'],
+  ['Vega', 'α', 'Lyr'],
+  ['Capella', 'α', 'Aur'],
+  ['Rigel', 'β', 'Ori'],
+  ['Procyon', 'α', 'CMi'],
+  ['Achernar', 'α', 'Eri'],
+  ['Betelgeuse', 'α', 'Ori'],
+  ['Hadar', 'β', 'Cen'],
+  ['Altair', 'α', 'Aql'],
+  ['Acrux', 'α', 'Cru'],
+  ['Aldebaran', 'α', 'Tau'],
+  ['Antares', 'α', 'Sco'],
+  ['Spica', 'α', 'Vir'],
+  ['Pollux', 'β', 'Gem'],
+  ['Fomalhaut', 'α', 'PsA'],
+  ['Deneb', 'α', 'Cyg'],
+  ['Mimosa', 'β', 'Cru'],
+  ['Regulus', 'α', 'Leo'],
+  ['Adhara', 'ε', 'CMa'],
+  ['Castor', 'α', 'Gem'],
+  ['Shaula', 'λ', 'Sco'],
+  ['Bellatrix', 'γ', 'Ori'],
+  ['Elnath', 'β', 'Tau'],
+  ['Alnilam', 'ε', 'Ori'],
+  ['Alnitak', 'ζ', 'Ori'],
+  ['Alioth', 'ε', 'UMa'],
+  ['Dubhe', 'α', 'UMa'],
+  ['Mirfak', 'α', 'Per'],
+  ['Polaris', 'α', 'UMi'],
+];
+
+const GREEK_NAME: Record<string, string> = {
+  α: 'Alpha',
+  β: 'Beta',
+  γ: 'Gamma',
+  ε: 'Epsilon',
+  ζ: 'Zeta',
+  λ: 'Lambda',
+};
+
+describe('lookupStar', () => {
+  it('lists every catalog entry in the Bayer table', () => {
+    expect(CATALOG_BAYER.map(([name]) => name).sort()).toEqual(
+      STAR_CATALOG.map((s) => s.name).sort(),
+    );
+  });
+
+  it.each(CATALOG_BAYER)('resolves %s by every Bayer spelling', (name, symbol, abbr) => {
+    const star = STAR_CATALOG.find((s) => s.name === name)!;
+    const genitive = star.designation.split(' ').slice(1).join(' ');
+    const letter = GREEK_NAME[symbol]!;
+    for (const form of [
+      name,
+      star.designation,
+      `${letter} ${abbr}`,
+      `${symbol} ${abbr}`,
+      `${symbol} ${genitive}`,
+      `${letter.toUpperCase()} ${abbr.toLowerCase()}`,
+      `  ${symbol}   ${abbr}  `,
+    ]) {
+      expect(svc.lookupStar(form).name, form).toBe(name);
+    }
+  });
+
+  it('tells CMa from CMi and UMa from UMi', () => {
+    expect(svc.lookupStar('Alpha CMa').name).toBe('Sirius');
+    expect(svc.lookupStar('Alpha CMi').name).toBe('Procyon');
+    expect(svc.lookupStar('α UMa').name).toBe('Dubhe');
+    expect(svc.lookupStar('α UMi').name).toBe('Polaris');
+  });
+
+  it.each(['Toliman', 'Alpha And', 'Delta CMa', 'CMa', 'Alpha', 'α', 'Sirius CMa'])(
+    'keeps "%s" a miss',
+    (name) => {
+      const err = captureThrown(() => {
+        svc.lookupStar(name);
+      });
+      expect(err?.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(err?.data?.reason).toBe('star_not_found');
+    },
+  );
+
+  it('lists every catalog star on a miss, in the message and in data', () => {
+    const err = captureThrown(() => {
+      svc.lookupStar('Toliman');
+    }) as (ReturnType<typeof captureThrown> & { data?: { catalog_stars?: string[] } }) | undefined;
+    const names = STAR_CATALOG.map((s) => s.name);
+    expect(err?.data?.catalog_stars).toEqual(names);
+    for (const name of names) expect(err?.message).toContain(name);
+    expect(err?.message).toContain(`${names.length}`);
   });
 });
 

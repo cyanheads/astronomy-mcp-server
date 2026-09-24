@@ -91,6 +91,8 @@ export interface SkyPosition {
   illuminatedFraction: number | null;
   magnitude: number | null;
   phaseAngleDegrees: number | null;
+  /** Angular distance from the Sun in degrees [0,180], seen from Earth's center. */
+  sunElongationDegrees: number;
   timeLocal?: string;
   timeUtc: string;
 }
@@ -154,7 +156,11 @@ export interface MoonPhaseResult {
   ageDays: number;
   illuminatedFraction: number;
   nextQuarters: QuarterEvent[];
-  phaseAngleDegrees: number;
+  /**
+   * Moon–Sun ecliptic-longitude difference in degrees [0,360): 0 new, 90 first quarter,
+   * 180 full, 270 last quarter. Not the Sun–body–observer `SkyPosition.phaseAngleDegrees`.
+   */
+  phaseLongitudeDegrees: number;
   phaseName: string;
   timeLocal?: string;
   timeUtc: string;

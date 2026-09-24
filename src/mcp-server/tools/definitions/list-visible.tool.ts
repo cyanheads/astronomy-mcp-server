@@ -26,7 +26,7 @@ const VisibleBodySchema = SkyPositionOutput.omit({ body_metadata: true })
     visibility_note: z
       .string()
       .describe(
-        'Server-computed one-line headline from real values, e.g. "Venus, mag -4.1, 12° above the WSW horizon — very bright".',
+        'Server-computed one-line headline from real values, e.g. "Venus, mag -4.1, 12° above the WSW horizon — very bright". It states when the conditions hide a body: "daylight, not naked-eye visible" when the Sun is up, "N° from the Sun, lost in glare" within 15° of the Sun, and "civil twilight, sky still bright" in civil twilight. The Moon and a negative-magnitude Venus take no daylight or twilight caveat, being visible in a blue sky; the Sun takes none.',
       ),
   })
   .describe(
@@ -55,7 +55,7 @@ export type ListVisibleOutputType = z.infer<typeof ListVisibleOutput>;
 export const listVisibleTool = tool('astronomy_list_visible', {
   title: 'astronomy-mcp-server: list visible bodies',
   description:
-    'The one-call "what is up right now" answer. For an observer location and instant, iterate every naked-eye solar-system body (and, with include_stars, the bundled bright stars), compute altitude and azimuth, keep those above the horizon, rank them brightest-and-highest first, and attach a plain-language visibility note to each. The whole sky is gated by the Sun\'s altitude into daylight / civil / nautical / astronomical twilight / dark, returned alongside the list. `time` is a single evaluation instant, not a window — for "tonight" pass a time after astronomical dusk (use astronomy_get_rise_set on the sun to find it). Default elevation 0 m; use min_altitude to skip objects grazing the horizon. This server does not geocode — resolve coordinates upstream first; pass an IANA timezone for observer-local times on each body.',
+    'The one-call "what is up right now" answer. For an observer location and instant, iterate every naked-eye solar-system body (and, with include_stars, the bundled bright stars), compute altitude and azimuth, keep those above the horizon, rank them brightest-and-highest first, and attach a plain-language visibility note to each, along with its angular distance from the Sun. The whole sky is gated by the Sun\'s altitude into daylight / civil / nautical / astronomical twilight / dark, returned alongside the list, and each note says when daylight, civil twilight, or the Sun\'s glare hides or dims that body. `time` is a single evaluation instant, not a window — for "tonight" pass a time after astronomical dusk (use astronomy_get_rise_set on the sun to find it). Default elevation 0 m; use min_altitude to skip objects grazing the horizon. This server does not geocode — resolve coordinates upstream first; pass an IANA timezone for observer-local times on each body.',
   annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
     latitude: z
@@ -173,6 +173,7 @@ export const listVisibleTool = tool('astronomy_list_visible', {
         angular_diameter_arcsec: b.angularDiameterArcsec,
         phase_angle_degrees: b.phaseAngleDegrees,
         illuminated_fraction: b.illuminatedFraction,
+        sun_elongation_degrees: b.sunElongationDegrees,
         constellation: b.constellation,
         rank: b.rank,
         visibility_note: b.visibilityNote,
@@ -214,6 +215,7 @@ export const listVisibleTool = tool('astronomy_list_visible', {
           `⌀ ${orNa(b.angular_diameter_arcsec, 1, '″')}`,
           `phase ${orNa(b.phase_angle_degrees, 1, '°')}`,
           `illum ${b.illuminated_fraction === null ? 'n/a' : pct(b.illuminated_fraction, 0)}`,
+          `elong ${num(b.sun_elongation_degrees, 1, '°')}`,
           `ecl lon ${num(b.ecliptic.longitude_degrees, 1, '°')} lat ${num(b.ecliptic.latitude_degrees, 1, '°')}`,
           `${b.constellation.name} (${b.constellation.abbreviation})`,
           `${b.time_utc}${b.time_local ? ` (local ${b.time_local})` : ''}`,
