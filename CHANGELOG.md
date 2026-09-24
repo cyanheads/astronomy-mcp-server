@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-09-23
+
+astronomy_get_ephemeris: offset-bearing dates reach Horizons as UTC instants, an out-of-span reply is time_out_of_range with Horizons' bound, and the resolved target_name is echoed; astronomy_get_satellite_passes: a pass rising in the window is followed to its set, and well-known names (ISS, Hubble, Tiangong) resolve via a fixed alias table.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-23 · ⚠️ Breaking
 
 astronomy_find_events: solar_eclipse now searches globally without an observer, reporting the peak location of total/annular eclipses; both eclipse classes gain any-contact local_visible and per-contact altitudes; incomplete_observer replaces observer_required; searches stop at 2100.
