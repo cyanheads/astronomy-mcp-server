@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-09-23 · ⚠️ Breaking
+
+BREAKING: astronomy_get_moon_phase's phase_angle_degrees is renamed phase_longitude_degrees; astronomy_get_sky_position and astronomy_list_visible gain sun_elongation_degrees with daylight/twilight/glare-aware visibility notes, and star_not_found now lists the catalog with Bayer designations resolving Greek symbols and IAU abbreviations.
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-09-23
 
 astronomy_get_ephemeris: offset-bearing dates reach Horizons as UTC instants, an out-of-span reply is time_out_of_range with Horizons' bound, and the resolved target_name is echoed; astronomy_get_satellite_passes: a pass rising in the window is followed to its set, and well-known names (ISS, Hubble, Tiangong) resolve via a fixed alias table.
