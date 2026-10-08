@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-10-08
+
+mcp-ts-core 0.13.14: tool error results carry their request ID, integers and numeric strings are repaired before argument validation, the Docker image installs dependencies in a build-platform deps stage, and the registry entries launch through npx.
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-09-23 · ⚠️ Breaking
 
 BREAKING: astronomy_get_moon_phase's phase_angle_degrees is renamed phase_longitude_degrees; astronomy_get_sky_position and astronomy_list_visible gain sun_elongation_degrees with daylight/twilight/glare-aware visibility notes, and star_not_found now lists the catalog with Bayer designations resolving Greek symbols and IAU abbreviations.
