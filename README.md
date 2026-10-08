@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,33 +29,33 @@
 
 ## Overview
 
-Observational astronomy computed in-process from [`astronomy-engine`](https://github.com/cosinekitty/astronomy) — sky positions, rise/set and twilight times, moon phases, and eclipse/conjunction/opposition events for any place and time, plus two optional network-backed extensions for small-body ephemerides and satellite passes. List what's visible right now, plan a dark-sky window, or search forward for the next sky event — deterministic and keyless for the five core tools, given the same body, time, and observer. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Observational astronomy computed in-process by [`astronomy-engine`](https://github.com/cosinekitty/astronomy) and a bundled bright-star catalog. Get sky positions, rise/set and twilight times, moon phases, and the next eclipse, equinox, opposition, or conjunction for any place and time, or ask what is visible right now. Two opt-in, network-backed tools add JPL Horizons small-body ephemerides and CelesTrak satellite passes. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
 | Tool | Description |
 |:---|:---|
-| `astronomy_get_sky_position` | Apparent position of one body or named star for an observer and instant — equatorial (RA/Dec), horizontal (alt/az), ecliptic, plus distance, magnitude, angular diameter, phase, angular distance from the Sun, and constellation. |
-| `astronomy_get_rise_set` | Rise, set, and culmination times for a body at a location, with maximum altitude at transit. For the Sun, also the three twilight pairs (civil/nautical/astronomical). |
-| `astronomy_get_moon_phase` | Moon phase for an instant: illuminated fraction, phase name, synodic age, phase longitude, and the next four quarter phases with timestamps. |
-| `astronomy_find_events` | Forward search for the next occurrences of one sky-event class: eclipses, equinoxes, solstices, moon quarters, oppositions, conjunctions, greatest elongations, and apsides. |
-| `astronomy_list_visible` | The one-call "what's up right now" answer: every naked-eye body (and optional bright stars) above the horizon, ranked, annotated, and gated by the Sun's altitude into daylight/twilight/dark. |
-| `astronomy_get_ephemeris` | *(gated extension)* Time-series ephemeris for a small body (asteroid/comet) or spacecraft via JPL Horizons — covers what the in-process major-body set cannot. Off by default. |
-| `astronomy_get_satellite_passes` | *(gated extension)* Visible passes of a satellite (by NORAD catalog number, or by a name resolved against the catalog) over an observer, from a CelesTrak GP element set propagated with SGP4 in-process. Off by default. |
+| `astronomy_get_sky_position` | Apparent position of one body or named star: RA/Dec, alt/az, ecliptic, magnitude, phase, Sun elongation, constellation |
+| `astronomy_get_rise_set` | Rise, set, and transit times for a body, plus civil, nautical, and astronomical twilight for the Sun |
+| `astronomy_get_moon_phase` | Illuminated fraction, phase name, synodic age, and the next four quarter phases |
+| `astronomy_find_events` | Next eclipses, equinoxes, solstices, moon quarters, oppositions, conjunctions, greatest elongations, or apsides |
+| `astronomy_list_visible` | What's up now: naked-eye bodies (and optional bright stars) above the horizon, ranked, with a sky-condition gate |
+| `astronomy_get_ephemeris` | Small-body or spacecraft ephemeris from JPL Horizons (opt-in) |
+| `astronomy_get_satellite_passes` | Visible satellite passes from a CelesTrak element set propagated with SGP4 (opt-in) |
 
 ### Resources
 
 | Resource | Description |
 |:---|:---|
-| `astronomy://body/{body}` | Static reference card for a solar-system body — canonical name, type, mean radius (km), and naked-eye visibility. `{body}` is one of `sun`, `moon`, `mercury` … `pluto`. |
+| `astronomy://body/{body}` | Reference card for a solar-system body: name, type, mean radius, naked-eye visibility |
 
-Also reachable via tools — `astronomy_get_sky_position` returns the same body metadata inline — so tool-only clients lose nothing.
+Tool-only clients get the same type, radius, and naked-eye fields inline from `astronomy_get_sky_position`.
 
 ### Prompts
 
 | Prompt | Description |
 |:---|:---|
-| `astronomy_stargazing_plan` | Structures a "plan tonight's stargazing from \<place\>" workflow, chaining the tools in order and naming the cross-server geocoding and weather steps. |
+| `astronomy_stargazing_plan` | Plan a night of stargazing from a place, chaining the astronomy tools with geocoding and weather steps |
 
 Design reference: [`docs/design.md`](./docs/design.md).
 
@@ -63,96 +63,69 @@ Design reference: [`docs/design.md`](./docs/design.md).
 
 ### `astronomy_get_sky_position` <sub>tool</sub>
 
-- Target one solar-system body (`body`) or a named bright star (`star`, takes precedence over `body`) — one of the two is required
-- `star` draws on a bundled 32-star catalog (about 30 of the brightest stars plus Polaris) by common name or Bayer designation, with the Greek letter spelled out or as a symbol and the constellation as genitive or IAU abbreviation — `Alpha Canis Majoris`, `Alpha CMa`, and `α CMa` all resolve to Sirius; a miss lists every catalog star
-- Returns equatorial (RA/Dec), refraction-corrected horizontal (alt/az), and ecliptic coordinates plus distance, magnitude, angular diameter, phase angle, illuminated fraction, `sun_elongation_degrees` (angular distance from the Sun), and constellation in one call
-- For a solar-system body, also inlines its `astronomy://body/{body}` reference card (type, mean radius, naked-eye visibility) — absent for a star, which has no card
-- `magnitude`, `angular_diameter_arcsec`, `phase_angle_degrees`, and `illuminated_fraction` are `null`, never fabricated, where the engine can't compute them
-- Default elevation 0 m, default time now; pass `timezone` for observer-local output alongside UTC
+- `body` (`sun`, `moon`, `mercury` … `pluto`) or `star` is required, with `star` winning when both are set; `star` resolves against a bundled 32-star catalog by common name or Bayer designation (`Sirius`, `α CMa`), and a miss fails as `star_not_found` listing the catalog
+- Returns `equatorial`, refraction-corrected `horizontal`, and `ecliptic` coordinates plus `magnitude`, `angular_diameter_arcsec`, `phase_angle_degrees`, `illuminated_fraction`, `sun_elongation_degrees`, and `constellation`
+- Solar-system bodies also carry `body_metadata`, the resource card's `type`, `mean_radius_km`, and `naked_eye`; a star has none
 
 ---
 
 ### `astronomy_get_rise_set` <sub>tool</sub>
 
-- Searches forward from `start` (default now) and returns the next `count` cycles — default 1, max 31
-- For `body: "sun"`, each cycle also carries the three twilight pairs (civil −6°, nautical −12°, astronomical −18°), each covering the night after that cycle's set: `dusk` that evening, `dawn` the following morning — so the dawn listed beside a sunrise is the next day's, and the dawn before it is in the previous cycle
-- Circumpolar or never-rises situations return `null` rise/set fields with an explanatory `note`, not an error
-- When the body is already up at `start`, that cycle's `rise` is `null` (it precedes the search) so a `set` is never reported earlier than its paired `rise`
-- Default elevation 0 m; pass `timezone` for observer-local times alongside UTC
+- One `body` searched forward from `start` (default now) for the next `count` cycles, default 1, max 31
+- Each cycle carries `rise_utc`, `set_utc`, `transit_utc`, and `transit_altitude_degrees`; a circumpolar or never-rising body gets `null` rise/set and a `note` instead of an error, and one already up at `start` gets a `null` `rise_utc`
+- For `body: "sun"`, a `twilight` block holds `civil`, `nautical`, and `astronomical` pairs covering the night after that cycle's set, so each `dawn_utc` falls the day after the cycle's rise
 
 ---
 
 ### `astronomy_get_moon_phase` <sub>tool</sub>
 
-- Geocentric — no observer location needed
-- Returns illuminated fraction, phase name, synodic age in days, and the next four quarter phases (new/first/full/last) in one call
-- `phase_longitude_degrees` is the Moon–Sun ecliptic-longitude difference (0 new, 90 first quarter, 180 full, 270 last quarter) — not the Sun–body–observer `phase_angle_degrees` of `astronomy_get_sky_position`, which reads 0 at full moon
-- `time` defaults to now; pass `timezone` for observer-local timestamps alongside UTC
+- Geocentric: takes only `time` (default now) and an optional `timezone`
+- Returns `illuminated_fraction`, `phase_name`, `age_days`, `next_quarters`, and `phase_longitude_degrees` (0 new, 180 full), which is not the `phase_angle_degrees` of `astronomy_get_sky_position`
 
 ---
 
 ### `astronomy_find_events` <sub>tool</sub>
 
-- One `event` enum covers nine classes: `solar_eclipse`, `lunar_eclipse`, `equinox`, `solstice`, `moon_quarter`, `opposition`, `conjunction`, `max_elongation`, `perigee_apogee`
-- Both eclipse classes take an optional observer (`latitude` and `longitude` together — one alone is rejected):
-  - `solar_eclipse` without one returns global eclipses, with the peak's `peak_latitude_degrees`/`peak_longitude_degrees` for total and annular eclipses; with one it returns only eclipses visible from that point, with local contact times
-  - `lunar_eclipse` contact times are geocentric either way; an observer adds local circumstances
-  - Local circumstances are `local_visible` (the eclipsed body above the horizon at any contact) and `contact_altitudes_degrees` (its altitude at each contact), so a sunrise or sunset eclipse reads differently from a midday one
-- Every other class is geocentric and ignores a location
-- Body-relative events require `body`, gated to which bodies each applies to: `opposition` to mars through pluto, `conjunction` to any planet, `max_elongation` to mercury or venus, `perigee_apogee` to the moon, earth, or a planet
-- Returns the next `count` occurrences, default 1, max 20; searches stop at the end of 2100, and a notice says so when that returns fewer than `count`
-- `perigee_apogee` on earth returns perihelion/aphelion; `conjunction` on mercury or venus returns both the inferior and superior pass, labelled by `conjunction_kind`
+- One `event` (`solar_eclipse`, `lunar_eclipse`, `equinox`, `solstice`, `moon_quarter`, `opposition`, `conjunction`, `max_elongation`, `perigee_apogee`) and the next `count` occurrences, default 1, max 20; searches stop at the end of 2100, with a notice when that returns fewer
+- Body-relative events require `body` (`body_required`), and a body the event doesn't apply to fails as `body_not_supported`: `opposition` takes mars through pluto, `conjunction` any planet, `max_elongation` mercury or venus, and `perigee_apogee` the moon, `earth`, or a planet; `apsis_kind` and `conjunction_kind` label which kind came back
+- Eclipses take an optional observer (`latitude` and `longitude` together, else `incomplete_observer`) that adds `local_visible` and `contact_altitudes_degrees` and limits `solar_eclipse` to locally visible events; a global solar search reports `peak_latitude_degrees`/`peak_longitude_degrees` for total and annular eclipses
 
 ---
 
 ### `astronomy_list_visible` <sub>tool</sub>
 
-- One call for every naked-eye solar-system body (plus, with `include_stars`, the bundled bright stars) above the horizon, ranked brightest-and-highest first
-- Each body carries a deterministic `visibility_note` computed from real magnitude and altitude, plus its `sun_elongation_degrees`
-- The note states when conditions hide or dim a body — daylight, civil twilight, or within 15° of the Sun (lost in glare); the Sun, the Moon, and a negative-magnitude Venus take no daylight or twilight caveat
-- Returns the whole-sky `sky_condition` (`daylight` / `civil_twilight` / `nautical_twilight` / `astronomical_twilight` / `dark`) and the Sun's altitude alongside the list
-- `time` is a single evaluation instant, not a window; `min_altitude` (default 0) filters out bodies grazing the horizon
-- Default elevation 0 m; pass `timezone` for observer-local times per body
+- Observer coordinates and one evaluation instant, `time` (default now, not a window); `min_altitude` (default 0) and `include_stars` (default false) shape the list
+- Returns `sky_condition` (`daylight`, `civil_twilight`, `nautical_twilight`, `astronomical_twilight`, `dark`), `sun_altitude_degrees`, and `bodies` ranked brightest-and-highest first, each with a `visibility_note` that says when daylight, civil twilight, or Sun glare within 15° hides or dims it
 
 ---
 
 ### `astronomy_get_ephemeris` <sub>tool</sub>
 
-- Registered only when `ASTRONOMY_ENABLE_HORIZONS` is set; off by default
-- Time-series ephemeris for a small body or spacecraft via JPL Horizons — RA/Dec, distance, magnitude, and optional alt/az when observer `latitude`/`longitude` are both supplied (one alone is rejected)
-- `designation` should resolve to a single Horizons record: numbered asteroid as `"433;"`, periodic comet as `"DES=1P;CAP"`, spacecraft as a negative SPK-ID — a bare name matching nothing or several records is rejected, and one matching a single object can land on the wrong one (`"Eros"` resolves to Kerberos), so the result carries `target_name`, the object Horizons resolved
-- `start`/`stop` accept a `Z` or numeric UTC offset (a value with neither is read as UTC); Horizons receives the resolved UTC instant
-- No 1900–2100 limit applies, but a span outside the target's own Horizons data is rejected as `time_out_of_range`, and the message gives the bound Horizons reports (e.g. Mars ends after A.D. 2599-DEC-31); an unknown designation is `body_not_found`
-- `step` is a count plus unit (`m`/`h`/`d`/`mo`/`y`, e.g. `"1h"`); `stop` must be after `start` (defaults to a 24h span from now)
-- Truncates inline at 200 rows; the truncation notice names the exact `start` to resume from, one step past the last row returned
+- `designation` is passed to Horizons verbatim (`"433;"` for a numbered asteroid, `"DES=1P;CAP"` for a periodic comet, a negative SPK-ID for a spacecraft); `start` defaults to now, `stop` to 24 h later, and `step` to `"1h"` (a count plus `m`, `h`, `d`, `mo`, or `y`); `latitude` and `longitude` together add alt/az
+- Up to 200 rows inline, and when `truncated` is true the notice names the `start` to resume from; `target_name` is the object Horizons resolved, since a bare name can land on the wrong one; misses fail as `body_not_found`, and spans outside the target's Horizons data as `time_out_of_range`
+- Registered only when `ASTRONOMY_ENABLE_HORIZONS=true`
 
 ---
 
 ### `astronomy_get_satellite_passes` <sub>tool</sub>
 
-- Registered only when `ASTRONOMY_ENABLE_SATELLITES` is set; off by default
-- Identify the satellite by exactly one of `norad_id` or `name` — both or neither is rejected
-- `name` resolves the common names ISS / International Space Station (25544), Hubble / Hubble Space Telescope / HST (20580), and Tiangong / CSS / Chinese Space Station (48274) directly; any other name is a case-insensitive substring match against CelesTrak's catalog
-- Fetches the current GP element set from CelesTrak and propagates it with SGP4 in-process; only naked-eye-plausible passes (sunlit at peak, observer sky dark) are returned
-- A pass must rise inside the window: one already up at `start` is omitted, one still up when the window ends is reported through its set
-- `start` must be within about a month of the element set's epoch — older elements no longer describe the orbit, and an element set that won't propagate inside that window is rejected as a reentry
-- Searches the next `days` ahead, default 7, max 10; pass `timezone` for observer-local pass times
+- Exactly one of `norad_id` or `name` (ISS, Hubble/HST, and Tiangong/CSS resolve directly; other names are substring-matched against CelesTrak, and an ambiguous one fails as `ambiguous_satellite_name` listing candidates); `start` must be within about a month of today, and `days` defaults to 7, max 10
+- Returns `norad_id`, `satellite_name`, and naked-eye-plausible `passes` (sunlit at peak, observer sky dark), each with rise/peak/set times and azimuths, `peak_altitude_degrees`, and `duration_seconds`
+- Registered only when `ASTRONOMY_ENABLE_SATELLITES=true`
 
 ---
 
 ### `astronomy://body/{body}` <sub>resource</sub>
 
-- Static reference card as `application/json`: canonical name, type (`star`/`planet`/`moon`/`dwarf`), mean radius in km, naked-eye visibility
-- `{body}` is one of `sun`, `moon`, `mercury` … `pluto`; supports name completion
-- Also returned inline by `astronomy_get_sky_position` for solar-system bodies, so tool-only clients lose nothing
+- `{body}` is one of `sun`, `moon`, `mercury` … `pluto`, with name completion; anything else fails as `unknown_body`
+- `application/json` card with `body`, `name`, `type` (`star`/`planet`/`moon`/`dwarf`), `mean_radius_km`, and `naked_eye`
 
 ---
 
 ### `astronomy_stargazing_plan` <sub>prompt</sub>
 
-- Arguments: `location` required; `date` optional (`YYYY-MM-DD`), defaults to tonight
-- Returns one user message chaining the five core tools in order — sunset/dusk, moon phase and moon rise/set, then the ranked visible list with `include_stars` on
-- Names the cross-server geocoding and weather steps this server doesn't cover, and anchors every step to the observer's local night rather than UTC midnight
+- Arguments: `location` required; `date` (`YYYY-MM-DD`) optional, defaults to tonight
+- Returns one user message that chains `astronomy_get_rise_set` (sun, then moon), `astronomy_get_moon_phase`, and `astronomy_list_visible` with `include_stars`, anchored to the observer's local night, plus the geocoding and weather steps this server doesn't cover
 
 ## Features
 
@@ -160,19 +133,18 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 Astronomy-specific:
 
-- Keyless, offline, deterministic core — `astronomy-engine` is the source of truth for positional astronomy; no network, no rate limit, no API key for the five core tools, and the keyless core is pure JS with no native deps
-- Positions are accurate to sub-arcminute precision within the engine's ≈1900–2100 span; a `time`/`start` outside that range is rejected as `time_out_of_range`
-- Both UTC and observer-local time on every output when a `timezone` is supplied; the server never guesses a timezone from coordinates
-- Bundled bright-star catalog so `astronomy_list_visible` and `astronomy_get_sky_position` answer for named stars
-- Two gated extensions (off by default) reach beyond the major-body set — JPL Horizons small bodies and CelesTrak satellite passes — each with its own timeout/retry boundary; they degrade loudly and never silently fall back to the core
-- Does not geocode — resolve a place name to coordinates upstream (e.g. via an OpenStreetMap server) and pass an IANA `timezone` for observer-local output
+- Keyless, offline, deterministic core: the five core tools need no network, API key, or rate limit, and return the same answer for the same body, time, and observer
+- Times outside the engine's high-accuracy span (≈1900–2100) fail as `time_out_of_range`; the Horizons tool is bounded by each target's own data span instead
+- Times are ISO 8601 UTC, and a value with no zone is read as UTC; pass an IANA `timezone` (or set `ASTRONOMY_DEFAULT_TIMEZONE`) to get `*_local` fields alongside UTC. The server never infers a timezone from coordinates
+- No geocoding: resolve a place name to latitude/longitude and a timezone upstream, then pass the coordinates (`elevation` defaults to 0 m)
+- The two opt-in extensions each carry their own timeout and retry; an upstream failure surfaces as `horizons_unavailable` or `celestrak_unavailable` and never falls back to core output
 
 Agent-friendly output:
 
-- Preserves uncertainty — magnitude, angular diameter, phase, and illuminated fraction are `null` (never fabricated or zeroed) where the engine can't compute them, and `format()` renders "unavailable" rather than inventing a value
-- Deterministic visibility notes — `astronomy_list_visible`'s plain-language headline is computed from real magnitude, altitude, sky condition, and distance from the Sun, never a synthetic confidence score
-- Typed error contracts with recovery hints — out-of-range time, missing observer/body, unresolved designation — so callers can correct and retry
-- Rounded-plus-exact dual values — `format()` pairs a rounded display figure with its exact counterpart in brackets (e.g. `RA 4.4116 h [4.411597993526305]`), dropped only when the rounding already round-trips, so a `content[]`-only client never needs a second call to recover full precision
+- Uncertainty preserved: `magnitude`, `angular_diameter_arcsec`, `phase_angle_degrees`, and `illuminated_fraction` are `null` where the engine can't compute them, rendered as "unavailable", never zeroed
+- Deterministic visibility notes: `visibility_note` comes from real magnitude, altitude, sky condition, and Sun elongation, not a synthetic score
+- Typed error contracts: each declared failure carries a typed `reason` and a recovery hint, so callers can correct and retry
+- Exact values behind rounded text: `format()` pairs each rounded figure with its exact value in brackets (`RA 4.4116 h [4.411597993526305]`), so a `content[]`-only client loses no precision
 
 ## Getting started
 
@@ -193,7 +165,7 @@ A public instance is available at `https://astronomy.caseyjhand.com/mcp` — no 
 
 ### Self-Hosted / Local
 
-Add the following to your MCP client configuration file. The five core tools need no configuration; set `ASTRONOMY_ENABLE_HORIZONS` and/or `ASTRONOMY_ENABLE_SATELLITES` to `true` to register the gated extensions.
+Add the following to your MCP client configuration file. The core tools need no configuration; set `ASTRONOMY_ENABLE_HORIZONS` and/or `ASTRONOMY_ENABLE_SATELLITES` to `true` to register the extensions.
 
 ```json
 {
@@ -253,7 +225,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 ### Prerequisites
 
 - [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- No API key required — both the offline core and the two keyless extensions (JPL Horizons, CelesTrak) need no credentials.
+- No API key. The core is offline, and both extensions (JPL Horizons, CelesTrak) are keyless.
 
 ### Installation
 
@@ -279,29 +251,28 @@ bun install
 
 ```sh
 cp .env.example .env
-# edit .env only to enable the gated extensions or override a default
+# edit .env only to enable the extensions or override a default
 ```
 
 ## Configuration
 
-All configuration is optional and validated at startup via Zod schemas in `src/config/server-config.ts`. The core runs with no configuration at all.
+Every variable is optional; the core runs with none set.
 
 | Variable | Description | Default |
 |:---|:---|:---|
-| `ASTRONOMY_ENABLE_HORIZONS` | Register the `astronomy_get_ephemeris` tool (JPL Horizons). | `false` |
-| `ASTRONOMY_ENABLE_SATELLITES` | Register the `astronomy_get_satellite_passes` tool (CelesTrak + SGP4). | `false` |
-| `ASTRONOMY_HORIZONS_BASE_URL` | Override the JPL Horizons API endpoint. | `https://ssd.jpl.nasa.gov/api/horizons.api` |
-| `ASTRONOMY_CELESTRAK_BASE_URL` | Override the CelesTrak GP endpoint. | `https://celestrak.org/NORAD/elements/gp.php` |
-| `ASTRONOMY_DEFAULT_TIMEZONE` | Fallback IANA timezone when a tool call omits `timezone`. Unset = UTC-only output. | none |
-| `ASTRONOMY_REQUEST_TIMEOUT_MS` | HTTP timeout (ms) for Horizons and CelesTrak requests. | `15000` |
-| `ASTRONOMY_TLE_CACHE_TTL_MS` | In-process element-set cache TTL (ms) — respects CelesTrak's refetch guidance (~once/2h). | `7200000` |
+| `ASTRONOMY_ENABLE_HORIZONS` | Register `astronomy_get_ephemeris` (JPL Horizons). | `false` |
+| `ASTRONOMY_ENABLE_SATELLITES` | Register `astronomy_get_satellite_passes` (CelesTrak + SGP4). | `false` |
+| `ASTRONOMY_DEFAULT_TIMEZONE` | Fallback IANA timezone when a call omits `timezone`. Unset means UTC-only output. | none |
+| `ASTRONOMY_REQUEST_TIMEOUT_MS` | HTTP timeout for Horizons and CelesTrak requests, in ms. | `15000` |
+| `ASTRONOMY_TLE_CACHE_TTL_MS` | In-process element-set cache TTL, in ms. The 2 h default follows CelesTrak's refetch guidance. | `7200000` |
+| `ASTRONOMY_HORIZONS_BASE_URL` | JPL Horizons API endpoint. | `https://ssd.jpl.nasa.gov/api/horizons.api` |
+| `ASTRONOMY_CELESTRAK_BASE_URL` | CelesTrak GP endpoint. | `https://celestrak.org/NORAD/elements/gp.php` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
-| `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
-| `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
-| `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
-| `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
-| `STORAGE_PROVIDER_TYPE` | Storage backend. | `in-memory` |
-| `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
+| `MCP_HTTP_PORT` | HTTP server port. | `3010` |
+| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
+| `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
+| `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
+| `OTEL_ENABLED` | Enable [OpenTelemetry](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 
@@ -333,7 +304,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ```sh
 docker build -t astronomy-mcp-server .
-docker run --rm -e MCP_TRANSPORT_TYPE=stdio astronomy-mcp-server
+docker run --rm -p 3010:3010 astronomy-mcp-server
 ```
 
 The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/astronomy-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
@@ -344,12 +315,12 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 |:---|:---|
 | `src/index.ts` | `createApp()` entry point — registers tools/resources/prompts and inits services. |
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Five core tools plus two gated extensions. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). Five core tools plus two opt-in extensions. |
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). Body reference card. |
 | `src/mcp-server/prompts` | Prompt definitions (`*.prompt.ts`). Stargazing plan. |
-| `src/services/ephemeris` | The offline compute core — `astronomy-engine` wrapper, body-radius table, and bundled bright-star catalog. |
-| `src/services/horizons` | JPL Horizons HTTP client (gated extension). |
-| `src/services/satellite` | CelesTrak GP/OMM fetch + SGP4 propagation (gated extension). |
+| `src/services/ephemeris` | Offline compute core — `astronomy-engine` wrapper, body table, bright-star catalog. |
+| `src/services/horizons` | JPL Horizons HTTP client (extension). |
+| `src/services/satellite` | CelesTrak element-set fetch and SGP4 propagation (extension). |
 | `tests/` | Unit and integration tests mirroring `src/`. |
 
 ## Development guide
