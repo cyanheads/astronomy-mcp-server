@@ -189,10 +189,9 @@ export class EphemerisService {
    * strict ISO 8601 instant or names a day that does not exist, and with reason
    * `time_out_of_range` outside the span.
    *
-   * Both throws carry their recovery hint inline: this method takes no `ctx`, so
-   * `ctx.recoveryFor()` is unavailable and the hint has to be written at the throw
-   * site to reach `data.recovery.hint` and the `Recovery:` line mirrored into
-   * `content[]`.
+   * Both throws carry their recovery hint inline. A throw-site hint wins over the
+   * one a calling tool declares for the same reason in `errors[]`, so every caller
+   * hands the client this same `data.recovery.hint` and `Recovery:` line.
    */
   resolveTime(time?: string): Date {
     const date = time ? parseIsoInstant(time) : new Date();

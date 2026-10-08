@@ -52,9 +52,7 @@ export const bodyResource = resource('astronomy://body/{body}', {
   handler(params, ctx) {
     const key = params.body.trim().toLowerCase();
     if (!(BODY_NAMES as readonly string[]).includes(key)) {
-      throw ctx.fail('unknown_body', `Unknown body "${params.body}".`, {
-        ...ctx.recoveryFor('unknown_body'),
-      });
+      throw ctx.fail('unknown_body', `Unknown body "${params.body}".`);
     }
     const meta = BODY_META[key as BodyName];
     ctx.log.debug('Body reference', { body: key });

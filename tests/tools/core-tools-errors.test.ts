@@ -308,24 +308,25 @@ describe('astronomy_find_events — error contracts and validation', () => {
   it.each([
     ['solar_eclipse', { latitude: 41.9 }],
     ['lunar_eclipse', { longitude: 12.5 }],
-  ] as const)('fails incomplete_observer for a %s with one coordinate', (event, coordinate) => {
-    // A lone coordinate cannot place an observer. Dropping it would silently answer a
-    // different question — global circumstances — than the one the caller asked.
-    const ctx = createMockContext({ errors: findEventsTool.errors });
-    const input = findEventsTool.input.parse({
-      event,
-      start: '2026-01-01T00:00:00Z',
-      ...coordinate,
-    });
-    const err = captureThrown(() => {
-      findEventsTool.handler(input, ctx);
-    });
-    expect(err?.data?.reason).toBe('incomplete_observer');
-    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
-    expect(err?.data?.recovery?.hint).toBe(
-      declaredRecovery(findEventsTool.errors, 'incomplete_observer'),
-    );
-  });
+  ] as const)(
+    'fails incomplete_observer for a %s with one coordinate',
+    async (event, coordinate) => {
+      // A lone coordinate cannot place an observer. Dropping it would silently answer a
+      // different question — global circumstances — than the one the caller asked.
+      const result = await runToolContract(findEventsTool, {
+        event,
+        start: '2026-01-01T00:00:00Z',
+        ...coordinate,
+      });
+      const err = errorEnvelope(result);
+      expect(result.isError).toBe(true);
+      expect(err?.data?.reason).toBe('incomplete_observer');
+      expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err?.data?.recovery?.hint).toBe(
+        declaredRecovery(findEventsTool.errors, 'incomplete_observer'),
+      );
+    },
+  );
 
   it('ignores a lone coordinate on an event that takes no observer', async () => {
     const ctx = createMockContext({ errors: findEventsTool.errors });

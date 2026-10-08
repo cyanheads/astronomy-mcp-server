@@ -259,7 +259,6 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
       throw ctx.fail(
         'invalid_time',
         `Invalid start "${input.start}". Expected an ISO 8601 instant naming a real calendar date, e.g. 2024-01-01T00:00:00Z.`,
-        { ...ctx.recoveryFor('invalid_time') },
       );
     }
     /**
@@ -277,7 +276,6 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
       throw ctx.fail(
         'invalid_time',
         `Invalid stop "${input.stop}". Expected an ISO 8601 instant naming a real calendar date, e.g. 2024-01-02T00:00:00Z.`,
-        { ...ctx.recoveryFor('invalid_time') },
       );
     }
     /**
@@ -289,9 +287,7 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     const start = startInstant.toISOString();
     const stop = stopInstant.toISOString();
     if (stopInstant.getTime() <= startInstant.getTime()) {
-      throw ctx.fail('invalid_time_range', `stop "${stop}" is not after start "${start}".`, {
-        ...ctx.recoveryFor('invalid_time_range'),
-      });
+      throw ctx.fail('invalid_time_range', `stop "${stop}" is not after start "${start}".`);
     }
     /**
      * A lone coordinate used to fall through to a geocentric query, silently dropping
@@ -304,7 +300,6 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
       throw ctx.fail(
         'incomplete_observer',
         `Observer ${hasLatitude ? 'latitude' : 'longitude'} was supplied without ${hasLatitude ? 'longitude' : 'latitude'}.`,
-        { ...ctx.recoveryFor('incomplete_observer') },
       );
     }
     const step = parseStep(input.step);
@@ -312,7 +307,6 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
       throw ctx.fail(
         'invalid_step',
         `Invalid step "${input.step}". Expected a positive count plus m, h, d, mo, or y, e.g. "10m".`,
-        { ...ctx.recoveryFor('invalid_step') },
       );
     }
     const observer =

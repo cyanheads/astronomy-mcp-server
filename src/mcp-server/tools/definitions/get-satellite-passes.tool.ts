@@ -174,7 +174,7 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       code: JsonRpcErrorCode.InvalidParams,
       when: 'The start instant is outside the SGP4 high-accuracy span (≈1900–2100), or more than about a month from the epoch of the current element set — checked on the epoch distance itself, since SGP4 keeps returning positions well past the point where the mean elements describe the orbit.',
       recovery:
-        'Request a start within about a month of today — element sets only describe the orbit for weeks around their epoch.',
+        'An element set describes the orbit for weeks either side of its epoch — request a start within about a month of today.',
       thrownBy: 'service',
     },
     {
@@ -258,7 +258,6 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
       throw ctx.fail(
         'invalid_target',
         'Identify the satellite with exactly one of `norad_id` or `name`.',
-        ctx.recoveryFor('invalid_target'),
       );
     }
     const timezone = ephSvc.resolveTimezone(input.timezone ?? getServerConfig().defaultTimezone);

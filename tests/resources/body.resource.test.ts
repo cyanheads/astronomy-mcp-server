@@ -3,9 +3,65 @@
  * @module tests/resources/body.resource.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createWorkerHandler } from '@cyanheads/mcp-ts-core/worker';
 import { describe, expect, it } from 'vitest';
 import { bodyResource } from '@/mcp-server/resources/definitions/body.resource.js';
+
+const PROTOCOL_VERSION = '2026-07-28';
+
+/**
+ * Read a resource through the framework's resource factory, which fills a declared
+ * `recovery` hint the way production does. A direct `handler(...)` call returns the
+ * throw site's error unfilled, so a wire assertion has to come through here.
+ */
+async function readResource(uri: string) {
+  const worker = createWorkerHandler({
+    name: 'astronomy-mcp-server',
+    title: 'astronomy-mcp-server',
+    resources: [bodyResource],
+  });
+  const response = await worker.fetch(
+    new Request('http://example.com/mcp', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json, text/event-stream',
+        'Content-Type': 'application/json',
+        'MCP-Protocol-Version': PROTOCOL_VERSION,
+        'Mcp-Method': 'resources/read',
+        'Mcp-Name': uri,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'resources/read',
+        params: {
+          uri,
+          _meta: {
+            'io.modelcontextprotocol/protocolVersion': PROTOCOL_VERSION,
+            'io.modelcontextprotocol/clientInfo': { name: 'body-resource-test', version: '1.0.0' },
+            'io.modelcontextprotocol/clientCapabilities': {},
+          },
+        },
+      }),
+    }),
+    {} as never,
+    { waitUntil: () => {}, passThroughOnException: () => {} } as never,
+  );
+  const text = await response.text();
+  const frame =
+    text.startsWith('event:') || text.startsWith('data:')
+      ? text
+          .split('\n')
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trim())
+          .join('\n')
+      : text;
+  return JSON.parse(frame) as {
+    error?: { code: number; data?: { reason?: string; recovery?: { hint?: string } } };
+  };
+}
 
 describe('bodyResource', () => {
   it('returns the reference card for a known body', async () => {
@@ -32,6 +88,15 @@ describe('bodyResource', () => {
     const ctx = createMockContext({ errors: bodyResource.errors });
     const params = bodyResource.params!.parse({ body: 'ceres' });
     expect(() => bodyResource.handler(params, ctx)).toThrow(/ceres|body/i);
+  });
+
+  it('answers unknown_body on the wire with the declared recovery hint', async () => {
+    const { error } = await readResource('astronomy://body/ceres');
+    expect(error?.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error?.data?.reason).toBe('unknown_body');
+    expect(error?.data?.recovery?.hint).toBe(
+      bodyResource.errors?.find((e) => e.reason === 'unknown_body')?.recovery,
+    );
   });
 
   it('lists every supported body', async () => {

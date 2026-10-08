@@ -270,11 +270,10 @@ export const findEventsTool = tool('astronomy_find_events', {
       throw ctx.fail(
         'incomplete_observer',
         `Observer ${hasLatitude ? 'latitude' : 'longitude'} was supplied without ${hasLatitude ? 'longitude' : 'latitude'}.`,
-        { ...ctx.recoveryFor('incomplete_observer') },
       );
     }
     if (BODY_EVENTS.has(input.event) && !input.body) {
-      throw ctx.fail('body_required', undefined, { ...ctx.recoveryFor('body_required') });
+      throw ctx.fail('body_required');
     }
 
     const observer = hasObserver

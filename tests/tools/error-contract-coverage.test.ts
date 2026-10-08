@@ -26,12 +26,14 @@ import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-posit
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { initHorizonsService } from '@/services/horizons/horizons-service.js';
+import { initSatelliteService } from '@/services/satellite/satellite-service.js';
 
 const SEATTLE = { latitude: 47.6062, longitude: -122.3321 };
 
 beforeAll(() => {
   initEphemerisService();
   initHorizonsService('https://example.test/horizons', 5000);
+  initSatelliteService('https://example.test/celestrak', 5000, 7_200_000);
 });
 
 afterEach(() => {
@@ -217,5 +219,94 @@ describe('declared recovery reaches both client surfaces', () => {
     expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
     expect(firstText(result)).toContain(`Recovery: ${hint}`);
     expect(firstText(result)).toContain('(reason time_out_of_range');
+  });
+});
+
+/**
+ * Every handler-side `ctx.fail` that passes no recovery relies on the framework filling
+ * the declared hint. Each case drives one such throw site through the production
+ * rendering path, with no upstream reachable, so a site that stops reaching the wire
+ * with its contract hint fails here by name.
+ */
+describe('a bare ctx.fail reaches the wire with its declared hint', () => {
+  interface BareFailCase {
+    input: Record<string, unknown>;
+    reason: string;
+    site: string;
+    tool:
+      | typeof findEventsTool
+      | typeof getEphemerisTool
+      | typeof getSatellitePassesTool
+      | typeof getSkyPositionTool;
+  }
+
+  const CASES: BareFailCase[] = [
+    {
+      site: 'get_sky_position: neither body nor star',
+      tool: getSkyPositionTool,
+      input: { ...SEATTLE },
+      reason: 'body_required',
+    },
+    {
+      site: 'find_events: body event without a body',
+      tool: findEventsTool,
+      input: { event: 'opposition', start: '2026-01-01T00:00:00Z' },
+      reason: 'body_required',
+    },
+    {
+      site: 'find_events: eclipse with one coordinate',
+      tool: findEventsTool,
+      input: { event: 'lunar_eclipse', start: '2026-01-01T00:00:00Z', longitude: 12.5 },
+      reason: 'incomplete_observer',
+    },
+    {
+      site: 'get_satellite_passes: both norad_id and name',
+      tool: getSatellitePassesTool,
+      input: { norad_id: 25544, name: 'ISS (ZARYA)', ...SEATTLE },
+      reason: 'invalid_target',
+    },
+    {
+      site: 'get_ephemeris: unparseable start',
+      tool: getEphemerisTool,
+      input: { designation: '433;', start: '2026-02-30T00:00:00Z' },
+      reason: 'invalid_time',
+    },
+    {
+      site: 'get_ephemeris: unparseable stop',
+      tool: getEphemerisTool,
+      input: { designation: '433;', start: '2026-02-01T00:00:00Z', stop: '2026-02-30T00:00:00Z' },
+      reason: 'invalid_time',
+    },
+    {
+      site: 'get_ephemeris: stop before start',
+      tool: getEphemerisTool,
+      input: { designation: '433;', start: '2026-02-02T00:00:00Z', stop: '2026-02-01T00:00:00Z' },
+      reason: 'invalid_time_range',
+    },
+    {
+      site: 'get_ephemeris: latitude without longitude',
+      tool: getEphemerisTool,
+      input: { designation: '433;', latitude: SEATTLE.latitude },
+      reason: 'incomplete_observer',
+    },
+    {
+      site: 'get_ephemeris: malformed step',
+      tool: getEphemerisTool,
+      input: { designation: '433;', step: 'fortnightly' },
+      reason: 'invalid_step',
+    },
+  ];
+
+  it.each(CASES.map((c) => [c.site, c] as const))('%s', async (_site, c) => {
+    const fetchSpy = vi.fn(async () => new Response('unreachable', { status: 500 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await runToolContract(c.tool, c.input as never);
+    const hint = declaredRecovery(c.tool.errors, c.reason);
+
+    expect(result.isError).toBe(true);
+    expect(errorEnvelope(result)?.data?.reason).toBe(c.reason);
+    expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
+    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

@@ -1054,12 +1054,12 @@ describe('astronomy_get_ephemeris — error contracts', () => {
     // and the call still reported success.
     const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
     vi.stubGlobal('fetch', fetchSpy);
-    const ctx = createMockContext({ errors: getEphemerisTool.errors });
-    const input = getEphemerisTool.input.parse({
+    const result = await runToolContract(getEphemerisTool, {
       designation: '433;',
       latitude: SEATTLE.latitude,
     });
-    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    const err = errorEnvelope(result);
+    expect(result.isError).toBe(true);
     expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(err?.data?.reason).toBe('incomplete_observer');
     expect(err?.data?.recovery?.hint).toMatch(/latitude and longitude together/i);
@@ -2230,9 +2230,9 @@ describe('astronomy_get_ephemeris — calendar validity without a year range', (
     'rejects the impossible start %s with invalid_time',
     async (start) => {
       const fetchSpy = stubOnePoint();
-      const ctx = createMockContext({ errors: getEphemerisTool.errors });
-      const input = getEphemerisTool.input.parse({ designation: '433;', start });
-      const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+      const result = await runToolContract(getEphemerisTool, { designation: '433;', start });
+      const err = errorEnvelope(result);
+      expect(result.isError).toBe(true);
       expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
       expect(err?.data?.reason).toBe('invalid_time');
       expect(err?.data?.recovery?.hint).toBeTruthy();
@@ -2512,13 +2512,13 @@ describe('astronomy_get_satellite_passes — name resolution', () => {
       async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
     );
     vi.stubGlobal('fetch', fetchSpy);
-    const ctx = createMockContext({ errors: getSatellitePassesTool.errors });
-    const input = getSatellitePassesTool.input.parse({
+    const result = await runToolContract(getSatellitePassesTool, {
       norad_id: 25544,
       name: 'ISS (ZARYA)',
       ...SEATTLE,
     });
-    const err = await captureRejected(() => getSatellitePassesTool.handler(input, ctx));
+    const err = errorEnvelope(result);
+    expect(result.isError).toBe(true);
     expect(err?.data?.reason).toBe('invalid_target');
     expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(err?.data?.recovery?.hint).toBe(

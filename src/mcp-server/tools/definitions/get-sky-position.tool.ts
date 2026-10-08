@@ -199,7 +199,7 @@ export const getSkyPositionTool = tool('astronomy_get_sky_position', {
     } else if (input.body) {
       pos = svc.position({ kind: 'body', body: input.body }, observer, date, timezone);
     } else {
-      throw ctx.fail('body_required', undefined, { ...ctx.recoveryFor('body_required') });
+      throw ctx.fail('body_required');
     }
 
     ctx.log.info('Computed sky position', {
