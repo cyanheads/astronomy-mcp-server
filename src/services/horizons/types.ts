@@ -38,10 +38,14 @@ export interface EphemerisResult {
    */
   targetName?: string;
   /**
-   * True when Horizons returned more rows than the inline cap. The remaining rows are
-   * retrieved by re-calling from the instant one step past the last row returned, never
-   * by widening `step` — a wider step answers a different question, dropping samples the
-   * original range asked for instead of retrieving them.
+   * True when Horizons returned more rows than the inline cap. The tool asks for one row
+   * past the cap at most, so this reads that row. This field alone does not decide
+   * continuation: the tool, not this field, also treats a page as continuing when a
+   * dropped row left the cap unreached and one step past the last point is still inside
+   * the requested span. The remaining rows are retrieved by re-calling from the instant
+   * one step past the last row returned, never by widening `step` — a wider step answers
+   * a different question, dropping samples the original range asked for instead of
+   * retrieving them.
    */
   truncated: boolean;
 }

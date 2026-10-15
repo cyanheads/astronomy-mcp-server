@@ -220,6 +220,167 @@ describe('declared recovery reaches both client surfaces', () => {
     expect(firstText(result)).toContain(`Recovery: ${hint}`);
     expect(firstText(result)).toContain('(reason time_out_of_range');
   });
+
+  /**
+   * The other service-thrown reasons whose hint is written at the throw site. `upstream` is
+   * the Horizons response body that raises the reason; a reason raised before any request
+   * has none.
+   */
+  interface InlineHintCase {
+    input: Record<string, unknown>;
+    reason: string;
+    /** HTTP status the upstream body is served with; 200 when absent. */
+    status?: number;
+    tool: typeof findEventsTool | typeof getEphemerisTool;
+    upstream?: string;
+  }
+  const DAY = { start: '2026-01-01T00:00:00Z', stop: '2026-01-02T00:00:00Z' };
+
+  it.each<[string, InlineHintCase]>([
+    [
+      'find_events / invalid_body_pair',
+      {
+        tool: findEventsTool,
+        input: { event: 'conjunction', body: 'jupiter', body2: 'jupiter' },
+        reason: 'invalid_body_pair',
+      },
+    ],
+    [
+      'get_ephemeris / ambiguous_designation',
+      {
+        tool: getEphemerisTool,
+        input: { designation: 'Mars', ...DAY },
+        reason: 'ambiguous_designation',
+        upstream: [
+          ' Multiple major-bodies match string "MARS*"',
+          '',
+          '  ID#      Name                               Designation  IAU/aliases/other',
+          '  -------  ---------------------------------- -----------  -------------------',
+          '        4  Mars Barycenter',
+          '      499  Mars',
+        ].join('\n'),
+      },
+    ],
+    [
+      'get_ephemeris / observer_is_target',
+      {
+        tool: getEphemerisTool,
+        input: { designation: '399', ...DAY, step: '1h' },
+        reason: 'observer_is_target',
+        upstream: 'Observer table for observer=target disallowed.',
+      },
+    ],
+    [
+      'get_ephemeris / invalid_step',
+      {
+        tool: getEphemerisTool,
+        input: { designation: '433;', ...DAY, step: '2147483647d' },
+        reason: 'invalid_step',
+        upstream: 'STEP_SIZE too big, exceeds available span.',
+      },
+    ],
+    [
+      'get_ephemeris / request_rejected',
+      {
+        tool: getEphemerisTool,
+        input: { designation: '433;', ...DAY, step: '1h' },
+        reason: 'request_rejected',
+        status: 400,
+        upstream:
+          '{"message":"invalid value specified for query parameter \'COMMAND\': invalid character(s) found (must be ASCII hex code 0x20-0x7f)","code":"400"}',
+      },
+    ],
+  ])('carries a service-thrown reason whose hint is written inline (%s)', async (_site, c) => {
+    if (c.upstream !== undefined) {
+      const body = c.upstream;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(body, { status: c.status ?? 200 })),
+      );
+    }
+    const result = await runToolContract(c.tool, c.input as never);
+    const hint = declaredRecovery(c.tool.errors, c.reason);
+
+    expect(result.isError).toBe(true);
+    expect(errorEnvelope(result)?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(errorEnvelope(result)?.data?.reason).toBe(c.reason);
+    expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
+    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+    expect(firstText(result)).toContain(`(reason ${c.reason}`);
+  });
+});
+
+/**
+ * `EphemerisService.resolveTime()` is shared by several tools and takes no ctx, so it
+ * cannot know which input field its caller exposes (`time` or `start`) or what next move
+ * that tool documents. The recovery a caller is handed for an out-of-span instant must be
+ * the one the calling tool declares, character for character, on both surfaces. Every
+ * handler that calls `resolveTime()` needs a case here; one that starts calling it fails
+ * the coverage check until it gets one.
+ */
+describe("time_out_of_range from resolveTime() sends the calling tool's declared recovery", () => {
+  interface SpanCase {
+    /** Builds the smallest valid input with the out-of-span instant in the time field. */
+    input: (instant: string) => Record<string, unknown>;
+    tool:
+      | typeof findEventsTool
+      | typeof getMoonPhaseTool
+      | typeof getRiseSetTool
+      | typeof getSatellitePassesTool
+      | typeof getSkyPositionTool
+      | typeof listVisibleTool;
+  }
+
+  const SPAN_CASES: Record<string, SpanCase> = {
+    astronomy_get_sky_position: {
+      tool: getSkyPositionTool,
+      input: (time) => ({ body: 'mars', ...SEATTLE, time }),
+    },
+    astronomy_get_rise_set: {
+      tool: getRiseSetTool,
+      input: (start) => ({ body: 'sun', ...SEATTLE, start }),
+    },
+    astronomy_get_moon_phase: { tool: getMoonPhaseTool, input: (time) => ({ time }) },
+    astronomy_find_events: {
+      tool: findEventsTool,
+      input: (start) => ({ event: 'equinox', start }),
+    },
+    astronomy_list_visible: { tool: listVisibleTool, input: (time) => ({ ...SEATTLE, time }) },
+    astronomy_get_satellite_passes: {
+      tool: getSatellitePassesTool,
+      input: (start) => ({ norad_id: 25544, ...SEATTLE, start }),
+    },
+  };
+
+  it('has a case for every handler that calls resolveTime()', () => {
+    const callers = CONTRACT_CASES.filter((c) =>
+      strippedSource(c.handler).includes('resolveTime('),
+    ).map((c) => c.name);
+    expect(Object.keys(SPAN_CASES).sort()).toEqual(callers.sort());
+  });
+
+  it.each(
+    Object.entries(SPAN_CASES).flatMap(([name, c]) =>
+      ['1850-01-01T00:00:00Z', '2101-01-01T00:00:00Z'].map(
+        (instant) => [name, instant, c] as const,
+      ),
+    ),
+  )('%s at %s', async (_name, instant, c) => {
+    const fetchSpy = vi.fn(async () => new Response('unreachable', { status: 500 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const result = await runToolContract(c.tool, c.input(instant) as never);
+    const hint = declaredRecovery(c.tool.errors, 'time_out_of_range');
+    const recoveryLines = firstText(result)
+      .split('\n')
+      .filter((line) => line.startsWith('Recovery:'));
+
+    expect(result.isError).toBe(true);
+    expect(errorEnvelope(result)?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(errorEnvelope(result)?.data?.reason).toBe('time_out_of_range');
+    expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
+    expect(recoveryLines).toEqual([`Recovery: ${hint}`]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 });
 
 /**
@@ -288,6 +449,12 @@ describe('a bare ctx.fail reaches the wire with its declared hint', () => {
       tool: getEphemerisTool,
       input: { designation: '433;', latitude: SEATTLE.latitude },
       reason: 'incomplete_observer',
+    },
+    {
+      site: 'get_ephemeris: observer elevation Horizons refuses',
+      tool: getEphemerisTool,
+      input: { designation: '433;', ...SEATTLE, elevation: 40_000_000 },
+      reason: 'invalid_elevation',
     },
     {
       site: 'get_ephemeris: malformed step',

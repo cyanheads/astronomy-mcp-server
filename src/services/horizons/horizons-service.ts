@@ -9,7 +9,12 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { invalidParams, notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  invalidParams,
+  McpError,
+  notFound,
+  serviceUnavailable,
+} from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ObserverInput } from '../ephemeris/types.js';
 import type { EphemerisPoint, EphemerisResult } from './types.js';
@@ -28,6 +33,59 @@ const MAX_ROWS = 200;
 const DESIGNATION_MISS = /No matches found|Matching small-bodies/i;
 
 /**
+ * The line Horizons prints instead of an ephemeris when a name matches several major bodies
+ * or spacecraft, e.g. `Multiple major-bodies match string "MARS*"` for `Mars`. A table of the
+ * candidates follows, one per line, keyed by the ID number that selects each one.
+ */
+const MAJOR_BODY_MULTI_MATCH = /Multiple major-bodies match string/;
+
+/** Most candidates an ambiguous-designation error lists; the message states the full count. */
+const MAX_DESIGNATION_CANDIDATES = 20;
+
+/**
+ * Recovery hint for a designation matching several major bodies, byte-identical to the
+ * `recovery` the tool declares for `ambiguous_designation`.
+ */
+const AMBIGUOUS_DESIGNATION_RECOVERY =
+  'Re-call with designation set to the ID number of the intended body from the listed candidates — e.g. "499" for the planet Mars — or a more specific name when it is not listed.';
+
+/** One body a multi-match listed: the ID number that selects it, and the name Horizons printed. */
+interface DesignationCandidate {
+  id: string;
+  name: string;
+}
+
+/**
+ * Read the candidate table under Horizons' multi-match line. The table is fixed-width under
+ * a separator of dash runs, one run per column; the ID# and Name columns are the first two.
+ * A long name fills its column and the gap after it, so the name runs up to where the next
+ * column starts, cut there exactly as Horizons cut it. Rows run until the first line with
+ * no ID number in the ID# column.
+ */
+function multiMatchCandidates(text: string): DesignationCandidate[] {
+  const lines = text.split('\n');
+  const separatorAt = lines.findIndex((line) => {
+    const trimmed = line.trim();
+    return trimmed.includes(' ') && /^[- ]+$/.test(trimmed);
+  });
+  if (separatorAt === -1) return [];
+  const columns = [...(lines[separatorAt] ?? '').matchAll(/-+/g)].map((m) => ({
+    from: m.index,
+    to: m.index + m[0].length,
+  }));
+  const [idColumn, nameColumn, nextColumn] = columns;
+  if (!idColumn || !nameColumn) return [];
+  const candidates: DesignationCandidate[] = [];
+  for (const line of lines.slice(separatorAt + 1)) {
+    // An ID right-aligned in its column can start before the dashes do, so read from 0.
+    const id = line.slice(0, idColumn.to).trim();
+    if (!/^-?\d+$/.test(id)) break;
+    candidates.push({ id, name: line.slice(nameColumn.from, nextColumn?.from).trim() });
+  }
+  return candidates;
+}
+
+/**
  * The line Horizons prints when the requested span leaves the target's data, e.g.
  * `No ephemeris for target "Mars" after A.D. 2599-DEC-31 23:58:50.8164 UT`. Captures the
  * target name, the direction, and the bound (era included) exactly as Horizons wrote them.
@@ -41,6 +99,47 @@ const OUT_OF_SPAN =
  */
 const OUT_OF_SPAN_RECOVERY =
   "Move start and stop inside the target's Horizons data span — the message names the bound the request crossed — then retry.";
+
+/**
+ * The refusal Horizons prints when STEP_SIZE spans more than the target's whole data span,
+ * e.g. `2147483647d` for 433 Eros. Which steps that is depends on the target, so it cannot
+ * be checked before the request.
+ */
+const STEP_TOO_BIG = /STEP_SIZE too big/;
+
+/** Recovery hint for an over-long step, byte-identical to the tool's `invalid_step` recovery. */
+const INVALID_STEP_RECOVERY =
+  'Pass step as a count up to 2147483647 plus m, h, d, mo, or y — for example "10m", "1h", or "1d" — and shorter than the span of data Horizons holds for the target, then retry.';
+
+/**
+ * The refusal Horizons prints when the target is the body the observer stands on — every
+ * request here observes from Earth, so this is a target that resolves to Earth.
+ */
+const OBSERVER_IS_TARGET = /Observer table for observer=target disallowed/;
+
+/** Recovery hint for Earth as the target, byte-identical to the tool's declared recovery. */
+const OBSERVER_IS_TARGET_RECOVERY =
+  'Choose a target other than Earth: this tool observes from Earth, geocentric or from the supplied latitude and longitude, and Horizons computes no ephemeris of the observer’s own body.';
+
+/**
+ * How Horizons names a request parameter whose value it refuses with HTTP 400, e.g.
+ * `invalid value specified for query parameter 'COMMAND': invalid character(s) found (must be
+ * ASCII hex code 0x20-0x7f)`. The capture is the parameter name.
+ */
+const REFUSED_PARAMETER = /query parameter '([A-Z_]+)'/;
+
+/** The tool input each refusable Horizons query parameter carries. */
+const PARAMETER_INPUTS: Partial<Record<string, string>> = {
+  COMMAND: 'designation',
+  START_TIME: 'start',
+  STOP_TIME: 'stop',
+  STEP_SIZE: 'step',
+  SITE_COORD: 'the observer coordinates',
+};
+
+/** Recovery hint for a request Horizons refused, byte-identical to the tool's declared recovery. */
+const REQUEST_REJECTED_RECOVERY =
+  'Horizons refuses this request the same way on every attempt, so do not retry it unchanged: correct the input the message names — the designation as a record-resolving form such as "433;", or the start, stop, step, or observer coordinates — then call again.';
 
 /**
  * The header line naming the object Horizons resolved, e.g.
@@ -90,13 +189,16 @@ export class HorizonsService {
        * fetchWithTimeout throws a status-mapped McpError on any non-2xx whose data
        * carries raw upstream internals (status/statusText/body plus the legacy
        * statusCode/responseBody aliases), and a Timeout McpError when its own deadline
-       * fires. Either way the failure is horizons_unavailable here — Horizons signals a
-       * genuine no-match with a 200 body (handled in parse), not an HTTP error status.
-       * Map to the typed contract with clean data so nothing upstream leaks to the
-       * client. The request URL is no longer among those internals — the framework
-       * stopped putting it on client-facing data — but the captured body still echoes
-       * the query, so the data is replaced rather than forwarded.
+       * fires. Horizons signals a genuine no-match with a 200 body (handled in parse); its
+       * one deterministic HTTP refusal is a 400 for a parameter value it will not accept,
+       * which no retry changes, so that becomes a typed input refusal naming the input.
+       * Everything else is horizons_unavailable. Either way the error is rebuilt with clean
+       * data so nothing upstream leaks to the client: the captured body echoes the query,
+       * so the data is replaced rather than forwarded.
        */
+      if (err instanceof McpError && err.data?.status === 400) {
+        throw this.requestRejected(designation, err);
+      }
       throw serviceUnavailable(
         `Failed to fetch an ephemeris for "${designation}" from JPL Horizons.`,
         {
@@ -107,7 +209,7 @@ export class HorizonsService {
       );
     }
 
-    return this.parse(designation, text, !!observer);
+    return this.parse(designation, step, text, !!observer);
   }
 
   /** Build the Horizons GET URL with quoted, URL-encoded parameters. */
@@ -133,6 +235,12 @@ export class HorizonsService {
       CSV_FORMAT: 'YES',
       ANG_FORMAT: 'DEG',
       EXTRA_PREC: 'YES',
+      // ISO 8601 dates are proleptic Gregorian. Horizons' default mixed calendar reads a
+      // date before 1582-10-15 as Julian — 1500-01-01 lands on Gregorian 1500-01-10 — and
+      // labels its rows the same way, so START_TIME, STOP_TIME, and every row's date
+      // would name instants other than the ones computed. One calendar end to end;
+      // after 1582-10-15 the two agree and nothing changes.
+      CAL_TYPE: 'GREGORIAN',
     });
     if (observer) {
       params.set('COORD_TYPE', 'GEODETIC');
@@ -152,9 +260,33 @@ export class HorizonsService {
     return `${this.baseUrl}?${params.toString()}`;
   }
 
-  /** Parse the CSV OBSERVER table between $$SOE and $$EOE. */
-  private parse(designation: string, text: string, hasObserver: boolean): EphemerisResult {
+  /**
+   * Parse the CSV OBSERVER table between $$SOE and $$EOE. A response with no table is
+   * matched against the refusals Horizons gives identically on every attempt, each typed
+   * so the caller is not told to retry; only an answer none of them explains falls to
+   * the retryable outage. Refusals the tool prevents before the request — a date it
+   * cannot read, a stop not after start, a step count it cannot read, a blank target, an
+   * observer altitude out of range, a span past its row ceiling — are not matched here.
+   */
+  private parse(
+    designation: string,
+    step: string,
+    text: string,
+    hasObserver: boolean,
+  ): EphemerisResult {
     const hasBlock = text.includes('$$SOE');
+    if (!hasBlock && STEP_TOO_BIG.test(text)) {
+      throw invalidParams(
+        `Step "${step}" is longer than the span of data JPL Horizons holds for "${designation}".`,
+        { reason: 'invalid_step', recovery: { hint: INVALID_STEP_RECOVERY } },
+      );
+    }
+    if (!hasBlock && OBSERVER_IS_TARGET.test(text)) {
+      throw invalidParams(
+        `"${designation}" resolves to Earth, the body the observer is on, and JPL Horizons has no observer table for it.`,
+        { reason: 'observer_is_target', recovery: { hint: OBSERVER_IS_TARGET_RECOVERY } },
+      );
+    }
     const outOfSpan = hasBlock ? null : OUT_OF_SPAN.exec(text);
     if (outOfSpan) {
       const [, target, direction, bound] = outOfSpan;
@@ -162,6 +294,9 @@ export class HorizonsService {
         reason: 'time_out_of_range',
         recovery: { hint: OUT_OF_SPAN_RECOVERY },
       });
+    }
+    if (!hasBlock && MAJOR_BODY_MULTI_MATCH.test(text)) {
+      throw this.ambiguousDesignation(designation, multiMatchCandidates(text));
     }
     if (DESIGNATION_MISS.test(text) && !hasBlock) {
       throw notFound(`JPL Horizons has no match for designation "${designation}".`, {
@@ -219,6 +354,42 @@ export class HorizonsService {
       dropped,
       ...(targetName ? { targetName } : {}),
     };
+  }
+
+  /**
+   * A name matching several major bodies is a fixed answer, not an outage: Horizons lists
+   * the same candidates every time, so the error hands them over for the caller to pick
+   * one ID from. The list is capped, and the message says so when it is.
+   */
+  private ambiguousDesignation(designation: string, matched: DesignationCandidate[]): McpError {
+    const candidates = matched.slice(0, MAX_DESIGNATION_CANDIDATES);
+    const listing = candidates.map((c) => `${c.id} (${c.name})`).join(', ');
+    const message =
+      matched.length === 0
+        ? `"${designation}" matches several JPL Horizons major bodies.`
+        : matched.length > candidates.length
+          ? `"${designation}" matches ${matched.length} JPL Horizons major bodies. The first ${candidates.length}: ${listing}.`
+          : `"${designation}" matches ${matched.length} JPL Horizons major bodies: ${listing}.`;
+    return invalidParams(message, {
+      reason: 'ambiguous_designation',
+      recovery: { hint: AMBIGUOUS_DESIGNATION_RECOVERY },
+      ...(matched.length > 0 ? { match_count: matched.length, candidates } : {}),
+    });
+  }
+
+  /**
+   * A 400 names the query parameter Horizons refused; the error names the tool input that
+   * parameter carries, and neither Horizons' text nor the HTTP details reach the client.
+   */
+  private requestRejected(designation: string, err: McpError): McpError {
+    const body = typeof err.data?.body === 'string' ? err.data.body : '';
+    const parameter = REFUSED_PARAMETER.exec(body)?.[1];
+    const input = (parameter && PARAMETER_INPUTS[parameter]) ?? 'a request parameter';
+    return invalidParams(
+      `JPL Horizons refused the request for "${designation}": it rejected the value sent for ${input}.`,
+      { reason: 'request_rejected', recovery: { hint: REQUEST_REJECTED_RECOVERY } },
+      { cause: err },
+    );
   }
 
   /**
@@ -286,13 +457,17 @@ export class HorizonsService {
   /**
    * Convert a Horizons calendar date to ISO 8601 UTC. The OBSERVER table emits
    * "2024-Apr-08 18:00" (HH:MM) at hour/day steps and "…18:00:00.0000" at finer
-   * steps, so seconds are optional. Horizons dates are always UT — parse them as
-   * UTC explicitly; never let a bare string fall to local-time `new Date(...)`.
+   * steps, so seconds are optional. A START_TIME carrying a fraction of a second comes
+   * back on every row ("2026-Jan-01 00:00:30.500"), and the fraction is kept — rounded to
+   * the millisecond an ISO instant holds — so `time_utc` names the instant Horizons
+   * computed, and a resume start derived from it stays on the caller's time grid.
+   * Horizons dates are always UT — parse them as UTC explicitly; never let a bare
+   * string fall to local-time `new Date(...)`.
    */
   private parseHorizonsDate(raw: string): string | null {
     const cleaned = raw.replace(/^A\.D\.\s*/, '').trim();
     const match = cleaned.match(
-      /^(\d{4})-([A-Za-z]{3})-(\d{2})\s+(\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?/,
+      /^(\d{4})-([A-Za-z]{3})-(\d{2})\s+(\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d+))?/,
     );
     if (!match) {
       // Append Z so an unzoned fallback string is read as UTC, not host-local time.
@@ -313,12 +488,16 @@ export class HorizonsService {
       Nov: '11',
       Dec: '12',
     };
-    const [, year, monName, day, hh, mm, ss] = match;
+    const [, year, monName, day, hh, mm, ss, fraction] = match;
     const monNum = monName ? months[monName] : undefined;
     if (!monNum) return null;
     const iso = `${year}-${monNum}-${day}T${hh}:${mm}:${ss ?? '00'}Z`;
     const d = new Date(iso);
-    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+    if (Number.isNaN(d.getTime())) return null;
+    // Added to the epoch rather than written into the string, so a fraction that rounds up
+    // to a whole second carries into the next minute instead of naming second 60.
+    const ms = fraction === undefined ? 0 : Math.round(Number(`0.${fraction}`) * 1000);
+    return new Date(d.getTime() + ms).toISOString();
   }
 }
 

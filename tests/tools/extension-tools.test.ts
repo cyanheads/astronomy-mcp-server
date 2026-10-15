@@ -6,7 +6,8 @@
  *   SGP4 propagation and the Horizons CSV parse run for real against the fixtures.
  *
  *   Covers every declared `ctx.fail` reason (invalid_time, invalid_time_range,
- *   incomplete_observer, invalid_step, body_not_found, horizons_unavailable,
+ *   incomplete_observer, invalid_elevation, invalid_step, body_not_found, request_rejected,
+ *   horizons_unavailable,
  *   tle_not_found, object_decayed, time_out_of_range, celestrak_unavailable,
  *   malformed_element_set), the split between a CelesTrak outage and a 200 whose GP
  *   record fails OMM validation — one retryable, one permanent — the
@@ -21,9 +22,15 @@
  *   topocentric request only), two-page continuation from the advertised resume instant
  *   on both a fixed-duration and a calendar step — concatenating with no repeated
  *   instant and no gap — and the calendar-stepping skip rule that carries a month or
- *   year step to the next period that has the day, pass-boundary detection at all three positions of `start` relative
+ *   year step to the next period that has the day (multi-count steps included), the
+ *   fractional seconds Horizons echoes, a STOP_TIME bounded to one row past the page, a
+ *   name matching several major bodies, the calendar years Horizons reads,
+ *   pass-boundary detection at all three positions of `start` relative
  *   to a rise (before, exactly on, mid-pass) and at the window's end (a pass still up when
- *   it closes followed to its set), offset timestamps reaching Horizons as parsed instants,
+ *   it closes followed to its set), satellite rise, set, and visible-stretch edges checked
+ *   against an independent one-second rescan, the visible-stretch keep rule (two-stretch
+ *   passes included), the per-call `days` cap and a continuation that neither repeats nor
+ *   skips a pass, offset timestamps reaching Horizons as parsed instants,
  *   a refused date kept apart from a designation miss, the resolved `target_name` on both
  *   surfaces, the well-known satellite-name alias table, the split between a decayed object and a
  *   start the element set cannot reach — including the epoch-horizon rejection of a start
@@ -36,17 +43,30 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { type ErrorContract, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { json2satrec, propagate } from 'satellite.js';
+import { Body, Equator, Horizon, MakeTime, Observer } from 'astronomy-engine';
+import {
+  ecfToLookAngles,
+  eciToEcf,
+  gstime,
+  jday,
+  json2satrec,
+  propagate,
+  shadowFraction,
+  sunPos,
+} from 'satellite.js';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { toJSONSchema } from 'zod/v4/core';
 import {
   type EphemerisOutputType,
   getEphemerisTool,
 } from '@/mcp-server/tools/definitions/get-ephemeris.tool.js';
-import { getSatellitePassesTool } from '@/mcp-server/tools/definitions/get-satellite-passes.tool.js';
+import {
+  getSatellitePassesTool,
+  type SatellitePassesOutputType,
+} from '@/mcp-server/tools/definitions/get-satellite-passes.tool.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { HorizonsService, initHorizonsService } from '@/services/horizons/horizons-service.js';
-import { initSatelliteService } from '@/services/satellite/satellite-service.js';
+import { initSatelliteService, SatelliteService } from '@/services/satellite/satellite-service.js';
 import { OmmResponseSchema } from '@/services/satellite/types.js';
 import { captureRejected } from '../helpers/capture-thrown.js';
 import {
@@ -529,6 +549,7 @@ describe('astronomy_get_ephemeris — the Horizons request behind the advertised
       [
         'ANG_FORMAT',
         'APPARENT',
+        'CAL_TYPE',
         'CENTER',
         'COMMAND',
         'COORD_TYPE',
@@ -559,6 +580,90 @@ describe('astronomy_get_ephemeris — the Horizons request behind the advertised
   });
 });
 
+/** Julian Day at 0h UT of a proleptic Gregorian instant. */
+function gregorianJulianDay(iso: string): number {
+  return new Date(iso).getTime() / 86_400_000 + 2_440_587.5;
+}
+
+/** Julian Day at 0h of a date read in the Julian calendar, as Horizons' mixed mode reads one before 1582-10-15. */
+function julianCalendarJulianDay(year: number, month: number, day: number): number {
+  const a = Math.floor((14 - month) / 12);
+  const y = year + 4800 - a;
+  const m = month + 12 * a - 3;
+  return day + Math.floor((153 * m + 2) / 5) + 365 * y + Math.floor(y / 4) - 32_083.5;
+}
+
+/**
+ * A `fetch` stub with Horizons' calendar behavior: in its default mixed mode a START_TIME
+ * before 1582-10-15 is a Julian-calendar date, so the row labelled with that date belongs
+ * to a different instant than the proleptic Gregorian one the label names; with
+ * `CAL_TYPE='GREGORIAN'` the label and the instant agree. The row's RA column carries the
+ * Julian Day Horizons computed, offset into a small degree value, so a test can read back
+ * which instant the position belongs to.
+ */
+function stubHorizonsCalendar(): ReturnType<typeof vi.fn> {
+  const spy = vi.fn(async (url: string | URL) => {
+    const params = paramsOf(url);
+    const start = unquote(params.get('START_TIME'));
+    const [year, month, day] = start.slice(0, 10).split('-').map(Number) as [
+      number,
+      number,
+      number,
+    ];
+    const gregorian = unquote(params.get('CAL_TYPE')) === 'GREGORIAN';
+    const julianDay =
+      !gregorian && start < '1582-10-15'
+        ? julianCalendarJulianDay(year, month, day)
+        : gregorianJulianDay(`${start.slice(0, 10)}T00:00:00Z`);
+    const label = `${year}-${HORIZONS_MONTHS[month - 1]}-${String(day).padStart(2, '0')} 00:00`;
+    return new Response(
+      horizonsGeocentric([`${label}, , , ${julianDay - 2_268_900}, 10.0, -11.0, 4.6, 0.0026, 0.1`]),
+      { status: 200 },
+    );
+  });
+  vi.stubGlobal('fetch', spy);
+  return spy;
+}
+
+describe('astronomy_get_ephemeris — one calendar end to end', () => {
+  /**
+   * ISO 8601 dates are proleptic Gregorian, while Horizons' default calendar mode reads a
+   * date before 1582-10-15 as Julian — there `1500-01-01` is JD 2268932.5, Gregorian
+   * 1500-01-10. The request asks for the Gregorian calendar on every span, so the row
+   * labelled with the start is computed at that start's Gregorian Julian Day.
+   */
+  it.each([
+    ['before 1582, where the default calendar is Julian', '1500-01-01', '1500-01-02'],
+    ['after 1582, where the two calendars agree', '2026-01-01', '2026-01-02'],
+  ])(
+    'computes the row labelled with its start at that Gregorian instant, %s',
+    async (_label, day, next) => {
+      const spy = stubHorizonsCalendar();
+      const ctx = createMockContext({ errors: getEphemerisTool.errors });
+      const input = getEphemerisTool.input.parse({
+        designation: '301',
+        start: `${day}T00:00:00Z`,
+        stop: `${next}T00:00:00Z`,
+        step: '1d',
+      });
+      const result = await getEphemerisTool.handler(input, ctx);
+      expect(paramsOf(spy.mock.calls[0]?.[0]).get('CAL_TYPE')).toBe('GREGORIAN');
+      expect(result.points[0]?.time_utc).toBe(`${day}T00:00:00.000Z`);
+      // The position's Julian Day, read back out of the RA column.
+      expect((result.points[0]?.ra_hours ?? 0) * 15 + 2_268_900).toBeCloseTo(
+        gregorianJulianDay(`${day}T00:00:00Z`),
+        6,
+      );
+    },
+  );
+
+  it('pins the stub’s Julian-calendar arithmetic to the value Horizons computed', () => {
+    // Live, COMMAND='301' START_TIME='1500-01-01' in mixed mode printed JD 2268932.5.
+    expect(julianCalendarJulianDay(1500, 1, 1)).toBe(2_268_932.5);
+    expect(gregorianJulianDay('1500-01-01T00:00:00Z')).toBe(2_268_923.5);
+  });
+});
+
 /** Strip the single quotes a Horizons query parameter is wrapped in. */
 function unquote(value: string | null): string {
   return (value ?? '').replace(/^'|'$/g, '');
@@ -579,10 +684,14 @@ const HORIZONS_MONTHS = [
   'Dec',
 ] as const;
 
-/** Render an instant the way the OBSERVER table writes its calendar-date column. */
+/**
+ * Render an instant the way the OBSERVER table writes its calendar-date column, fractional
+ * seconds included — Horizons echoes a START_TIME's fraction on every row it prints.
+ */
 function horizonsDateColumn(t: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
-  return `${t.getUTCFullYear()}-${HORIZONS_MONTHS[t.getUTCMonth()]}-${pad(t.getUTCDate())} ${pad(t.getUTCHours())}:${pad(t.getUTCMinutes())}:${pad(t.getUTCSeconds())}.0000`;
+  const fraction = `${String(t.getUTCMilliseconds()).padStart(3, '0')}0`;
+  return `${t.getUTCFullYear()}-${HORIZONS_MONTHS[t.getUTCMonth()]}-${pad(t.getUTCDate())} ${pad(t.getUTCHours())}:${pad(t.getUTCMinutes())}:${pad(t.getUTCSeconds())}.${fraction}`;
 }
 
 /**
@@ -634,6 +743,158 @@ function stubPagedHorizons(rowsPerPage: number): void {
     }),
   );
 }
+
+/** Days in a month (0-based), proleptic Gregorian. */
+function daysInUtcMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+}
+
+/**
+ * The rows Horizons prints for a request, through STOP_TIME inclusive, at most `limit` of
+ * them. Written from Horizons' observed output rather than from the tool's arithmetic, so
+ * the tool is checked against Horizons and not against itself:
+ *
+ * - m / h / d steps are fixed durations.
+ * - mo / y steps advance the month or year field by the step count from the previous row.
+ *   When that period has no such day of the month, Horizons moves on one month or year at
+ *   a time until one does, and the series continues from the row it printed. Captured live:
+ *   5mo from 2026-01-31 prints Jul 31, Dec 31, May 31 …, and 3y from 2024-02-29 prints a
+ *   leap day every four years (`HORIZONS_5MO_FROM_JAN_31`, `HORIZONS_3Y_FROM_FEB_29`).
+ */
+function horizonsRowInstants(
+  startIso: string,
+  step: string,
+  stopIso: string,
+  limit: number,
+): Date[] {
+  const parsed = /^(\d+) ?(mo|[mhdy])$/i.exec(step);
+  if (!parsed) throw new Error(`Fixture cannot generate a series for step "${step}".`);
+  const size = Number(parsed[1]);
+  const unit = String(parsed[2]).toLowerCase();
+  const stop = new Date(stopIso).getTime();
+  const fixedMs = { m: 60_000, h: 3_600_000, d: 86_400_000 }[unit as 'm' | 'h' | 'd'];
+  const rows: Date[] = [];
+  let t = new Date(startIso);
+  while (rows.length < limit && t.getTime() <= stop) {
+    rows.push(t);
+    if (fixedMs !== undefined) {
+      t = new Date(t.getTime() + size * fixedMs);
+      continue;
+    }
+    const day = t.getUTCDate();
+    let year = t.getUTCFullYear();
+    let month = t.getUTCMonth();
+    if (unit === 'mo') month += size;
+    else year += size;
+    while (day > daysInUtcMonth(year + Math.floor(month / 12), month % 12)) {
+      if (unit === 'mo') month += 1;
+      else year += 1;
+    }
+    const next = new Date(t.getTime());
+    next.setUTCFullYear(year + Math.floor(month / 12), month % 12, day);
+    t = next;
+  }
+  // An advance past the representable range is NaN, which fails `<= stop` and ends the series.
+  return rows;
+}
+
+/** Horizons' row-count ceiling, from its refusal "Projected output length (~N) exceeds 90024". */
+const HORIZONS_PROJECTED_ROW_LIMIT = 90_024;
+
+/**
+ * A `fetch` stub that answers like Horizons does for the request it receives: the rows from
+ * START_TIME through STOP_TIME, or — when STOP_TIME is not after START_TIME, or the span
+ * projects more rows than Horizons will print — its refusal line with no ephemeris block.
+ * `dropRowAt` writes that row (0-based)
+ * in a layout the parse cannot read; `boundAfter` makes the stub answer a STOP_TIME past
+ * that instant with Horizons' out-of-span line, the way a target's data bound refuses;
+ * `appendStopRow` closes the block with one more row at STOP_TIME whenever the series
+ * ends before it, the off-series row Horizons prints to close some year-step spans.
+ */
+function stubHorizonsSeries(
+  options: {
+    appendStopRow?: boolean;
+    boundAfter?: { iso: string; line: string };
+    dropRowAt?: number;
+  } = {},
+): ReturnType<typeof vi.fn> {
+  const spy = vi.fn(async (url: string | URL) => {
+    const params = paramsOf(url);
+    const start = unquote(params.get('START_TIME'));
+    const stop = unquote(params.get('STOP_TIME'));
+    if (new Date(stop) <= new Date(start)) {
+      return new Response('API VERSION: 1.2\n\nBad dates -- start must be earlier than stop\n', {
+        status: 200,
+      });
+    }
+    if (options.boundAfter && new Date(stop) > new Date(options.boundAfter.iso)) {
+      return new Response(horizonsOutOfSpan(options.boundAfter.line), { status: 200 });
+    }
+    const instants = horizonsRowInstants(
+      start,
+      unquote(params.get('STEP_SIZE')),
+      stop,
+      HORIZONS_PROJECTED_ROW_LIMIT + 1,
+    );
+    if (instants.length > HORIZONS_PROJECTED_ROW_LIMIT) {
+      return new Response(
+        `API VERSION: 1.2\n\nProjected output length (~${instants.length}) exceeds ${HORIZONS_PROJECTED_ROW_LIMIT} -- change step-size\n`,
+        { status: 200 },
+      );
+    }
+    const last = instants.at(-1);
+    if (options.appendStopRow && last !== undefined && last.getTime() < new Date(stop).getTime()) {
+      instants.push(new Date(stop));
+    }
+    const rows = instants.map((t, i) =>
+      i === options.dropRowAt
+        ? `${horizonsDateColumn(t)}, , , 45.000000, 12.500000`
+        : `${horizonsDateColumn(t)}, , , 45.000000, 12.500000, 9.50, 5.0, 1.500000, 0.0`,
+    );
+    return new Response(horizonsGeocentric(rows), { status: 200 });
+  });
+  vi.stubGlobal('fetch', spy);
+  return spy;
+}
+
+/** The STOP_TIME of the n-th request (0-based) a stubbed `fetch` received, unquoted. */
+function sentStopTime(spy: ReturnType<typeof vi.fn>, call = 0): string {
+  return unquote(paramsOf(spy.mock.calls[call]?.[0]).get('STOP_TIME'));
+}
+
+/**
+ * Rows Horizons printed for `COMMAND='10'`, `STEP_SIZE='5mo'`, 2026-01-31 → 2160-01-31: the
+ * first fifteen, then row 201 and the last of the 313 rows. Each row after a month with no
+ * 31st is one month on from where the step landed, not a whole step on.
+ */
+const HORIZONS_5MO_FROM_JAN_31 = {
+  first15: [
+    '2026-01-31',
+    '2026-07-31',
+    '2026-12-31',
+    '2027-05-31',
+    '2027-10-31',
+    '2028-03-31',
+    '2028-08-31',
+    '2029-01-31',
+    '2029-07-31',
+    '2029-12-31',
+    '2030-05-31',
+    '2030-10-31',
+    '2031-03-31',
+    '2031-08-31',
+    '2032-01-31',
+  ],
+  row201: '2111-10-31',
+  last: '2159-10-31',
+  count: 313,
+};
+
+/**
+ * Rows Horizons printed for `COMMAND='10'`, `STEP_SIZE='3y'` from 2024-02-29: a leap day every
+ * four years, 2028 following 2024 rather than the whole step to 2036.
+ */
+const HORIZONS_3Y_FROM_FEB_29 = Array.from({ length: 19 }, (_unused, k) => `${2024 + 4 * k}-02-29`);
 
 /** The instant a truncation notice tells the caller to pass back as `start`. */
 function advertisedResumeInstant(notice: string | undefined): string {
@@ -773,6 +1034,290 @@ describe('astronomy_get_ephemeris — the advertised resume instant continues th
     expect(result.points.at(-1)?.time_utc).toBe('2028-02-29T00:00:00.000Z');
     expect(advertisedResumeInstant(merged.notice)).toBe('2032-02-29T00:00:00.000Z');
   });
+
+  const isoDay = (day: string) => `${day}T00:00:00.000Z`;
+
+  it('generates the rows Horizons printed for multi-count calendar steps', () => {
+    // Pins the fixture rule to live output, so the tests below compare the tool with Horizons.
+    const fiveMonth = horizonsRowInstants(
+      '2026-01-31T00:00:00.000Z',
+      '5mo',
+      '2160-01-31T00:00:00.000Z',
+      1000,
+    ).map((t) => t.toISOString());
+    expect(fiveMonth).toHaveLength(HORIZONS_5MO_FROM_JAN_31.count);
+    expect(fiveMonth.slice(0, 15)).toEqual(HORIZONS_5MO_FROM_JAN_31.first15.map(isoDay));
+    expect(fiveMonth[200]).toBe(isoDay(HORIZONS_5MO_FROM_JAN_31.row201));
+    expect(fiveMonth.at(-1)).toBe(isoDay(HORIZONS_5MO_FROM_JAN_31.last));
+
+    const threeYear = horizonsRowInstants(
+      '2024-02-29T00:00:00.000Z',
+      '3y',
+      '2096-02-29T00:00:00.000Z',
+      1000,
+    ).map((t) => t.toISOString());
+    expect(threeYear).toEqual(HORIZONS_3Y_FROM_FEB_29.map(isoDay));
+  });
+
+  it('keeps the fractional seconds Horizons prints in time_utc and in the resume start', async () => {
+    // Horizons echoes START_TIME's fraction on every row ("2026-Jan-01 00:00:30.500"), so
+    // time_utc carries it, and the resume start keeps page 2 on the caller's sub-second grid.
+    stubHorizonsSeries();
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2026-01-01T00:00:30.500Z',
+      stop: '2026-01-02T00:00:00Z',
+      step: '1m',
+    });
+    const result = await getEphemerisTool.handler(input, ctx);
+    const merged = mergedEphemerisOutput(result, ctx);
+    expect(result.points[0]?.time_utc).toBe('2026-01-01T00:00:30.500Z');
+    expect(result.points.at(-1)?.time_utc).toBe('2026-01-01T03:19:30.500Z');
+    expect(advertisedResumeInstant(merged.notice)).toBe('2026-01-01T03:20:30.500Z');
+    const block = getEphemerisTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text).toContain('- 2026-01-01T00:00:30.500Z:');
+  });
+
+  it.each([
+    // Transcribed from a live 3 h request whose START_TIME carried .500.
+    [
+      ' 2026-Jan-01 00:00:30.500, , ,  20.290840843,  31.548456026,   10.251,  3.801,  0.41587723378933,  1.6133501,',
+      '2026-01-01T00:00:30.500Z',
+    ],
+    // A fraction finer than a millisecond rounds, carrying into the next day when it must.
+    [
+      '2026-Jan-01 23:59:59.9996, , , 45.000000, 12.500000, 9.50, 5.0, 1.500000, 0.0',
+      '2026-01-02T00:00:00.000Z',
+    ],
+  ])('reads the row %j as %s', async (row, expected) => {
+    stubFetch(horizonsGeocentric([row]));
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '433;' });
+    const result = await getEphemerisTool.handler(input, ctx);
+    expect(result.points.map((p) => p.time_utc)).toEqual([expected]);
+  });
+});
+
+describe('astronomy_get_ephemeris — the request asks Horizons for one page', () => {
+  /**
+   * STOP_TIME is the 201st instant of the series — one row past the page, which is what
+   * marks the page truncated — or the requested stop when that comes first. Horizons
+   * refuses a span projecting past its row ceiling outright, with no ephemeris block, so
+   * the whole span is never requested.
+   */
+
+  /** Run one page of `433;` at `step` through `stop`, returning its surface and resume start. */
+  async function pageThrough(start: string, stop: string, step: string) {
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '433;', start, stop, step });
+    const result = await getEphemerisTool.handler(input, ctx);
+    const merged = mergedEphemerisOutput(result, ctx);
+    return {
+      times: result.points.map((p) => p.time_utc),
+      merged,
+      resume: merged.truncated ? advertisedResumeInstant(merged.notice) : undefined,
+    };
+  }
+
+  it.each([
+    // A year of one-minute rows: past Horizons' row ceiling if requested whole.
+    ['1m', '2026-01-01T00:00:00.000Z', '2027-01-01T00:00:00.000Z'],
+    ['10m', '2026-08-20T00:00:00.000Z', '2026-08-25T00:00:00.000Z'],
+    ['3 h', '2026-01-01T00:00:30.500Z', '2026-03-02T00:00:00.000Z'],
+    ['1d', '2026-01-01T00:00:00.000Z', '2027-06-01T00:00:00.000Z'],
+    ['1mo', '2026-01-31T00:00:00.000Z', '2060-01-31T00:00:00.000Z'],
+    ['1y', '2024-02-29T00:00:00.000Z', '2900-03-01T00:00:00.000Z'],
+    ['5mo', '2026-01-31T00:00:00.000Z', '2160-01-31T00:00:00.000Z'],
+    ['3y', '2024-02-29T00:00:00.000Z', '3000-01-01T00:00:00.000Z'],
+  ])(
+    'asks for exactly one row past the page at step "%s", returning the page the whole span would',
+    async (step, start, stop) => {
+      const spy = stubHorizonsSeries();
+      const page = await pageThrough(start, stop, step);
+      // The whole span's rows, as Horizons prints them without a bound on STOP_TIME.
+      const unbounded = horizonsRowInstants(start, step, stop, 201).map((t) => t.toISOString());
+      expect(sentStopTime(spy)).toBe(unbounded[200]);
+      expect(page.times).toEqual(unbounded.slice(0, 200));
+      expect(page.merged.truncated).toBe(true);
+      expect(page.resume).toBe(unbounded[200]);
+    },
+  );
+
+  it.each([
+    // The 201st instant itself: nothing past it was asked for.
+    ['the 201st instant', '1m', '2026-01-01T03:20:00Z', '2026-01-01T03:20:00.000Z'],
+    // A 25-row span.
+    ['a 25-row span', '1h', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00.000Z'],
+  ])(
+    'sends a stop at or before the 201st instant unchanged: %s',
+    async (_label, step, stop, sent) => {
+      const spy = stubHorizonsSeries();
+      const ctx = createMockContext({ errors: getEphemerisTool.errors });
+      const input = getEphemerisTool.input.parse({
+        designation: '433;',
+        start: '2026-01-01T00:00:00Z',
+        stop,
+        step,
+      });
+      await getEphemerisTool.handler(input, ctx);
+      expect(sentStopTime(spy)).toBe(sent);
+    },
+  );
+
+  // 2147483647d is the largest count Horizons reads, and its first advance leaves the Date range.
+  it.each(['2147483647d', '999999y', '999999mo'])(
+    'sends the requested stop for a step "%s" whose first advance passes it or leaves the date range',
+    async (step) => {
+      const spy = stubHorizonsSeries();
+      const result = await runToolContract(getEphemerisTool, {
+        designation: '433;',
+        start: '2026-01-01T00:00:00Z',
+        stop: '2026-01-02T00:00:00Z',
+        step,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(sentStopTime(spy)).toBe('2026-01-02T00:00:00.000Z');
+      const structured = result.structuredContent as { points: unknown[]; truncated: boolean };
+      expect(structured.points).toHaveLength(1);
+      expect(structured.truncated).toBe(false);
+    },
+  );
+
+  it('still reports a page that dropped a row as truncated while the span continues', async () => {
+    // With STOP_TIME one row past the page, a dropped row leaves 200 points and no row past
+    // them for the parse to see. One step past the last point is still inside the requested
+    // span, so the page is truncated all the same, and the resume start is that step.
+    const spy = stubHorizonsSeries({ dropRowAt: 50 });
+    const page = await pageThrough('2026-01-01T00:00:00Z', '2026-01-31T00:00:00Z', '1m');
+    expect(sentStopTime(spy)).toBe('2026-01-01T03:20:00.000Z');
+    expect(page.merged).toMatchObject({ truncated: true, shown: 200, dropped: 1 });
+    expect(page.times.at(-1)).toBe('2026-01-01T03:20:00.000Z');
+    expect(page.resume).toBe('2026-01-01T03:21:00.000Z');
+    expect(page.merged.notice).toMatch(/Dropped 1 of the rows/);
+  });
+
+  it('ends at the requested stop when the page that dropped a row reaches it', async () => {
+    // 201 rows asked for and exactly 201 in the span: one dropped leaves 200 points and the
+    // series complete, so the notice carries the dropped-row caveat and no continuation.
+    stubHorizonsSeries({ dropRowAt: 50 });
+    const page = await pageThrough('2026-01-01T00:00:00Z', '2026-01-01T03:20:00Z', '1m');
+    expect(page.merged).toMatchObject({ truncated: false, shown: 200, dropped: 1 });
+    expect(page.merged.notice).toMatch(/^Dropped 1 of the rows/);
+  });
+
+  it('returns the pages inside a target’s data bound and fails on the page that crosses it', async () => {
+    // Mars' data ends at 2599-12-31 23:58:50 UT. A stop past it reaches that bound only on
+    // the page whose 201 rows cross it; every page before that one comes back.
+    const spy = stubHorizonsSeries({
+      boundAfter: { iso: '2599-12-31T23:58:50.816Z', line: MARS_AFTER_SPAN },
+    });
+    const span = { designation: '499', stop: '2601-01-01T00:00:00Z', step: '1d' };
+    const ctx1 = createMockContext({ errors: getEphemerisTool.errors });
+    const first = await getEphemerisTool.handler(
+      getEphemerisTool.input.parse({ ...span, start: '2599-06-01T00:00:00Z' }),
+      ctx1,
+    );
+    const merged = mergedEphemerisOutput(first, ctx1);
+    expect(first.points).toHaveLength(200);
+    expect(merged.truncated).toBe(true);
+    const resume = advertisedResumeInstant(merged.notice);
+    expect(resume).toBe('2599-12-18T00:00:00.000Z');
+
+    const ctx2 = createMockContext({ errors: getEphemerisTool.errors });
+    const err = await captureRejected(() =>
+      getEphemerisTool.handler(getEphemerisTool.input.parse({ ...span, start: resume }), ctx2),
+    );
+    expect(err?.data?.reason).toBe('time_out_of_range');
+    expect(err?.message).toBe(
+      'Horizons has no ephemeris for Mars after A.D. 2599-DEC-31 23:58:50.8164 UT.',
+    );
+    expect(sentStopTime(spy, 1)).toBe('2600-07-06T00:00:00.000Z');
+  });
+
+  it('describes truncated as the span continuing past the returned rows', () => {
+    expect(getEphemerisTool.enrichment?.truncated.description).toContain(
+      'the requested span continues past the returned rows',
+    );
+  });
+
+  it.each([
+    // The 201st row is the requested stop, so the resume start is the stop itself.
+    ['201', '2026-01-01T03:20:00Z', ['2026-01-01T03:20:00.000Z']],
+    ['202', '2026-01-01T03:21:00Z', ['2026-01-01T03:20:00.000Z', '2026-01-01T03:21:00.000Z']],
+  ])(
+    'fetches the rows a %s-row span leaves past page 1, from the advertised resume start',
+    async (_rows, stop, rest) => {
+      stubHorizonsSeries();
+      const first = await pageThrough('2026-01-01T00:00:00Z', stop, '1m');
+      expect(first.times).toHaveLength(200);
+      expect(first.resume).toBe('2026-01-01T03:20:00.000Z');
+      const second = await pageThrough(String(first.resume), stop, '1m');
+      expect(second.times).toEqual(rest);
+      expect(second.merged.truncated).toBe(false);
+    },
+  );
+
+  it('fetches the stop row a 202-row span leaves when a dropped row ends page 1 one row late', async () => {
+    // Bounded at the 201st instant, a dropped row leaves page 1 ending on that instant, so
+    // the resume start is the 202nd — the requested stop.
+    stubHorizonsSeries({ dropRowAt: 10 });
+    const stop = '2026-01-01T03:21:00Z';
+    const first = await pageThrough('2026-01-01T00:00:00Z', stop, '1m');
+    expect(first.merged).toMatchObject({ truncated: true, shown: 200, dropped: 1 });
+    expect(first.resume).toBe('2026-01-01T03:21:00.000Z');
+    const second = await pageThrough(String(first.resume), stop, '1m');
+    expect(second.times).toEqual(['2026-01-01T03:21:00.000Z']);
+  });
+
+  it('resumes at the stop when Horizons closes a year series with a row at STOP_TIME', async () => {
+    // At a year step Horizons appends one row at STOP_TIME when the next on-series instant
+    // falls past it, e.g. 2900-Mar-01 after 2896-Feb-29. When that is the 201st row, one step
+    // past the 200th lies beyond stop, so the continuation is the stop instant itself.
+    const onSeries = horizonsRowInstants(
+      '2024-02-29T00:00:00.000Z',
+      '1y',
+      '9999-01-01T00:00:00.000Z',
+      200,
+    );
+    const lastLeapDay = onSeries.at(-1)!;
+    // March 1 of the following year: past the 200th row, before the next leap day.
+    const stop = `${lastLeapDay.getUTCFullYear() + 1}-03-01T00:00:00.000Z`;
+    const spy = stubHorizonsSeries({ appendStopRow: true });
+    const first = await pageThrough('2024-02-29T00:00:00Z', stop, '1y');
+    expect(first.times).toHaveLength(200);
+    expect(first.times.at(-1)).toBe(lastLeapDay.toISOString());
+    expect(first.merged.truncated).toBe(true);
+    expect(first.resume).toBe(stop);
+
+    // The advertised continuation, end to end. It asks for the single instant at the stop,
+    // sent as a 1 ms window; a stub that also closes that window with a row at STOP_TIME
+    // must still yield exactly the one row the first page left out.
+    const second = await pageThrough(String(first.resume), stop, '1y');
+    expect(sentStopTime(spy, 1)).toBe(new Date(Date.parse(stop) + 1).toISOString());
+    expect(second.times).toEqual([stop]);
+    expect(second.merged).toMatchObject({ truncated: false, shown: 1 });
+  });
+
+  it.each(['1h', '1mo', '1y'])(
+    'answers a stop equal to start at step "%s" with the one row at that instant',
+    async (step) => {
+      /**
+       * Horizons refuses START_TIME equal to STOP_TIME, so the request closes one millisecond
+       * later. The stub also closes that window with a row at STOP_TIME, the row Horizons
+       * appends to some year-step spans, so only the row at start may come back. Probed live
+       * on year and month steps (COMMAND='10', 2101-03-01 and 2096-02-29 with a 1 ms window),
+       * Horizons printed the start row alone.
+       */
+      const spy = stubHorizonsSeries({ appendStopRow: true });
+      const page = await pageThrough('2101-03-01T00:00:00Z', '2101-03-01T00:00:00Z', step);
+      expect(sentStopTime(spy)).toBe('2101-03-01T00:00:00.001Z');
+      expect(page.times).toEqual(['2101-03-01T00:00:00.000Z']);
+      expect(page.merged).toMatchObject({ truncated: false, shown: 1, cap: 200 });
+      expect(page.merged.notice).toBeUndefined();
+    },
+  );
 });
 
 describe('astronomy_get_ephemeris — unusable rows', () => {
@@ -1095,17 +1640,20 @@ describe('astronomy_get_ephemeris — error contracts', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('rejects a zero-length span (stop equal to start) with invalid_time_range', async () => {
+  it('rejects a single instant at the last millisecond of 9999, which no request can close', async () => {
     const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
     vi.stubGlobal('fetch', fetchSpy);
     const ctx = createMockContext({ errors: getEphemerisTool.errors });
     const input = getEphemerisTool.input.parse({
-      designation: '433;',
-      start: '2024-01-01T00:00:00Z',
-      stop: '2024-01-01T00:00:00Z',
+      designation: '10',
+      start: '9999-12-31T23:59:59.999Z',
+      stop: '9999-12-31T23:59:59.999Z',
     });
     const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
-    expect(err?.data?.reason).toBe('invalid_time_range');
+    expect(err?.data?.reason).toBe('invalid_time');
+    expect(err?.message).toBe(
+      'start and stop "9999-12-31T23:59:59.999Z" leave no later instant in year 9999 to close the request, the last calendar year JPL Horizons reads.',
+    );
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -1369,6 +1917,542 @@ describe('astronomy_get_ephemeris — a date outside the target’s Horizons spa
   });
 });
 
+/**
+ * Horizons' answer to `COMMAND='Mars'`, transcribed from a live request: a bare major-body
+ * name matches the planet, its barycenter, and every spacecraft named for it, and Horizons
+ * lists them by ID number instead of printing an ephemeris.
+ */
+const HORIZONS_MARS_MULTI_MATCH = [
+  'API VERSION: 1.2',
+  'API SOURCE: NASA/JPL Horizons API',
+  '',
+  '*******************************************************************************',
+  ' Multiple major-bodies match string "MARS*"',
+  '',
+  '  ID#      Name                               Designation  IAU/aliases/other',
+  '  -------  ---------------------------------- -----------  -------------------',
+  '        4  Mars Barycenter',
+  '      499  Mars',
+  '       -3  Mars Orbiter Mission (spacecraft)  2013-060A    MOM Mangalyaan',
+  '      -41  Mars Express (spacecraft)          2003-022A    MEX',
+  '      -53  Mars Odyssey (spacecraft)          2001-013A',
+  '     -530  Mars Pathfinder (spacecraft)       1996-068A    MPF',
+  '      -74  Mars Reconnaissance Orbiter (spacec2005-029A    MRO',
+  '      -76  Mars Science Laboratory (spacecraft2011-070A    Curiosity MSL',
+  '     -143  ExoMars16 TGO (spacecraft)         2016-017A',
+  '     -168  Mars2020 (spacecraft)              2020-052A    Ingenuity Perseveran',
+  ' ',
+  '   Number of matches =          10 . Use ID# to make unique selection.',
+  '*******************************************************************************',
+].join('\n');
+
+/** A multi-match list of `count` bodies, in Horizons' layout, for the candidate cap. */
+function horizonsMultiMatch(count: number): string {
+  const rows = Array.from(
+    { length: count },
+    (_unused, i) => `${String(-1000 - i).padStart(9)}  ${`Probe ${i} (spacecraft)`.padEnd(34)}`,
+  );
+  return [
+    ' Multiple major-bodies match string "PROBE*"',
+    '',
+    '  ID#      Name                               Designation  IAU/aliases/other',
+    '  -------  ---------------------------------- -----------  -------------------',
+    ...rows,
+    ' ',
+    `   Number of matches = ${String(count).padStart(11)} . Use ID# to make unique selection.`,
+  ].join('\n');
+}
+
+describe('astronomy_get_ephemeris — a name matching several major bodies', () => {
+  /**
+   * Horizons gives this answer identically every time, so it is not the retryable outage.
+   * The caller needs one of the listed ID numbers, so the error carries them.
+   */
+  it('fails ambiguous_designation listing every candidate ID, on both surfaces', async () => {
+    stubFetch(HORIZONS_MARS_MULTI_MATCH);
+    const result = await runToolContract(getEphemerisTool, {
+      designation: 'Mars',
+      start: '2026-01-01T00:00:00Z',
+      stop: '2026-01-02T00:00:00Z',
+      step: '1h',
+    });
+    const err = errorEnvelope(result);
+    const hint = declaredRecovery(getEphemerisTool.errors, 'ambiguous_designation');
+    expect(result.isError).toBe(true);
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('ambiguous_designation');
+    expect(err?.data?.recovery?.hint).toBe(hint);
+    expect(err?.message).toBe(
+      '"Mars" matches 10 JPL Horizons major bodies: 4 (Mars Barycenter), 499 (Mars), -3 (Mars Orbiter Mission (spacecraft)), -41 (Mars Express (spacecraft)), -53 (Mars Odyssey (spacecraft)), -530 (Mars Pathfinder (spacecraft)), -74 (Mars Reconnaissance Orbiter (spacec), -76 (Mars Science Laboratory (spacecraft), -143 (ExoMars16 TGO (spacecraft)), -168 (Mars2020 (spacecraft)).',
+    );
+    const text = firstText(result);
+    expect(text).toContain('499 (Mars)');
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text).toContain('(reason ambiguous_designation');
+    expect(text).not.toMatch(/retry in a few minutes/);
+    expect(declaredRetryable(getEphemerisTool.errors, 'ambiguous_designation')).toBeUndefined();
+  });
+
+  it('carries the candidates as data a structured client can pick from', async () => {
+    const err = await serviceRejection(HORIZONS_MARS_MULTI_MATCH);
+    expect(err).toBeInstanceOf(McpError);
+    expect(err?.data).toMatchObject({
+      reason: 'ambiguous_designation',
+      match_count: 10,
+      candidates: expect.arrayContaining([{ id: '499', name: 'Mars' }]),
+    });
+    const data = err?.data as { candidates: { id: string }[] } | undefined;
+    expect(data?.candidates.map((c) => c.id)).toEqual([
+      '4',
+      '499',
+      '-3',
+      '-41',
+      '-53',
+      '-530',
+      '-74',
+      '-76',
+      '-143',
+      '-168',
+    ]);
+  });
+
+  it('lists at most 20 candidates and says how many Horizons matched', async () => {
+    const err = await serviceRejection(horizonsMultiMatch(25));
+    const data = err?.data as { candidates: unknown[]; match_count: number };
+    expect(data.candidates).toHaveLength(20);
+    expect(data.match_count).toBe(25);
+    expect(err?.message).toMatch(/^"499" matches 25 JPL Horizons major bodies\. The first 20: /);
+    expect(err?.message).toContain('-1019 (Probe 19 (spacecraft))');
+    expect(err?.message).not.toContain('-1020');
+  });
+
+  it('still fails ambiguous_designation when the list carries no readable row', async () => {
+    const err = await serviceRejection(' Multiple major-bodies match string "MARS*"\n');
+    expect(err?.data?.reason).toBe('ambiguous_designation');
+    expect(err?.message).toBe('"499" matches several JPL Horizons major bodies.');
+  });
+});
+
+describe('astronomy_get_ephemeris — a designation containing an apostrophe', () => {
+  /**
+   * Horizons reads COMMAND inside single quotes with no escape for one within it, so the
+   * quoted "6P/d'Arrest" reached its search as "6P/d". Sent unquoted, the whole name
+   * arrives and still matches nothing. The comet resolves only by its designation form, so
+   * the tool refuses the name before any request and says which form works.
+   */
+  it.each([["6P/d'Arrest"], ["d'Arrest"], ["O'Brien"]])(
+    'fails body_not_found for %s without reaching Horizons, on both surfaces',
+    async (designation) => {
+      const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
+      vi.stubGlobal('fetch', fetchSpy);
+      const result = await runToolContract(getEphemerisTool, {
+        designation,
+        start: '2026-01-01T00:00:00Z',
+        stop: '2026-01-02T00:00:00Z',
+        step: '1h',
+      });
+      const err = errorEnvelope(result);
+      expect(result.isError).toBe(true);
+      expect(err?.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(err?.data?.reason).toBe('body_not_found');
+      expect(err?.data?.recovery?.hint).toBe(
+        declaredRecovery(getEphemerisTool.errors, 'body_not_found'),
+      );
+      expect(err?.message).toBe(
+        `Designation "${designation}" contains an apostrophe, which the JPL Horizons search cannot match. Use a record-resolving form instead, such as "DES=6P;CAP" for 6P/d'Arrest.`,
+      );
+      expect(firstText(result)).toContain('(reason body_not_found');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('states the same mechanism in the designation description and the error contract', () => {
+    const description = getEphemerisTool.input.shape.designation.description ?? '';
+    const when = getEphemerisTool.errors?.find((e) => e.reason === 'body_not_found')?.when ?? '';
+    for (const text of [description, when]) {
+      expect(text).toContain('apostrophe, which the Horizons search cannot match');
+      expect(text).toContain('outside printable ASCII, which Horizons refuses');
+    }
+  });
+
+  it('sends the designation form the error recommends to Horizons verbatim', async () => {
+    const fetchSpy = stubOneRow(false);
+    const result = await runToolContract(getEphemerisTool, {
+      designation: 'DES=6P;CAP',
+      start: '2026-01-01T00:00:00Z',
+      stop: '2026-01-02T00:00:00Z',
+      step: '1h',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(paramsOf(fetchSpy.mock.calls[0]?.[0]).get('COMMAND')).toBe("'DES=6P;CAP'");
+  });
+});
+
+/** Live Horizons answer, HTTP 400, to `COMMAND='6P/d’Arrest'` (a typographic apostrophe). */
+const COMMAND_NOT_ASCII_400 =
+  '{"message":"invalid value specified for query parameter \'COMMAND\': invalid character(s) found (must be ASCII hex code 0x20-0x7f)","code":"400"}';
+
+describe('astronomy_get_ephemeris — a designation outside printable ASCII', () => {
+  const DAY = { start: '2026-01-01T00:00:00Z', stop: '2026-01-02T00:00:00Z', step: '1h' };
+
+  /**
+   * Horizons answers any COMMAND character outside printable ASCII with HTTP 400, whatever
+   * the name, so the tool refuses such a designation before any request and names the
+   * record-resolving forms that reach the object.
+   */
+  it.each([
+    ['Šteins'],
+    ['2867 Šteins'],
+    ['6P/d’Arrest'],
+    ['‘Oumuamua'],
+    ['dʼArrest'],
+    [`433;${String.fromCharCode(0x7f)}`],
+    [`433;${String.fromCharCode(0x09)}`],
+  ])(
+    'fails body_not_found for %j without reaching Horizons, on both surfaces',
+    async (designation) => {
+      const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
+      vi.stubGlobal('fetch', fetchSpy);
+      const result = await runToolContract(getEphemerisTool, { designation, ...DAY });
+      const err = errorEnvelope(result);
+      expect(result.isError).toBe(true);
+      expect(err?.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(err?.data?.reason).toBe('body_not_found');
+      expect(err?.data?.recovery?.hint).toBe(
+        declaredRecovery(getEphemerisTool.errors, 'body_not_found'),
+      );
+      expect(err?.message).toBe(
+        `Designation "${designation}" contains a character outside printable ASCII, the only characters JPL Horizons accepts. Use a record-resolving form instead, such as "2867;" for the asteroid 2867 Šteins or "DES=6P;CAP" for the comet 6P/d'Arrest.`,
+      );
+      expect(firstText(result)).toContain('(reason body_not_found');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('sends a designation at both ends of printable ASCII', async () => {
+    const fetchSpy = stubOneRow(false);
+    const result = await runToolContract(getEphemerisTool, { designation: '433; ~', ...DAY });
+    expect(result.isError).toBeFalsy();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(paramsOf(fetchSpy.mock.calls[0]?.[0]).get('COMMAND')).toBe("'433; ~'");
+  });
+});
+
+describe('astronomy_get_ephemeris — an HTTP 400 from Horizons', () => {
+  const DAY = { start: '2026-01-01T00:00:00Z', stop: '2026-01-02T00:00:00Z', step: '1h' };
+
+  /**
+   * Horizons answers a parameter value it refuses with HTTP 400, identically on every
+   * attempt, so it is a typed input refusal naming the input — never the retryable outage.
+   * The COMMAND body is the live one; the others reuse its wording for another parameter.
+   */
+  it.each([
+    [COMMAND_NOT_ASCII_400, 'designation'],
+    [COMMAND_NOT_ASCII_400.replace('COMMAND', 'START_TIME'), 'start'],
+    [COMMAND_NOT_ASCII_400.replace('COMMAND', 'STOP_TIME'), 'stop'],
+    [COMMAND_NOT_ASCII_400.replace('COMMAND', 'STEP_SIZE'), 'step'],
+    [COMMAND_NOT_ASCII_400.replace('COMMAND', 'SITE_COORD'), 'the observer coordinates'],
+    [COMMAND_NOT_ASCII_400.replace('COMMAND', 'CAL_TYPE'), 'a request parameter'],
+    ['Bad Request', 'a request parameter'],
+  ])(
+    'fails request_rejected on the first attempt for %s, on both surfaces',
+    async (body, input) => {
+      const fetchSpy = vi.fn(async () => new Response(body, { status: 400 }));
+      vi.stubGlobal('fetch', fetchSpy);
+      const result = await runToolContract(getEphemerisTool, { designation: '433;', ...DAY });
+      const err = errorEnvelope(result);
+      expect(result.isError).toBe(true);
+      expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err?.data?.reason).toBe('request_rejected');
+      expect(err?.data?.recovery?.hint).toBe(
+        declaredRecovery(getEphemerisTool.errors, 'request_rejected'),
+      );
+      expect(err?.message).toBe(
+        `JPL Horizons refused the request for "433;": it rejected the value sent for ${input}.`,
+      );
+      expect(firstText(result)).toContain('(reason request_rejected');
+      expect(firstText(result)).not.toContain('ASCII hex code');
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('carries only the typed reason and hint, no upstream internals', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(COMMAND_NOT_ASCII_400, { status: 400 })),
+    );
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({ designation: '433;', ...DAY });
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.data).toEqual({
+      reason: 'request_rejected',
+      recovery: { hint: declaredRecovery(getEphemerisTool.errors, 'request_rejected') },
+    });
+    expectNoUpstreamLeak(err?.data);
+  });
+});
+
+/** A resolved-target header followed by one Horizons refusal line, as a live response ends. */
+function horizonsRefusal(line: string): string {
+  return [
+    'API VERSION: 1.2',
+    'API SOURCE: NASA/JPL Horizons API',
+    '',
+    '*******************************************************************************',
+    'JPL/HORIZONS                 433 Eros (A898 PA)            2026-Oct-15 11:24:45',
+    '*******************************************************************************',
+    '',
+    line,
+  ].join('\n');
+}
+
+describe('astronomy_get_ephemeris — Horizons refusals a retry cannot change', () => {
+  /**
+   * Horizons gives each of these answers identically every time, so none is the retryable
+   * horizons_unavailable. Lines transcribed from live responses to input the tool accepted.
+   */
+  it('fails a step longer than the target’s data with invalid_step, on both surfaces', async () => {
+    // Live: COMMAND='433;' STEP_SIZE='2147483647d'.
+    stubFetch(horizonsRefusal('STEP_SIZE too big, exceeds available span.'));
+    const result = await runToolContract(getEphemerisTool, {
+      designation: '433;',
+      start: '2026-01-01T00:00:00Z',
+      stop: '2026-01-02T00:00:00Z',
+      step: '2147483647d',
+    });
+    const err = errorEnvelope(result);
+    const hint = declaredRecovery(getEphemerisTool.errors, 'invalid_step');
+    expect(result.isError).toBe(true);
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_step');
+    expect(err?.message).toBe(
+      'Step "2147483647d" is longer than the span of data JPL Horizons holds for "433;".',
+    );
+    expect(err?.data?.recovery?.hint).toBe(hint);
+    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+    expect(firstText(result)).not.toMatch(/retry in a few minutes/);
+  });
+
+  it('rejects a step count Horizons cannot read before the request', async () => {
+    // Live: STEP_SIZE='2147483648d' and '2147483648m' come back "Cannot read numeric value";
+    // 2147483647 reads.
+    const fetchSpy = stubOneRow(false);
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const tooBig = await captureRejected(() =>
+      getEphemerisTool.handler(
+        getEphemerisTool.input.parse({ designation: '433;', step: '2147483648m' }),
+        ctx,
+      ),
+    );
+    expect(tooBig?.data?.reason).toBe('invalid_step');
+    expect(tooBig?.message).toBe(
+      'Invalid step "2147483648m". Expected a positive count up to 2147483647 plus m, h, d, mo, or y, e.g. "10m".',
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    await getEphemerisTool.handler(
+      getEphemerisTool.input.parse({ designation: '433;', step: '2147483647m' }),
+      createMockContext({ errors: getEphemerisTool.errors }),
+    );
+    expect(unquote(paramsOf(fetchSpy.mock.calls[0]?.[0]).get('STEP_SIZE'))).toBe('2147483647m');
+  });
+
+  it('fails Earth as the target with observer_is_target, on both surfaces', async () => {
+    // Live: COMMAND='399' from the geocenter.
+    stubFetch(horizonsRefusal('Observer table for observer=target disallowed.'));
+    const result = await runToolContract(getEphemerisTool, {
+      designation: '399',
+      start: '2026-01-01T00:00:00Z',
+      stop: '2026-01-02T00:00:00Z',
+    });
+    const err = errorEnvelope(result);
+    const hint = declaredRecovery(getEphemerisTool.errors, 'observer_is_target');
+    expect(result.isError).toBe(true);
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('observer_is_target');
+    expect(err?.message).toBe(
+      '"399" resolves to Earth, the body the observer is on, and JPL Horizons has no observer table for it.',
+    );
+    expect(err?.data?.recovery?.hint).toBe(hint);
+    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+  });
+
+  it('rejects a blank designation at the schema, before the request', async () => {
+    // Live: COMMAND=' ' comes back "missing COMMAND content ... cannot proceed".
+    const fetchSpy = stubOneRow(false);
+    const result = await runToolContract(getEphemerisTool, { designation: '  ' });
+    expect(result.isError).toBe(true);
+    expect(errorEnvelope(result)?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(errorEnvelope(result)?.message).toContain('designation must not be blank.');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    // Live: "Observer geodetic altitude must be LESS than 40000 km" / "MORE than -20 km".
+    [40_000_000, false],
+    [39_999_999, true],
+    [-20_000, false],
+    [-19_999, true],
+  ])('takes topocentric elevation %d m: %s', async (elevation, accepted) => {
+    const fetchSpy = stubOneRow(true);
+    const result = await runToolContract(getEphemerisTool, {
+      designation: '433;',
+      ...SEATTLE,
+      elevation,
+      start: '2024-01-01T00:00:00Z',
+      stop: '2024-01-01T01:00:00Z',
+    });
+    if (accepted) {
+      expect(result.isError).toBeFalsy();
+      expect(paramsOf(fetchSpy.mock.calls[0]?.[0]).get('SITE_COORD')).toBe(
+        `'${SEATTLE.longitude},${SEATTLE.latitude},${(elevation / 1000).toFixed(6)}'`,
+      );
+      return;
+    }
+    const err = errorEnvelope(result);
+    const hint = declaredRecovery(getEphemerisTool.errors, 'invalid_elevation');
+    expect(result.isError).toBe(true);
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('invalid_elevation');
+    expect(err?.message).toBe(
+      `Observer elevation ${elevation} m is outside the range JPL Horizons accepts for an observer: more than -20000 and less than 40000000 meters.`,
+    );
+    expect(err?.data?.recovery?.hint).toBe(hint);
+    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([50_000_000, -50_000])(
+    'ignores elevation %d m on a geocentric request',
+    async (elevation) => {
+      // Elevation only places an observer; with no latitude/longitude there is none, so the
+      // observer-altitude range Horizons enforces never applies and the call succeeds.
+      const fetchSpy = stubOneRow(false);
+      const result = await runToolContract(getEphemerisTool, {
+        designation: '433;',
+        elevation,
+        start: '2024-01-01T00:00:00Z',
+        stop: '2024-01-01T01:00:00Z',
+      });
+      expect(result.isError).toBeFalsy();
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const params = paramsOf(fetchSpy.mock.calls[0]?.[0]);
+      expect(params.get('CENTER')).toBe("'500@399'");
+      expect(params.has('SITE_COORD')).toBe(false);
+      expect((result.structuredContent as EphemerisOutputType).points).toHaveLength(1);
+    },
+  );
+});
+
+describe('astronomy_get_ephemeris — dates Horizons cannot read', () => {
+  /**
+   * Measured live against Horizons' START_TIME parser with the ISO form this tool sends:
+   * `+010000-…` comes back "Cannot interpret date", `-000100-…` asks for BC notation, and
+   * `0000-…` / `0099-…` are read as 2000 and 1999 — a different instant, answered silently.
+   * Years 0100 through 9999 read as written. Anything else is refused before the request.
+   */
+  it.each([
+    [
+      'an expanded year past 9999',
+      '+010000-01-01T00:00:00.000Z',
+      '+010000-01-02T00:00:00.000Z',
+      '+010000-01-01T00:00:00.000Z',
+    ],
+    [
+      'a negative year',
+      '-000100-01-01T00:00:00Z',
+      '-000100-01-02T00:00:00Z',
+      '-000100-01-01T00:00:00.000Z',
+    ],
+    [
+      'a year below 0100',
+      '0099-01-01T00:00:00Z',
+      '0099-01-02T00:00:00Z',
+      '0099-01-01T00:00:00.000Z',
+    ],
+    ['year 0000', '0000-01-01T00:00:00Z', '0000-01-02T00:00:00Z', '0000-01-01T00:00:00.000Z'],
+  ])(
+    'rejects %s with invalid_time before reaching Horizons, on both surfaces',
+    async (_label, start, stop, sentStart) => {
+      const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
+      vi.stubGlobal('fetch', fetchSpy);
+      const result = await runToolContract(getEphemerisTool, { designation: '433;', start, stop });
+      const err = errorEnvelope(result);
+      const hint = declaredRecovery(getEphemerisTool.errors, 'invalid_time');
+      expect(result.isError).toBe(true);
+      expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err?.data?.reason).toBe('invalid_time');
+      expect(err?.message).toBe(
+        `start "${sentStart}" is outside years 0100 through 9999, the calendar years JPL Horizons reads.`,
+      );
+      expect(err?.data?.recovery?.hint).toBe(hint);
+      expect(hint).toContain('0100 through 9999');
+      expect(firstText(result)).toContain(`Recovery: ${hint}`);
+      expect(firstText(result)).not.toMatch(/retry in a few minutes/);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [
+      'an explicit stop',
+      { stop: '+010000-01-01T00:00:00Z' },
+      'stop "+010000-01-01T00:00:00.000Z" is outside years 0100 through 9999, the calendar years JPL Horizons reads.',
+    ],
+    /**
+     * The default 24-hour span carries a late start past the last readable year. The caller
+     * passed no stop, so the message says the one it names is the default.
+     */
+    [
+      'the default stop',
+      {},
+      'stop "+010000-01-01T12:00:00.000Z" (the default, 24 hours after start) is outside years 0100 through 9999, the calendar years JPL Horizons reads.',
+    ],
+  ])('names the stop when only %s leaves the readable years', async (_label, stop, message) => {
+    const fetchSpy = vi.fn(async () => new Response('unused', { status: 200 }));
+    vi.stubGlobal('fetch', fetchSpy);
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '10',
+      start: '9999-12-31T12:00:00Z',
+      ...stop,
+    });
+    const err = await captureRejected(() => getEphemerisTool.handler(input, ctx));
+    expect(err?.data?.reason).toBe('invalid_time');
+    expect(err?.message).toBe(message);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('sends the first and last readable years unchanged', async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string | URL) =>
+        new Response(
+          horizonsGeocentric([
+            '0100-Jan-01 00:00:00.0000, , , 45.000000, 12.500000, 9.50, 5.0, 1.500000, 0.0',
+          ]),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+    for (const [start, stop] of [
+      ['0100-01-01T00:00:00Z', '0100-01-02T00:00:00Z'],
+      ['9999-12-30T00:00:00Z', '9999-12-31T23:59:59.999Z'],
+    ] as const) {
+      const ctx = createMockContext({ errors: getEphemerisTool.errors });
+      const input = getEphemerisTool.input.parse({ designation: '10', start, stop, step: '1d' });
+      await getEphemerisTool.handler(input, ctx);
+    }
+    const sent = fetchSpy.mock.calls.map((c) => {
+      const params = paramsOf(c[0]);
+      return [unquote(params.get('START_TIME')), unquote(params.get('STOP_TIME'))];
+    });
+    expect(sent).toEqual([
+      ['0100-01-01T00:00:00.000Z', '0100-01-02T00:00:00.000Z'],
+      ['9999-12-30T00:00:00.000Z', '9999-12-31T23:59:59.999Z'],
+    ]);
+  });
+});
+
 describe('astronomy_get_ephemeris — the target Horizons resolved', () => {
   it('reports the resolved target when a bare name matches an unintended object', async () => {
     // Live: COMMAND='Eros' resolves by name search to Pluto's moon Kerberos, not 433 Eros,
@@ -1494,57 +2578,185 @@ const DECAYED_ELEMENTS = JSON.stringify([
 ]);
 
 /**
+ * A real ISS (NORAD 25544) element set at epoch 2026-10-14T08:06:39Z, as CelesTrak serves
+ * it. Ten days from 2026-10-14T16:00Z over Seattle hold six morning passes that come out
+ * of Earth's shadow after peak — sunlit for minutes over a dark sky while dark at the peak
+ * instant itself — and one whose sunlit stretch is a glimpse below 2° just before it sets.
+ */
+const ISS_ELEMENTS_2026 = JSON.stringify([
+  {
+    OBJECT_NAME: 'ISS (ZARYA)',
+    OBJECT_ID: '1998-067A',
+    EPOCH: '2026-10-14T08:06:39.057984',
+    MEAN_MOTION: 15.48861773,
+    ECCENTRICITY: 0.00067245,
+    INCLINATION: 51.6325,
+    RA_OF_ASC_NODE: 70.4557,
+    ARG_OF_PERICENTER: 261.592,
+    MEAN_ANOMALY: 98.4307,
+    EPHEMERIS_TYPE: 0,
+    CLASSIFICATION_TYPE: 'U',
+    NORAD_CAT_ID: 25544,
+    ELEMENT_SET_NO: 999,
+    REV_AT_EPOCH: 59022,
+    BSTAR: 0.00011949953,
+    MEAN_MOTION_DOT: 6.109e-5,
+    MEAN_MOTION_DDOT: 0,
+  },
+]);
+
+/**
  * The exact pass geometry the ISS fixture yields over a three-day window from
  * 2024-01-01. Pinned rather than asserted structurally so a change to how the element
  * set reaches SGP4 has to reproduce the same orbit, down to the azimuths — a
- * structural assertion would pass on a subtly different propagation.
+ * structural assertion would pass on a subtly different propagation. The second and
+ * fourth are lit from their rise until they enter Earth's shadow just before peak.
  */
 const ISS_BASELINE_PASSES = [
   {
-    rise_utc: '2024-01-01T01:06:00.000Z',
+    rise_utc: '2024-01-01T01:05:49.000Z',
     peak_utc: '2024-01-01T01:11:00.000Z',
-    set_utc: '2024-01-01T01:17:00.000Z',
+    set_utc: '2024-01-01T01:16:37.000Z',
     peak_altitude_degrees: 47.88101721069092,
-    rise_azimuth_degrees: 290.5091005594054,
-    set_azimuth_degrees: 95.65353075015668,
+    rise_azimuth_degrees: 290.1645601711657,
+    set_azimuth_degrees: 95.86939455210046,
     peak_azimuth_degrees: 357.5385040257746,
-    duration_seconds: 660,
+    duration_seconds: 648,
     sunlit: true,
+    visible_start_utc: '2024-01-01T01:07:12.000Z',
+    visible_end_utc: '2024-01-01T01:14:52.000Z',
+    visible_start_altitude_degrees: 5.8384832729708664,
+    visible_end_altitude_degrees: 7.746476227979738,
+    visible_start_azimuth_degrees: 293.4044264119559,
+    visible_end_azimuth_degrees: 91.42189531430563,
   },
   {
-    rise_utc: '2024-01-02T01:55:00.000Z',
+    rise_utc: '2024-01-01T02:42:41.000Z',
+    peak_utc: '2024-01-01T02:48:00.000Z',
+    set_utc: '2024-01-01T02:53:23.000Z',
+    peak_altitude_degrees: 47.84535628978751,
+    rise_azimuth_degrees: 292.5579899048589,
+    set_azimuth_degrees: 131.46174800469095,
+    peak_azimuth_degrees: 214.54116837578965,
+    duration_seconds: 642,
+    sunlit: false,
+    visible_start_utc: '2024-01-01T02:42:41.000Z',
+    visible_end_utc: '2024-01-01T02:47:51.000Z',
+    visible_start_altitude_degrees: 0,
+    visible_end_altitude_degrees: 47.15182500537231,
+    visible_start_azimuth_degrees: 292.5579899048589,
+    visible_end_azimuth_degrees: 224.6167861119709,
+  },
+  {
+    rise_utc: '2024-01-02T01:54:48.000Z',
     peak_utc: '2024-01-02T02:00:00.000Z',
-    set_utc: '2024-01-02T02:06:00.000Z',
+    set_utc: '2024-01-02T02:05:38.000Z',
     peak_altitude_degrees: 68.43510558663432,
-    rise_azimuth_degrees: 293.29664528607714,
-    set_azimuth_degrees: 121.46507035829904,
+    rise_azimuth_degrees: 293.38176763227557,
+    set_azimuth_degrees: 121.40388837022255,
     peak_azimuth_degrees: 244.21337319425083,
-    duration_seconds: 660,
+    duration_seconds: 650,
     sunlit: true,
+    visible_start_utc: '2024-01-02T01:54:48.000Z',
+    visible_end_utc: '2024-01-02T02:02:28.000Z',
+    visible_start_altitude_degrees: 0,
+    visible_end_altitude_degrees: 19.05125870667367,
+    visible_start_azimuth_degrees: 293.38176763227557,
+    visible_end_azimuth_degrees: 125.36779875978817,
   },
   {
-    rise_utc: '2024-01-03T01:07:00.000Z',
+    rise_utc: '2024-01-02T03:31:54.000Z',
+    peak_utc: '2024-01-02T03:36:30.000Z',
+    set_utc: '2024-01-02T03:41:07.000Z',
+    peak_altitude_degrees: 13.71553619636664,
+    rise_azimuth_degrees: 283.7663581970861,
+    set_azimuth_degrees: 166.0126003096907,
+    peak_azimuth_degrees: 225.30818926176948,
+    duration_seconds: 553,
+    sunlit: false,
+    visible_start_utc: '2024-01-02T03:31:54.000Z',
+    visible_end_utc: '2024-01-02T03:35:27.000Z',
+    visible_start_altitude_degrees: 0,
+    visible_end_altitude_degrees: 12.210035448530144,
+    visible_start_azimuth_degrees: 283.7663581970861,
+    visible_end_azimuth_degrees: 245.76089255998818,
+  },
+  {
+    rise_utc: '2024-01-03T01:06:55.000Z',
     peak_utc: '2024-01-03T01:12:30.000Z',
-    set_utc: '2024-01-03T01:18:00.000Z',
+    set_utc: '2024-01-03T01:17:47.000Z',
     peak_altitude_degrees: 77.21974981116315,
-    rise_azimuth_degrees: 293.2828498925305,
-    set_azimuth_degrees: 111.88315109193502,
+    rise_azimuth_degrees: 293.23855724506166,
+    set_azimuth_degrees: 112.02870967096754,
     peak_azimuth_degrees: 64.43069916478123,
-    duration_seconds: 660,
+    duration_seconds: 652,
     sunlit: true,
+    visible_start_utc: '2024-01-03T01:09:00.000Z',
+    visible_end_utc: '2024-01-03T01:17:19.000Z',
+    visible_start_altitude_degrees: 10.012451415939521,
+    visible_end_altitude_degrees: 1.7837723640269771,
+    visible_start_azimuth_degrees: 294.7307346777993,
+    visible_end_azimuth_degrees: 111.78315361640915,
   },
   {
-    rise_utc: '2024-01-03T02:44:00.000Z',
+    rise_utc: '2024-01-03T02:43:51.000Z',
     peak_utc: '2024-01-03T02:49:00.000Z',
-    set_utc: '2024-01-03T02:54:00.000Z',
+    set_utc: '2024-01-03T02:53:49.000Z',
     peak_altitude_degrees: 21.01892580792883,
-    rise_azimuth_degrees: 287.3507070518781,
-    set_azimuth_degrees: 154.68179815462565,
+    rise_azimuth_degrees: 287.9758465013465,
+    set_azimuth_degrees: 153.29909990961266,
     peak_azimuth_degrees: 216.31588576206866,
-    duration_seconds: 600,
+    duration_seconds: 598,
     sunlit: true,
+    visible_start_utc: '2024-01-03T02:43:51.000Z',
+    visible_end_utc: '2024-01-03T02:50:19.000Z',
+    visible_start_altitude_degrees: 0,
+    visible_end_altitude_degrees: 15.999792284182645,
+    visible_start_azimuth_degrees: 287.9758465013465,
+    visible_end_azimuth_degrees: 185.34647611355285,
   },
 ];
+
+/**
+ * A pass with every number loosened to nine decimal places. The same propagation lands a
+ * few bits apart in its last digits depending on what else has already run in the test
+ * worker, so an exact float pin fails on test order rather than on a change to the orbit;
+ * nine places still catch any real change in how the element set reaches SGP4.
+ */
+function approximately<P extends object>(pass: P): P {
+  return Object.fromEntries(
+    Object.entries(pass).map(([key, value]) => [
+      key,
+      typeof value === 'number' ? expect.closeTo(value, 9) : value,
+    ]),
+  ) as P;
+}
+
+/** The peak fields of a reported pass. */
+interface PeakFields {
+  peak_altitude_degrees: number;
+  peak_azimuth_degrees: number;
+  peak_utc: string;
+}
+
+/**
+ * A pass minus its peak. The peak is the highest 30-second scan sample, so a scan started
+ * off that grid — at a rise refined to the second — samples it at other instants; every
+ * other field is bisected to the second on the scan's own second grid and lands on the
+ * same instant from any whole-second start.
+ */
+function withoutPeak<P extends PeakFields>(pass: P | undefined) {
+  if (!pass) throw new Error('Expected a pass.');
+  const { peak_utc: _utc, peak_altitude_degrees: _alt, peak_azimuth_degrees: _az, ...rest } = pass;
+  return rest;
+}
+
+/** The two peaks are samples of the same pass, at most one scan step apart. */
+function expectPeakWithinOneStep(actual: PeakFields | undefined, expected: PeakFields | undefined) {
+  expect(
+    Math.abs(Date.parse(actual?.peak_utc ?? '') - Date.parse(expected?.peak_utc ?? '')),
+  ).toBeLessThanOrEqual(30_000);
+}
 
 describe('astronomy_get_satellite_passes — happy path', () => {
   it('reproduces the pinned ISS pass geometry over a three-day window', async () => {
@@ -1557,7 +2769,7 @@ describe('astronomy_get_satellite_passes — happy path', () => {
       start: '2024-01-01T00:00:00Z',
     });
     const result = await getSatellitePassesTool.handler(input, ctx);
-    expect(result.passes).toEqual(ISS_BASELINE_PASSES);
+    expect(result.passes).toEqual(ISS_BASELINE_PASSES.map(approximately));
   });
 
   it('fetches a TLE, propagates with SGP4, and returns a schema-conforming result', async () => {
@@ -1573,9 +2785,7 @@ describe('astronomy_get_satellite_passes — happy path', () => {
     expect(result).toEqual(expect.schemaMatching(getSatellitePassesTool.output));
     expect(result.norad_id).toBe(25544);
     expect(result.satellite_name).toBe('ISS (ZARYA)');
-    // Every returned pass is sunlit by contract (visible-only filter).
     for (const p of result.passes) {
-      expect(p.sunlit).toBe(true);
       expect(p.peak_altitude_degrees).toBeGreaterThanOrEqual(10);
       expect(new Date(p.set_utc).getTime()).toBeGreaterThan(new Date(p.rise_utc).getTime());
     }
@@ -1686,7 +2896,8 @@ describe('astronomy_get_satellite_passes — happy path', () => {
       }),
       createMockContext({ errors: getSatellitePassesTool.errors }),
     );
-    expect(resumed.passes[0]).toEqual(first);
+    expect(withoutPeak(resumed.passes[0])).toEqual(approximately(withoutPeak(first)));
+    expectPeakWithinOneStep(resumed.passes[0], first);
   });
 
   it('keeps a pass that rises one step after start', async () => {
@@ -1715,14 +2926,16 @@ describe('astronomy_get_satellite_passes — happy path', () => {
       }),
       createMockContext({ errors: getSatellitePassesTool.errors }),
     );
-    expect(shifted.passes[0]).toEqual(first);
+    expect(withoutPeak(shifted.passes[0])).toEqual(approximately(withoutPeak(first)));
+    expectPeakWithinOneStep(shifted.passes[0], first);
   });
 
   /**
-   * The baseline's first pass rises 2024-01-01T01:06:00Z and sets at 01:17:00Z. A one-day
-   * window placed so it closes at or around that rise tests the trailing edge; every start
-   * below sits on the same 30-second grid as the baseline's, so the samples coincide and
-   * the geometry has to match exactly.
+   * The baseline's first pass rises 2024-01-01T01:05:49Z — first seen above the horizon by
+   * the 01:06:00Z scan sample — and sets at 01:16:37Z. A one-day window placed so it
+   * closes at or around that rise tests the trailing edge; every start below sits on the
+   * same 30-second grid as the baseline's, so the samples coincide and the geometry has
+   * to match exactly.
    */
   const TRAILING_PASS = ISS_BASELINE_PASSES[0]!;
 
@@ -1738,7 +2951,7 @@ describe('astronomy_get_satellite_passes — happy path', () => {
     });
     expect(result.isError).toBeFalsy();
     const structured = result.structuredContent as { passes: (typeof TRAILING_PASS)[] };
-    expect(structured.passes.at(-1)).toEqual(TRAILING_PASS);
+    expect(structured.passes.at(-1)).toEqual(approximately(TRAILING_PASS));
     // The pass is followed to its real set, past the window's end.
     expect(new Date(TRAILING_PASS.set_utc).getTime()).toBeGreaterThan(
       new Date('2024-01-01T01:08:00Z').getTime(),
@@ -1759,7 +2972,7 @@ describe('astronomy_get_satellite_passes — happy path', () => {
       }),
       createMockContext({ errors: getSatellitePassesTool.errors }),
     );
-    expect(result.passes.at(-1)).toEqual(TRAILING_PASS);
+    expect(result.passes.at(-1)).toEqual(approximately(TRAILING_PASS));
   });
 
   it('leaves out a pass rising one step after the window ends', async () => {
@@ -1800,6 +3013,12 @@ describe('astronomy_get_satellite_passes — happy path', () => {
           peak_azimuth_degrees: 180.5555,
           duration_seconds: 372.48,
           sunlit: true,
+          visible_start_utc: '2024-01-01T00:02:13.000Z',
+          visible_end_utc: '2024-01-01T00:10:00.000Z',
+          visible_start_altitude_degrees: 21.98765432,
+          visible_end_altitude_degrees: 0,
+          visible_start_azimuth_degrees: 251.123456789,
+          visible_end_azimuth_degrees: 130.98765,
         },
       ],
     })[0];
@@ -1815,6 +3034,554 @@ describe('astronomy_get_satellite_passes — happy path', () => {
     expect(text).toContain('duration 372s [372.48]');
     expectExactCarried(text, 130.98765);
     expectExactCarried(text, 180.5555);
+    expect(text).toContain(
+      'visible_start_utc 2024-01-01T00:02:13.000Z alt 22.0° [21.98765432] az 251.1° [251.123456789]',
+    );
+    expect(text).toContain(
+      'visible_end_utc 2024-01-01T00:10:00.000Z alt 0.0° az 131.0° [130.98765]',
+    );
+  });
+});
+
+const RAD = Math.PI / 180;
+
+/**
+ * An independent second-by-second rescan of one element set from one observer, built
+ * directly on satellite.js and astronomy-engine with the thresholds the tool documents:
+ * above the horizon, Earth covering less than half the solar disc, and the Sun below −6°.
+ * It shares no code with the service's scan, so each edge the tool reports is checked
+ * against the 1 s answer rather than against itself.
+ */
+function oneSecondRescan(elementsJson: string, site: { latitude: number; longitude: number }) {
+  const [record] = OmmResponseSchema.parse(JSON.parse(elementsJson));
+  if (!record) throw new Error('The fixture carries no element set.');
+  const satrec = json2satrec(record);
+  const geodetic = { latitude: site.latitude * RAD, longitude: site.longitude * RAD, height: 0 };
+  const sky = new Observer(site.latitude, site.longitude, 0);
+  const state = (ms: number) => {
+    const t = new Date(ms);
+    const pv = propagate(satrec, t);
+    if (!pv) throw new Error(`The fixture does not propagate to ${t.toISOString()}.`);
+    const look = ecfToLookAngles(geodetic, eciToEcf(pv.position, gstime(t)));
+    return {
+      t,
+      position: pv.position,
+      elevation: look.elevation / RAD,
+      azimuth: (((look.azimuth / RAD) % 360) + 360) % 360,
+    };
+  };
+  const up = (ms: number) => state(ms).elevation > 0;
+  const visible = (ms: number) => {
+    const s = state(ms);
+    if (shadowFraction(sunPos(jday(s.t)).rsun, s.position) >= 0.5) return false;
+    const time = MakeTime(s.t);
+    const sun = Equator(Body.Sun, time, sky, true, true);
+    return Horizon(time, sky, sun.ra, sun.dec, 'normal').altitude < -6;
+  };
+  /**
+   * The whole second nearest `iso` at which `test` changes value — the first second on
+   * the far side of the change — from a 1 s scan across ±45 s.
+   */
+  const changeNear = (iso: string, test: (ms: number) => boolean): number => {
+    const around = Date.parse(iso);
+    let nearest: number | undefined;
+    let before = test(around - 46_000);
+    for (let ms = around - 45_000; ms <= around + 45_000; ms += 1000) {
+      const now = test(ms);
+      if (
+        now !== before &&
+        (nearest === undefined || Math.abs(ms - around) < Math.abs(nearest - around))
+      ) {
+        nearest = ms;
+      }
+      before = now;
+    }
+    if (nearest === undefined) throw new Error(`Nothing changes within 45 s of ${iso}.`);
+    return nearest;
+  };
+  return {
+    elevation: (iso: string) => state(Date.parse(iso)).elevation,
+    azimuth: (iso: string) => state(Date.parse(iso)).azimuth,
+    visible: (iso: string) => visible(Date.parse(iso)),
+    horizonCrossingNear: (iso: string) => changeNear(iso, up),
+    visibilityChangeNear: (iso: string) => changeNear(iso, visible),
+  };
+}
+
+/** Run the tool over one element set from Seattle, through the handler. */
+async function seattlePasses(
+  elementsJson: string,
+  args: { start: string; days: number; timezone?: string },
+) {
+  stubFetch(elementsJson);
+  return getSatellitePassesTool.handler(
+    getSatellitePassesTool.input.parse({ norad_id: 25544, ...SEATTLE, ...args }),
+    createMockContext({ errors: getSatellitePassesTool.errors }),
+  );
+}
+
+/** The two windows the pass-geometry checks run over: one per real element set. */
+const PASS_WINDOWS = [
+  {
+    label: 'the 2024 fixture, three days',
+    elements: ISS_ELEMENTS,
+    start: '2024-01-01T00:00:00Z',
+    days: 3,
+    passCount: 6,
+  },
+  {
+    label: 'the 2026 element set, ten days',
+    elements: ISS_ELEMENTS_2026,
+    start: '2026-10-14T16:00:00Z',
+    days: 10,
+    passCount: 17,
+  },
+];
+
+describe('astronomy_get_satellite_passes — rise and set to the second', () => {
+  it.each(PASS_WINDOWS)(
+    'reports every rise and set within 1 s of a 1 s rescan, with the azimuth there and the duration between ($label)',
+    async ({ elements, start, days, passCount }) => {
+      const { passes } = await seattlePasses(elements, { start, days });
+      const rescan = oneSecondRescan(elements, SEATTLE);
+      expect(passes).toHaveLength(passCount);
+      for (const p of passes) {
+        const rise = rescan.horizonCrossingNear(p.rise_utc);
+        const set = rescan.horizonCrossingNear(p.set_utc);
+        expect(Math.abs(Date.parse(p.rise_utc) - rise), p.rise_utc).toBeLessThanOrEqual(1000);
+        expect(Math.abs(Date.parse(p.set_utc) - set), p.set_utc).toBeLessThanOrEqual(1000);
+        expect(p.rise_azimuth_degrees, p.rise_utc).toBeCloseTo(rescan.azimuth(p.rise_utc), 9);
+        expect(p.set_azimuth_degrees, p.set_utc).toBeCloseTo(rescan.azimuth(p.set_utc), 9);
+        expect(p.duration_seconds).toBe((Date.parse(p.set_utc) - Date.parse(p.rise_utc)) / 1000);
+      }
+    },
+  );
+});
+
+/** The 30-second-scan peak of each 2026-window pass that is sunlit at its peak. */
+const PEAK_LIT_2026 = [
+  '2026-10-15T13:47:30.000Z',
+  '2026-10-16T13:00:30.000Z',
+  '2026-10-17T12:13:30.000Z',
+  '2026-10-17T13:49:30.000Z',
+  '2026-10-18T13:02:30.000Z',
+  '2026-10-19T13:52:00.000Z',
+  '2026-10-20T13:04:30.000Z',
+  '2026-10-21T13:54:00.000Z',
+  '2026-10-22T13:06:30.000Z',
+  '2026-10-23T13:56:00.000Z',
+  '2026-10-24T13:08:30.000Z',
+];
+
+/** Passes in the 2026 window dark at peak but sunlit over a dark sky afterwards, past 10°. */
+const SHADOW_EXIT_2026 = [
+  '2026-10-19T12:15:00.000Z',
+  '2026-10-20T11:28:00.000Z',
+  '2026-10-21T12:17:00.000Z',
+  '2026-10-22T11:29:30.000Z',
+  '2026-10-23T12:19:00.000Z',
+  '2026-10-24T11:31:30.000Z',
+];
+
+describe('astronomy_get_satellite_passes — passes chosen by their visible stretch', () => {
+  it.each(PASS_WINDOWS)(
+    'bounds every visible stretch inside its pass and has it reach 10° ($label)',
+    async ({ elements, start, days }) => {
+      const { passes } = await seattlePasses(elements, { start, days });
+      for (const p of passes) {
+        const [rise, from, to, set, peak] = [
+          p.rise_utc,
+          p.visible_start_utc,
+          p.visible_end_utc,
+          p.set_utc,
+          p.peak_utc,
+        ].map(Date.parse) as [number, number, number, number, number];
+        expect(rise, p.peak_utc).toBeLessThanOrEqual(from);
+        expect(from, p.peak_utc).toBeLessThan(to);
+        expect(to, p.peak_utc).toBeLessThanOrEqual(set);
+        // Altitude rises to the peak and falls after it, so the stretch's highest point is
+        // the peak when the stretch contains it and one of its two ends otherwise.
+        const highest =
+          from <= peak && peak <= to
+            ? p.peak_altitude_degrees
+            : Math.max(p.visible_start_altitude_degrees, p.visible_end_altitude_degrees);
+        expect(highest, p.peak_utc).toBeGreaterThanOrEqual(10);
+      }
+    },
+  );
+
+  it.each(PASS_WINDOWS)(
+    'puts every visible-stretch edge within 1 s of a 1 s rescan ($label)',
+    async ({ elements, start, days }) => {
+      const { passes } = await seattlePasses(elements, { start, days });
+      const rescan = oneSecondRescan(elements, SEATTLE);
+      let shadowOrTwilightEdges = 0;
+      for (const p of passes) {
+        const edges = [
+          {
+            at: p.visible_start_utc,
+            altitude: p.visible_start_altitude_degrees,
+            azimuth: p.visible_start_azimuth_degrees,
+            horizon: { at: p.rise_utc, azimuth: p.rise_azimuth_degrees },
+          },
+          {
+            at: p.visible_end_utc,
+            altitude: p.visible_end_altitude_degrees,
+            azimuth: p.visible_end_azimuth_degrees,
+            horizon: { at: p.set_utc, azimuth: p.set_azimuth_degrees },
+          },
+        ];
+        for (const edge of edges) {
+          if (edge.at === edge.horizon.at) {
+            // An edge on the horizon is that crossing: altitude 0 and the crossing's azimuth.
+            expect(edge.altitude, edge.at).toBe(0);
+            expect(edge.azimuth, edge.at).toBe(edge.horizon.azimuth);
+            continue;
+          }
+          shadowOrTwilightEdges++;
+          const change = rescan.visibilityChangeNear(edge.at);
+          expect(Math.abs(Date.parse(edge.at) - change), edge.at).toBeLessThanOrEqual(1000);
+          expect(rescan.visible(edge.at), edge.at).toBe(true);
+          expect(edge.altitude, edge.at).toBeCloseTo(rescan.elevation(edge.at), 9);
+          expect(edge.azimuth, edge.at).toBeCloseTo(rescan.azimuth(edge.at), 9);
+        }
+      }
+      expect(shadowOrTwilightEdges).toBeGreaterThan(0);
+    },
+  );
+
+  it('returns exactly the 2026 passes whose visible stretch reaches 10°, dark-at-peak ones included', async () => {
+    /**
+     * Left out: a pass peaking at 34.7° on 2026-10-23, dark at peak, that comes out of
+     * shadow about 50 s before it sets — sunlit over a dark sky, but never above 2° while
+     * it is.
+     */
+    const rescan = oneSecondRescan(ISS_ELEMENTS_2026, SEATTLE);
+    expect(rescan.visible('2026-10-23T10:47:20Z')).toBe(true);
+    expect(rescan.elevation('2026-10-23T10:47:20Z')).toBeLessThan(2);
+    expect(rescan.elevation('2026-10-23T10:42:30Z')).toBeGreaterThan(10);
+    const { passes } = await seattlePasses(ISS_ELEMENTS_2026, {
+      start: '2026-10-14T16:00:00Z',
+      days: 10,
+    });
+    expect(passes.map((p) => p.peak_utc)).toEqual([...PEAK_LIT_2026, ...SHADOW_EXIT_2026].sort());
+    expect(passes.filter((p) => !p.sunlit).map((p) => p.peak_utc)).toEqual(SHADOW_EXIT_2026);
+  });
+
+  it('carries the visible stretch through structuredContent and content[] alike', async () => {
+    stubFetch(ISS_ELEMENTS);
+    const result = await runToolContract(getSatellitePassesTool, {
+      norad_id: 25544,
+      ...SEATTLE,
+      days: 3,
+      start: '2024-01-01T00:00:00Z',
+      timezone: 'America/Los_Angeles',
+    });
+    expect(result.isError).toBeFalsy();
+    const parsed = getSatellitePassesTool.output.parse(result.structuredContent);
+    expect(parsed.passes).toHaveLength(6);
+    const text = firstText(result);
+    for (const p of parsed.passes) {
+      expect(p.visible_start_local).toBeTypeOf('string');
+      expect(p.visible_end_local).toBeTypeOf('string');
+      expect(text).toContain(
+        `visible_start_utc ${p.visible_start_utc} (local ${p.visible_start_local})`,
+      );
+      expect(text).toContain(`visible_end_utc ${p.visible_end_utc} (local ${p.visible_end_local})`);
+      for (const value of [
+        p.visible_start_altitude_degrees,
+        p.visible_end_altitude_degrees,
+        p.visible_start_azimuth_degrees,
+        p.visible_end_azimuth_degrees,
+      ]) {
+        expectExactCarried(text, value);
+      }
+      expect(text).toContain(`sunlit ${p.sunlit}`);
+    }
+    expectRoundedDisplay(text);
+  });
+
+  /**
+   * A synthetic object on a GPS-like twelve-hour orbit whose plane holds the Sun at the
+   * March 2024 equinox. Its passes last hours and cross Earth's shadow mid-pass, so a
+   * pass is lit, eclipsed for about an hour, then lit again — two visible stretches in
+   * one pass, which a low orbit almost never shows. Synthetic because the case needs an
+   * eclipse shorter than the pass, not a particular catalog object.
+   */
+  const MEO_ELEMENTS = JSON.stringify([
+    {
+      OBJECT_NAME: 'MEO TEST OBJECT',
+      OBJECT_ID: '2000-001A',
+      EPOCH: '2024-03-20T00:00:00.000000',
+      MEAN_MOTION: 2.00563,
+      ECCENTRICITY: 0.001,
+      INCLINATION: 55,
+      RA_OF_ASC_NODE: 0,
+      ARG_OF_PERICENTER: 0,
+      MEAN_ANOMALY: 0,
+      NORAD_CAT_ID: 77777,
+      ELEMENT_SET_NO: 999,
+      BSTAR: 0,
+      MEAN_MOTION_DOT: 0,
+      MEAN_MOTION_DDOT: 0,
+    },
+  ]);
+
+  it.each([
+    {
+      label: 'the later stretch climbs higher',
+      site: { latitude: 0, longitude: -80 },
+      peak: '2024-03-20T06:00:30.000Z',
+      // The earlier stretch rises toward the eclipse and tops out where it enters it.
+      skipped: '2024-03-20T05:00:00Z',
+      skippedShadowEdge: '2024-03-20T05:31:20Z',
+      reportedShadowEdge: 'start' as const,
+    },
+    {
+      label: 'the earlier stretch climbs higher',
+      site: { latitude: 20, longitude: -140 },
+      peak: '2024-03-21T01:29:00.000Z',
+      // The later stretch starts where it leaves the eclipse and sinks from there.
+      skipped: '2024-03-21T06:40:00Z',
+      skippedShadowEdge: '2024-03-21T06:24:50Z',
+      reportedShadowEdge: 'end' as const,
+    },
+  ])(
+    'reports the visible stretch reaching higher when a pass has two ($label)',
+    async ({ site, peak, skipped, skippedShadowEdge, reportedShadowEdge }) => {
+      stubFetch(MEO_ELEMENTS);
+      const { passes } = await getSatellitePassesTool.handler(
+        getSatellitePassesTool.input.parse({
+          norad_id: 77777,
+          ...site,
+          days: 1,
+          start: '2024-03-20T00:00:00Z',
+        }),
+        createMockContext({ errors: getSatellitePassesTool.errors }),
+      );
+      const pass = passes.find((p) => p.peak_utc === peak);
+      expect(pass, peak).toBeDefined();
+      if (!pass) return;
+      const rescan = oneSecondRescan(MEO_ELEMENTS, site);
+      const [from, to, skippedAt] = [pass.visible_start_utc, pass.visible_end_utc, skipped].map(
+        Date.parse,
+      ) as [number, number, number];
+      // The other stretch is real: visible, inside the pass, outside the one reported.
+      expect(rescan.visible(skipped)).toBe(true);
+      expect(skippedAt > to || skippedAt < from).toBe(true);
+      expect(Date.parse(pass.rise_utc)).toBeLessThan(skippedAt);
+      expect(skippedAt).toBeLessThan(Date.parse(pass.set_utc));
+      // The reported stretch meets the eclipse in the sky, at an edge bisected to the second.
+      const shadowEdge =
+        reportedShadowEdge === 'start' ? pass.visible_start_utc : pass.visible_end_utc;
+      expect(
+        Math.abs(Date.parse(shadowEdge) - rescan.visibilityChangeNear(shadowEdge)),
+      ).toBeLessThanOrEqual(1000);
+      // Neither stretch holds the peak, which falls in the eclipse or before both, so each
+      // tops out at one of its ends. The skipped one's top is its eclipse edge: the highest
+      // visible second within a minute of it.
+      expect(Date.parse(pass.peak_utc) < from || Date.parse(pass.peak_utc) > to).toBe(true);
+      const reportedTop = Math.max(
+        pass.visible_start_altitude_degrees,
+        pass.visible_end_altitude_degrees,
+      );
+      let skippedTop = -90;
+      for (let ms = -60_000; ms <= 60_000; ms += 1000) {
+        const at = new Date(Date.parse(skippedShadowEdge) + ms).toISOString();
+        if (rescan.visible(at)) skippedTop = Math.max(skippedTop, rescan.elevation(at));
+      }
+      expect(skippedTop).toBeGreaterThan(0);
+      expect(skippedTop).toBeLessThan(reportedTop);
+    },
+  );
+
+  it('states the visibility rule and its thresholds in the tool description', () => {
+    const description = getSatellitePassesTool.description;
+    expect(description).toContain('10°');
+    expect(description).toContain('−6°');
+    expect(description).toContain('visible_start_utc');
+  });
+});
+
+describe('astronomy_get_satellite_passes — days past the per-call cap', () => {
+  interface SatelliteCall {
+    notice?: string;
+    passes: SatellitePassesOutputType['passes'];
+    totalCount?: number;
+  }
+  const call = async (input: Record<string, unknown>) => {
+    const result = await runToolContract(getSatellitePassesTool, {
+      norad_id: 25544,
+      ...SEATTLE,
+      ...input,
+    });
+    expect(result.isError).toBeFalsy();
+    return { result, out: result.structuredContent as unknown as SatelliteCall };
+  };
+  /** The resume `start` and `days` a notice names. */
+  const resumeOf = (notice: string | undefined) => {
+    const match = /Re-call with start (\S+) and days (\d+) for the rest\./.exec(notice ?? '');
+    if (!match?.[1] || !match[2]) throw new Error(`No resume instruction in notice: ${notice}`);
+    return { start: match[1], days: Number(match[2]) };
+  };
+
+  it('searches 10 of 14 requested days and names the exact continuation on both surfaces', async () => {
+    stubFetch(ISS_ELEMENTS);
+    const { result, out } = await call({ days: 14, start: '2024-01-01T00:00:00Z' });
+    expect(out.notice).toBe(
+      'Searched 10 of the 14 requested days (10 per call), through 2024-01-11T00:00:00.000Z. Re-call with start 2024-01-11T00:00:30.000Z and days 4 for the rest.',
+    );
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain(out.notice!);
+    const tenDays = await call({ days: 10, start: '2024-01-01T00:00:00Z' });
+    expect(out.passes).toEqual(tenDays.out.passes.map(approximately));
+    expect(out.totalCount).toBe(out.passes.length);
+  });
+
+  it('continues from the named start with no pass repeated or missed', async () => {
+    /**
+     * Three placements of the boundary against one uncapped 14-day scan at the service
+     * seam: an arbitrary instant, the window closing mid-pass (call 1 follows that pass
+     * to its set, call 2 omits it as already up), and a pass rising inside the 30 s
+     * between the window's end and the resume start (call 2 reports it).
+     */
+    const [record] = OmmResponseSchema.parse(JSON.parse(ISS_ELEMENTS));
+    const elements = { name: 'ISS (ZARYA)', noradId: 25544, omm: record! };
+    const observer = { ...SEATTLE, elevation: 0 };
+    /** Every instant a pass reports, so a pass moved by a second does not pass as the same. */
+    const instants = (p: {
+      rise_utc: string;
+      peak_utc: string;
+      set_utc: string;
+      visible_start_utc: string;
+      visible_end_utc: string;
+    }) => [p.rise_utc, p.peak_utc, p.set_utc, p.visible_start_utc, p.visible_end_utc].join(' ');
+    const uncapped = (start: string) =>
+      new SatelliteService('https://example.test/celestrak', 5000, 0)
+        .predictPasses(elements, observer, 14, new Date(start))
+        .passes.map((p) =>
+          instants({
+            rise_utc: p.riseUtc,
+            peak_utc: p.peakUtc,
+            set_utc: p.setUtc,
+            visible_start_utc: p.visibleStartUtc,
+            visible_end_utc: p.visibleEndUtc,
+          }),
+        );
+    const tenDaysBefore = (iso: string) =>
+      new Date(Date.parse(iso) - 10 * 86_400_000).toISOString();
+
+    // A pass ten days into the boundary scans: its peak sample, and its rise rounded up to
+    // the scan's 30-second grid.
+    const target = (await seattlePasses(ISS_ELEMENTS, { start: '2024-01-03T00:00:00Z', days: 1 }))
+      .passes[0];
+    expect(target).toBeDefined();
+    if (!target) return;
+    const firstSampleUp = Math.ceil(Date.parse(target.rise_utc) / 30_000) * 30_000;
+    const placements = [
+      { start: '2023-12-25T00:00:00Z', boundary: 'arbitrary' },
+      { start: tenDaysBefore(target.peak_utc), boundary: 'mid-pass' },
+      {
+        start: tenDaysBefore(new Date(firstSampleUp - 30_000).toISOString()),
+        boundary: 'rise before resume',
+      },
+    ] as const;
+
+    for (const { start, boundary } of placements) {
+      stubFetch(ISS_ELEMENTS);
+      const first = await call({ days: 14, start });
+      const resume = resumeOf(first.out.notice);
+      expect(resume.days, boundary).toBe(4);
+      const rest = await call(resume);
+      expect(rest.out.notice, boundary).toBeUndefined();
+      const joined = [...first.out.passes, ...rest.out.passes].map(instants);
+      expect(new Set(joined).size, boundary).toBe(joined.length);
+      expect(joined, boundary).toEqual(uncapped(start));
+      // Each placement lands the target pass where it is meant to.
+      const targetKey = instants(target);
+      if (boundary === 'mid-pass') {
+        expect(first.out.passes.map(instants).at(-1), boundary).toBe(targetKey);
+      }
+      if (boundary === 'rise before resume') {
+        expect(rest.out.passes.map(instants)[0], boundary).toBe(targetKey);
+        expect(Date.parse(target.rise_utc)).toBeLessThan(Date.parse(resume.start));
+      }
+    }
+  });
+
+  it('names a continuation only while its start stays inside the epoch horizon', async () => {
+    /**
+     * The ISS fixture's epoch is 2024-01-01T12:00Z and the horizon is 30 days. A window
+     * whose resume instant lands exactly 30 days out still names it, and that call
+     * succeeds; one 30 s later names no start, since that call fails time_out_of_range and
+     * its recovery cannot reach the remaining days.
+     */
+    const cases = [
+      { start: '2024-01-21T11:59:30Z', resume: '2024-01-31T12:00:00.000Z', inRange: true },
+      { start: '2024-01-21T12:00:00Z', resume: '2024-01-31T12:00:30.000Z', inRange: false },
+    ];
+    for (const { start, resume, inRange } of cases) {
+      stubFetch(ISS_ELEMENTS);
+      const { result, out } = await call({ days: 14, start });
+      const windowEnd = new Date(Date.parse(resume) - 30_000).toISOString();
+      const expected = inRange
+        ? `Searched 10 of the 14 requested days (10 per call), through ${windowEnd}. Re-call with start ${resume} and days 4 for the rest.`
+        : `Searched 10 of the 14 requested days (10 per call), through ${windowEnd}. The remaining 4 days start more than about a month from the element set's epoch, where it no longer describes the orbit, so no call can search them.`;
+      expect(out.notice, start).toBe(expected);
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      expect(text, start).toContain(expected);
+
+      // What the continuation from that instant does: succeeds inside, fails beyond.
+      stubFetch(ISS_ELEMENTS);
+      const next = await runToolContract(getSatellitePassesTool, {
+        norad_id: 25544,
+        ...SEATTLE,
+        start: resume,
+        days: 4,
+      });
+      if (inRange) {
+        expect(next.isError, start).toBeFalsy();
+      } else {
+        expect(errorEnvelope(next)?.data?.reason, start).toBe('time_out_of_range');
+      }
+    }
+  });
+
+  it('names the whole remainder at the ceiling', async () => {
+    stubFetch(ISS_ELEMENTS);
+    const { out } = await call({ days: 30, start: '2024-01-01T00:00:00Z' });
+    expect(out.notice).toBe(
+      'Searched 10 of the 30 requested days (10 per call), through 2024-01-11T00:00:00.000Z. Re-call with start 2024-01-11T00:00:30.000Z and days 20 for the rest.',
+    );
+  });
+
+  it('adds no notice at or under the cap', async () => {
+    for (const days of [1, 10]) {
+      stubFetch(ISS_ELEMENTS);
+      const { out } = await call({ days, start: '2024-01-01T00:00:00Z' });
+      expect('notice' in out, `days ${days}`).toBe(false);
+    }
+  });
+
+  it('accepts days through the ceiling of 30 and rejects 31, 0, and a non-integer', () => {
+    const parse = (days: unknown) =>
+      getSatellitePassesTool.input.safeParse({ norad_id: 25544, ...SEATTLE, days }).success;
+    expect(parse(30)).toBe(true);
+    expect(parse(11)).toBe(true);
+    expect(parse(31)).toBe(false);
+    expect(parse(0)).toBe(false);
+    expect(parse(2.5)).toBe(false);
+  });
+
+  it('states the per-call cap and the ceiling on the days input', () => {
+    const days = toJSONSchema(getSatellitePassesTool.input).properties?.days as {
+      description?: string;
+      maximum?: number;
+    };
+    expect(days.maximum).toBe(30);
+    expect(days.description).toContain(
+      'At most 10 are searched per call; a value up to 30 searches the first 10',
+    );
   });
 });
 
@@ -2057,12 +3824,6 @@ describe('astronomy_get_satellite_passes — error contracts', () => {
     expect(() => getSatellitePassesTool.input.parse({ norad_id: 0, ...SEATTLE })).toThrow();
   });
 
-  it('rejects a days value above the maximum of 10', () => {
-    expect(() =>
-      getSatellitePassesTool.input.parse({ norad_id: 25544, ...SEATTLE, days: 15 }),
-    ).toThrow();
-  });
-
   it('rejects a non-integer NORAD id', () => {
     expect(() => getSatellitePassesTool.input.parse({ norad_id: 25544.5, ...SEATTLE })).toThrow();
   });
@@ -2173,23 +3934,41 @@ describe('astronomy_get_satellite_passes — invalid_time recovery reaches both 
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('keeps the time_out_of_range hint on both surfaces', async () => {
-    // The branch two lines below invalid_time in the same resolver already carried its
-    // hint; a fix scoped to invalid_time must leave it alone.
-    const fetchSpy = vi.fn(
-      async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
-    );
-    vi.stubGlobal('fetch', fetchSpy);
-    const result = await runToolContract(getSatellitePassesTool, {
-      norad_id: 25544,
-      ...SEATTLE,
-      start: '1850-01-01T00:00:00Z',
-    });
-    expect(errorEnvelope(result)?.data?.reason).toBe('time_out_of_range');
-    expect(errorEnvelope(result)?.data?.recovery?.hint).toBe('Use a date between 1900 and 2100.');
-    expect(firstText(result)).toContain('Recovery: Use a date between 1900 and 2100.');
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
+  it.each([
+    ['before 1900', '1850-01-01T00:00:00Z', '1850-01-01T00:00:00.000Z'],
+    ['past 2100', '2101-01-01T00:00:00Z', '2101-01-01T00:00:00.000Z'],
+  ])(
+    'sends the declared time_out_of_range hint for a start %s, on both surfaces',
+    async (_side, start, echoed) => {
+      /**
+       * The shared resolver rejects a start outside 1900–2100. A hint to pick a date inside
+       * that span would fail again here on the element set's epoch distance, so this tool
+       * sends its declared recovery — which covers both checks — while the message keeps
+       * naming the span the start fell outside.
+       */
+      const fetchSpy = vi.fn(
+        async (_url: string | URL) => new Response(ISS_ELEMENTS, { status: 200 }),
+      );
+      vi.stubGlobal('fetch', fetchSpy);
+      const result = await runToolContract(getSatellitePassesTool, {
+        norad_id: 25544,
+        ...SEATTLE,
+        start,
+      });
+      const hint = declaredRecovery(getSatellitePassesTool.errors, 'time_out_of_range');
+      const message = `Time ${echoed} is outside the high-accuracy span (1900–2100).`;
+
+      expect(result.isError).toBe(true);
+      expect(errorEnvelope(result)?.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(errorEnvelope(result)?.data?.reason).toBe('time_out_of_range');
+      expect(errorEnvelope(result)?.message).toBe(message);
+      expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
+      expect(firstText(result)).toContain(message);
+      expect(firstText(result)).toContain(`Recovery: ${hint}`);
+      expect(firstText(result)).not.toContain('Use a date between 1900 and 2100');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects an impossible calendar date in start before any TLE fetch', async () => {
     const fetchSpy = vi.fn(
@@ -2424,7 +4203,7 @@ describe('astronomy_get_satellite_passes — name resolution', () => {
     expect(result.satellite_name).toBe('ISS (ZARYA)');
     expect(result.resolved_from_name).toBe('ISS (ZARYA)');
     // Identical geometry to the norad_id path — the input path does not change the orbit.
-    expect(result.passes).toEqual(ISS_BASELINE_PASSES);
+    expect(result.passes).toEqual(ISS_BASELINE_PASSES.map(approximately));
   });
 
   it('fails satellite_name_not_found, not tle_not_found, when no object carries the name', async () => {
@@ -2851,6 +4630,12 @@ describe('astronomy_get_satellite_passes — name resolution edge cases', () => 
       set_azimuth_degrees: 120,
       duration_seconds: 600,
       sunlit: true,
+      visible_start_utc: '2024-01-01T03:00:00.000Z',
+      visible_end_utc: '2024-01-01T03:10:00.000Z',
+      visible_start_altitude_degrees: 0,
+      visible_end_altitude_degrees: 0,
+      visible_start_azimuth_degrees: 300,
+      visible_end_azimuth_degrees: 120,
     };
     const heading = (passes: (typeof pass)[]) => {
       const block = getSatellitePassesTool.format!({ norad_id: 25544, passes })[0];

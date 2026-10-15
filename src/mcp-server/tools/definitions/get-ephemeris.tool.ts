@@ -15,6 +15,23 @@ import { getHorizonsService } from '@/services/horizons/horizons-service.js';
 const INLINE_ROW_CAP = 200;
 
 /**
+ * The calendar years JPL Horizons reads from the ISO 8601 date this tool sends, measured
+ * against its START_TIME parser. An expanded year past 9999 comes back "Cannot interpret
+ * date", a negative one is refused in favor of BC notation, and a year below 0100 is read
+ * as a two-digit year — `0099` as 1999 — so the request would answer for a different
+ * instant without saying so.
+ */
+const MIN_HORIZONS_YEAR = 100;
+const MAX_HORIZONS_YEAR = 9999;
+
+/**
+ * The open range of observer altitudes Horizons accepts, in meters: it answers "Observer
+ * geodetic altitude must be MORE than -20 km" and "LESS than 40000 km" outside it.
+ */
+const MIN_OBSERVER_ELEVATION_M = -20_000;
+const MAX_OBSERVER_ELEVATION_M = 40_000_000;
+
+/**
  * Accepted `step` shape: a positive count followed by one of Horizons' step units —
  * m (minutes), h (hours), d (days), mo (months), y (years). `mo` precedes `m` in the
  * alternation so "1mo" reads as months rather than a minute step with a stray
@@ -26,16 +43,22 @@ const INLINE_ROW_CAP = 200;
  */
 const STEP_PATTERN = /^([1-9]\d*) ?(mo|[mhdy])$/i;
 
+/**
+ * The largest step count Horizons reads: a count past a signed 32-bit integer comes back
+ * "Cannot read numeric value", whatever the unit.
+ */
+const MAX_STEP_COUNT = 2_147_483_647;
+
 /** Milliseconds in one unit of each fixed-duration step. */
 const FIXED_STEP_MS = { m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
 
 /**
- * How many whole steps to try before giving up on a calendar advance. Horizons skips a
- * calendar period that has no such day of the month rather than rolling into the next
- * one, so a series on the 31st passes over several periods in a row, and a Feb-29 year
- * series passes over three — seven when a non-leap century year falls in the run.
+ * How many single months or years a calendar advance moves past a period that lacks the
+ * day of the month. A month step needs at most one — the month after any 30-day month or
+ * February has 31 days — and a Feb-29 year step at most seven, when a non-leap century
+ * year falls in the run (2097 to 2104).
  */
-const MAX_CALENDAR_STEPS = 48;
+const MAX_CALENDAR_SLIDES = 7;
 
 /** A validated `step`: how many of which unit. */
 interface ParsedStep {
@@ -47,36 +70,75 @@ interface ParsedStep {
 function parseStep(step: string): ParsedStep | undefined {
   const match = STEP_PATTERN.exec(step);
   if (!match?.[1] || !match[2]) return undefined;
-  return { count: Number(match[1]), unit: match[2].toLowerCase() as ParsedStep['unit'] };
+  const count = Number(match[1]);
+  if (count > MAX_STEP_COUNT) return undefined;
+  return { count, unit: match[2].toLowerCase() as ParsedStep['unit'] };
 }
 
 /**
- * The instant exactly one `step` after `instant`.
+ * The row Horizons prints one `step` after the row at `instant`, or undefined when that
+ * instant cannot be computed (it leaves the `Date` range).
  *
  * Minute, hour, and day steps are fixed durations. Month and year steps are calendar
  * stepping: per Horizons' API documentation the output "will follow the calendar based
  * on the starting date", and a period that does not carry that day of the month
- * produces no row at all — "if a start date on the 31st is requested, output will only
- * occur for months having 31 days". A plain field increment is wrong there twice over,
- * because JavaScript rolls Jan 31 forward into Mar 3: an instant Horizons would never
- * print, and one that shifts every later row off the series the caller asked for.
- * Advancing by whole steps until the day of the month survives applies Horizons' own
- * rule, so the continuation lands on the next row of the same series.
+ * produces no row — "if a start date on the 31st is requested, output will only occur
+ * for months having 31 days". A plain field increment is wrong there, because
+ * JavaScript rolls Jan 31 forward into Mar 3, an instant Horizons never prints. Horizons
+ * advances the step count from the previous row and, when that lands on a missing day,
+ * moves on one month or year at a time until the day exists — 5mo from Jan 31 prints
+ * Jul 31, 3y from 2024-02-29 prints 2028-02-29 — and the next row steps from there.
+ * Skipping whole steps instead agrees only at a count of one and otherwise resumes a
+ * page past rows Horizons would have printed.
  */
 function nextStepInstant(instant: string, step: ParsedStep): string | undefined {
   const from = new Date(instant);
   if (Number.isNaN(from.getTime())) return undefined;
   if (step.unit === 'm' || step.unit === 'h' || step.unit === 'd') {
-    return new Date(from.getTime() + step.count * FIXED_STEP_MS[step.unit]).toISOString();
+    const next = new Date(from.getTime() + step.count * FIXED_STEP_MS[step.unit]);
+    return Number.isNaN(next.getTime()) ? undefined : next.toISOString();
   }
   const dayOfMonth = from.getUTCDate();
-  for (let steps = 1; steps <= MAX_CALENDAR_STEPS; steps++) {
+  for (let slide = 0; slide <= MAX_CALENDAR_SLIDES; slide++) {
     const next = new Date(from.getTime());
-    if (step.unit === 'mo') next.setUTCMonth(next.getUTCMonth() + step.count * steps);
-    else next.setUTCFullYear(next.getUTCFullYear() + step.count * steps);
+    if (step.unit === 'mo') next.setUTCMonth(next.getUTCMonth() + step.count + slide);
+    else next.setUTCFullYear(next.getUTCFullYear() + step.count + slide);
     if (next.getUTCDate() === dayOfMonth) return next.toISOString();
   }
   return undefined;
+}
+
+/**
+ * The STOP_TIME to send for one page: the series' 201st instant — one row past the inline
+ * cap — when that comes before the requested stop, otherwise the requested stop.
+ *
+ * Horizons prints every row through STOP_TIME and refuses outright, with no ephemeris
+ * block, a span projecting past its undocumented output-line ceiling (90,024 rows when
+ * measured), so sending the whole span both downloaded rows the page never shows and
+ * failed long spans at fine steps. The extra row past the cap is what tells the parse the
+ * series continues. The walk stops at the requested stop, and a step it cannot advance
+ * leaves the request as asked.
+ */
+function pageStop(
+  start: string,
+  stop: string,
+  step: ParsedStep,
+): { stop: string; bounded: boolean } {
+  const stopMs = new Date(stop).getTime();
+  let instant: string | undefined = start;
+  for (let row = 1; row <= INLINE_ROW_CAP; row++) {
+    instant = nextStepInstant(instant, step);
+    if (instant === undefined || new Date(instant).getTime() >= stopMs) {
+      return { stop, bounded: false };
+    }
+  }
+  return { stop: instant, bounded: true };
+}
+
+/** Whether an instant falls in a calendar year Horizons reads as written. */
+function isHorizonsYear(instant: Date): boolean {
+  const year = instant.getUTCFullYear();
+  return year >= MIN_HORIZONS_YEAR && year <= MAX_HORIZONS_YEAR;
 }
 
 export const EphemerisOutput = z.object({
@@ -122,14 +184,14 @@ export type EphemerisOutputType = z.infer<typeof EphemerisOutput>;
 export const getEphemerisTool = tool('astronomy_get_ephemeris', {
   title: 'astronomy-mcp-server: get small-body ephemeris',
   description:
-    'Fetch a time-series ephemeris for a small body (asteroid or comet) or spacecraft from JPL Horizons — RA/Dec, distance, and apparent magnitude over a span, optionally with observer-relative altitude/azimuth. This covers objects the in-process major-body set cannot. The designation is passed to Horizons verbatim, so it must be in a form Horizons resolves to a single record: a numbered asteroid takes a trailing-semicolon record lookup (e.g. "433;" for Eros, "1;" for Ceres), and a periodic comet takes the DES + closest-apparition form (e.g. "DES=1P;CAP" for Halley). Spacecraft take their negative SPK-ID. Anything else goes through the Horizons name search: a bare name matching nothing (e.g. "433 Eros") or several records (e.g. "1P/Halley") is rejected, but one matching a single object succeeds even when that object is not the one meant — "Eros" resolves to Kerberos, a moon of Pluto — so compare `target_name`, the object Horizons resolved, with the one intended. `start` and `stop` are ISO 8601 UTC and `stop` must be after `start`; `step` is a count plus a unit of m, h, d, mo, or y, such as "1d", "1h", or "10m". Supplying observer latitude/longitude yields topocentric coordinates and adds alt/az — supply both or neither. This is a gated, network-backed extension (JPL Horizons is keyless but rate-limited and best-effort); large spans truncate inline at 200 rows, and the truncation notice names the exact `start` to resume from — one step past the last row returned, because Horizons includes the start instant in its output — so re-calling from there continues the series without repeating a sample. Splitting the range into smaller adjacent spans works too; keep the same step either way so no sample is lost.',
+    'Fetch a time-series ephemeris for a small body (asteroid or comet) or spacecraft from JPL Horizons — RA/Dec, distance, and apparent magnitude over a span, optionally with observer-relative altitude/azimuth. This covers objects the in-process major-body set cannot. The designation is passed to Horizons verbatim, so it must be in a form Horizons resolves to a single record: a numbered asteroid takes a trailing-semicolon record lookup (e.g. "433;" for Eros, "1;" for Ceres), and a periodic comet takes the DES + closest-apparition form (e.g. "DES=1P;CAP" for Halley). Spacecraft take their negative SPK-ID. Anything else goes through the Horizons name search: a bare name matching nothing (e.g. "433 Eros") or several records (e.g. "1P/Halley") is rejected, but one matching a single object succeeds even when that object is not the one meant — "Eros" resolves to Kerberos, a moon of Pluto — so compare `target_name`, the object Horizons resolved, with the one intended. A major-body name matching several bodies (e.g. "Mars") is rejected with the ID number of each body it matched — pass one, such as "499" for the planet. `start` and `stop` are ISO 8601 UTC dates in the Gregorian calendar, extended before 1582, in years 0100 through 9999; `stop` must not be before `start`, and a `stop` equal to `start` returns the single row at that instant. `step` is a count plus a unit of m, h, d, mo, or y, such as "1d", "1h", or "10m". Supplying observer latitude/longitude yields topocentric coordinates and adds alt/az — supply both or neither. This is a gated, network-backed extension (JPL Horizons is keyless but rate-limited and best-effort); large spans truncate inline at 200 rows, and the truncation notice names the exact `start` to resume from — one step past the last row returned, because Horizons includes the start instant in its output — so re-calling from there continues the series without repeating a sample. Splitting the range into smaller adjacent spans works too; keep the same step either way so no sample is lost.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
     designation: z
       .string()
-      .min(1)
+      .regex(/\S/, 'designation must not be blank.')
       .describe(
-        'JPL Horizons target, passed verbatim — use a form that resolves to one record. Numbered asteroid: trailing-semicolon record lookup, e.g. "433;" (Eros), "1;" (Ceres). Periodic comet: DES + closest-apparition flag, e.g. "DES=1P;CAP" (Halley), "DES=2P;CAP" (Encke). Spacecraft: negative SPK-ID, e.g. "-48" (Hubble). A bare name like "433 Eros" (no match) or "1P/Halley" (several records) is rejected, but one matching a single object succeeds even when it is not the object meant — check `target_name` in the result. Look up designations at ssd.jpl.nasa.gov/tools/sbdb_lookup.html.',
+        'JPL Horizons target, passed verbatim — use a form that resolves to one record. Numbered asteroid: trailing-semicolon record lookup, e.g. "433;" (Eros), "1;" (Ceres). Periodic comet: DES + closest-apparition flag, e.g. "DES=1P;CAP" (Halley), "DES=2P;CAP" (Encke). Spacecraft: negative SPK-ID, e.g. "-48" (Hubble). A bare name like "433 Eros" (no match) or "1P/Halley" (several records) is rejected, and "Mars" (several major bodies) is rejected with their ID numbers listed — the planet is "499" — but one matching a single object succeeds even when it is not the object meant — check `target_name` in the result. Earth ("399") is rejected, being the body the observer is on, and so is a name containing an apostrophe, which the Horizons search cannot match — "6P/d\'Arrest" resolves as "DES=6P;CAP" — or any character outside printable ASCII, which Horizons refuses, such as an accent or a typographic apostrophe — "Šteins" resolves as "2867;". Look up designations at ssd.jpl.nasa.gov/tools/sbdb_lookup.html.',
       ),
     latitude: z
       .number()
@@ -150,29 +212,35 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     elevation: z
       .number()
       .default(0)
-      .describe('Observer elevation in meters above sea level. Default 0.'),
+      .describe(
+        'Observer elevation in meters above sea level. Default 0. With latitude and longitude it must be greater than -20000 and less than 40000000 — the observer altitudes Horizons accepts; a geocentric request ignores it.',
+      ),
     start: z
       .string()
       .optional()
       .describe(
-        'Ephemeris start as an ISO 8601 UTC string, e.g. "2024-01-01T00:00:00Z". Defaults to now. A value with no zone designator is read as UTC, not the local zone of the server process.',
+        'Ephemeris start as an ISO 8601 UTC string, e.g. "2024-01-01T00:00:00Z", in years 0100 through 9999 — the calendar years JPL Horizons reads. Dates are Gregorian, extended before 1582. Defaults to now. A value with no zone designator is read as UTC, not the local zone of the server process.',
       ),
     stop: z
       .string()
       .optional()
       .describe(
-        'Ephemeris stop as an ISO 8601 UTC string, and must be later than start. Defaults to 24 hours after start. A value with no zone designator is read as UTC, not the local zone of the server process.',
+        'Ephemeris stop as an ISO 8601 UTC string in years 0100 through 9999, at or after start — equal to start returns the single row at that instant. Defaults to 24 hours after start. A value with no zone designator is read as UTC, not the local zone of the server process.',
       ),
     step: z
       .string()
       .default('1h')
       .describe(
-        'Step size as a positive count plus a unit of m (minutes), h (hours), d (days), mo (months), or y (years), e.g. "10m", "1h", "1d". Default "1h".',
+        'Step size as a positive count up to 2147483647 plus a unit of m (minutes), h (hours), d (days), mo (months), or y (years), e.g. "10m", "1h", "1d". Default "1h".',
       ),
   }),
   output: EphemerisOutput,
   enrichment: {
-    truncated: z.boolean().describe('True when Horizons returned more rows than the inline cap.'),
+    truncated: z
+      .boolean()
+      .describe(
+        'True when the requested span continues past the returned rows; the notice names the start to resume from.',
+      ),
     shown: z.number().describe('Number of ephemeris rows returned.'),
     cap: z.number().describe('The inline row cap that was applied.'),
     dropped: z
@@ -192,16 +260,16 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     {
       reason: 'invalid_time',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'The start or stop timestamp is not a parseable ISO 8601 instant, or names a calendar date that does not exist (e.g. 2026-02-30).',
+      when: 'The start or stop timestamp is not a parseable ISO 8601 instant, names a calendar date that does not exist (e.g. 2026-02-30), or falls outside years 0100 through 9999, the calendar years JPL Horizons reads.',
       recovery:
-        'Pass start and stop as ISO 8601 UTC timestamps naming real calendar dates, e.g. 2024-01-01T00:00:00Z, then retry.',
+        'Pass start and stop as ISO 8601 UTC timestamps naming real calendar dates in years 0100 through 9999, e.g. 2024-01-01T00:00:00Z, then retry.',
     },
     {
       reason: 'invalid_time_range',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'The resolved stop instant is at or before the resolved start instant.',
+      when: 'The resolved stop instant is before the resolved start instant.',
       recovery:
-        'Pass a stop that is later than start, or omit stop for a 24-hour span, then retry.',
+        'Pass a stop at or after start — equal for a single instant — or omit stop for a 24-hour span, then retry.',
     },
     {
       reason: 'incomplete_observer',
@@ -211,11 +279,19 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
         'Supply latitude and longitude together for a topocentric ephemeris, or omit both for a geocentric one.',
     },
     {
+      reason: 'invalid_elevation',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'An observer (latitude and longitude) was supplied with an elevation of -20000 m or less, or 40000000 m or more — outside the observer altitudes JPL Horizons accepts.',
+      recovery:
+        'Pass elevation in meters greater than -20000 and less than 40000000, or omit latitude and longitude for a geocentric ephemeris, which ignores elevation.',
+    },
+    {
       reason: 'invalid_step',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'The step is not a positive count followed by a unit of m, h, d, mo, or y.',
+      when: 'The step is not a positive count followed by a unit of m, h, d, mo, or y, its count is past 2147483647, or Horizons reports it longer than the span of data it holds for the target.',
+      // Verbatim the hint HorizonsService throws with for a step longer than the target's data.
       recovery:
-        'Pass step as a count plus m, h, d, mo, or y — for example "10m", "1h", or "1d" — then retry.',
+        'Pass step as a count up to 2147483647 plus m, h, d, mo, or y — for example "10m", "1h", or "1d" — and shorter than the span of data Horizons holds for the target, then retry.',
     },
     {
       reason: 'time_out_of_range',
@@ -229,9 +305,35 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     {
       reason: 'body_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'JPL Horizons has no match for the designation, or the designation is ambiguous (a bare comet name matches multiple apparition records).',
+      when: 'JPL Horizons has no match for the designation, the designation is ambiguous (a bare comet name matches multiple apparition records), it contains an apostrophe, which the Horizons search cannot match (e.g. "6P/d\'Arrest"), or it contains a character outside printable ASCII, which Horizons refuses (e.g. "Šteins", "6P/d’Arrest").',
       recovery:
         'Use a record-resolving form: a numbered asteroid as "<number>;" (e.g. "433;"), a periodic comet as "DES=<designation>;CAP" (e.g. "DES=1P;CAP"), or a spacecraft as its negative SPK-ID. Verify the designation at ssd.jpl.nasa.gov/tools/sbdb_lookup.html.',
+    },
+    {
+      reason: 'ambiguous_designation',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'A major-body or spacecraft name matches several Horizons bodies (e.g. "Mars" matches the planet, its barycenter, and spacecraft). The message lists the candidates with their ID numbers, at most 20, and names the total when there are more.',
+      // Verbatim the hint HorizonsService throws with.
+      recovery:
+        'Re-call with designation set to the ID number of the intended body from the listed candidates — e.g. "499" for the planet Mars — or a more specific name when it is not listed.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'observer_is_target',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The designation resolves to Earth (e.g. "399"), the body every request here observes from.',
+      // Verbatim the hint HorizonsService throws with.
+      recovery:
+        'Choose a target other than Earth: this tool observes from Earth, geocentric or from the supplied latitude and longitude, and Horizons computes no ephemeris of the observer’s own body.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'request_rejected',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'JPL Horizons refused a request parameter value with HTTP 400 — the same answer on every attempt. The message names the input that parameter carries.',
+      // Verbatim the hint HorizonsService throws with.
+      recovery:
+        'Horizons refuses this request the same way on every attempt, so do not retry it unchanged: correct the input the message names — the designation as a record-resolving form such as "433;", or the start, stop, step, or observer coordinates — then call again.',
       thrownBy: 'service',
     },
     {
@@ -252,7 +354,7 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
      * that does not exist rolls silently forward into the next month. Shares the calendar
      * check with the core resolveTime() but deliberately not the method itself — JPL
      * Horizons covers historical and future epochs far outside its 1900–2100 high-accuracy
-     * span, so this tool rejects unparseable and impossible dates, never a year.
+     * span, so the only years this tool rejects are the ones Horizons cannot read (below).
      */
     const startInstant = input.start === undefined ? new Date() : parseIsoInstant(input.start);
     if (startInstant === undefined) {
@@ -286,8 +388,65 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
      */
     const start = startInstant.toISOString();
     const stop = stopInstant.toISOString();
-    if (stopInstant.getTime() <= startInstant.getTime()) {
-      throw ctx.fail('invalid_time_range', `stop "${stop}" is not after start "${start}".`);
+    /**
+     * The year check runs on the instants actually sent, so a default stop carried past
+     * 9999 by the 24-hour span is caught the same as one the caller wrote — and the
+     * message says it is the default, since the caller never passed it. Sending either
+     * would cost an upstream request to learn nothing, or — below 0100 — answer for a
+     * different century.
+     */
+    const stopNote = input.stop === undefined ? ' (the default, 24 hours after start)' : '';
+    for (const [name, instant, iso, note] of [
+      ['start', startInstant, start, ''],
+      ['stop', stopInstant, stop, stopNote],
+    ] as const) {
+      if (!isHorizonsYear(instant)) {
+        throw ctx.fail(
+          'invalid_time',
+          `${name} "${iso}"${note} is outside years 0100 through 9999, the calendar years JPL Horizons reads.`,
+        );
+      }
+    }
+    if (stopInstant.getTime() < startInstant.getTime()) {
+      throw ctx.fail('invalid_time_range', `stop "${stop}" is before start "${start}".`);
+    }
+    /**
+     * A stop equal to start asks for the single row at that instant — the continuation a
+     * span of exactly 201 rows advertises, whose last row sits on its stop. Horizons refuses
+     * START_TIME equal to STOP_TIME ("Bad dates"), so the request closes one millisecond
+     * later, a window holding the start row and no other. The last millisecond of 9999 has
+     * no readable instant after it.
+     */
+    const singleInstant = stopInstant.getTime() === startInstant.getTime();
+    const closingStop = singleInstant ? new Date(startInstant.getTime() + 1) : stopInstant;
+    if (!isHorizonsYear(closingStop)) {
+      throw ctx.fail(
+        'invalid_time',
+        `start and stop "${start}" leave no later instant in year 9999 to close the request, the last calendar year JPL Horizons reads.`,
+      );
+    }
+    /**
+     * Horizons reads COMMAND inside single quotes with no escape for one within it, so an
+     * apostrophe ends the designation early and the search runs on the text before it.
+     * Sent unquoted, the whole name reaches the search and still matches nothing. No form
+     * of the name reaches the object; its designation form resolves instead.
+     */
+    if (input.designation.includes("'")) {
+      throw ctx.fail(
+        'body_not_found',
+        `Designation "${input.designation}" contains an apostrophe, which the JPL Horizons search cannot match. Use a record-resolving form instead, such as "DES=6P;CAP" for 6P/d'Arrest.`,
+      );
+    }
+    /**
+     * Horizons refuses any COMMAND character outside printable ASCII with HTTP 400 — an
+     * accented name, a typographic apostrophe, a control character — so no spelling with one
+     * reaches the search; the object's number or designation form does.
+     */
+    if (/[^\x20-\x7e]/.test(input.designation)) {
+      throw ctx.fail(
+        'body_not_found',
+        `Designation "${input.designation}" contains a character outside printable ASCII, the only characters JPL Horizons accepts. Use a record-resolving form instead, such as "2867;" for the asteroid 2867 Šteins or "DES=6P;CAP" for the comet 6P/d'Arrest.`,
+      );
     }
     /**
      * A lone coordinate used to fall through to a geocentric query, silently dropping
@@ -302,11 +461,26 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
         `Observer ${hasLatitude ? 'latitude' : 'longitude'} was supplied without ${hasLatitude ? 'longitude' : 'latitude'}.`,
       );
     }
+    /**
+     * Horizons refuses an observer altitude of -20 km or less, or 40,000 km or more. The
+     * range binds only a topocentric request — elevation places an observer, and a
+     * geocentric request has none — so it is checked here rather than in the schema,
+     * which would also reject geocentric calls that never send it.
+     */
+    if (
+      hasLatitude &&
+      (input.elevation <= MIN_OBSERVER_ELEVATION_M || input.elevation >= MAX_OBSERVER_ELEVATION_M)
+    ) {
+      throw ctx.fail(
+        'invalid_elevation',
+        `Observer elevation ${input.elevation} m is outside the range JPL Horizons accepts for an observer: more than ${MIN_OBSERVER_ELEVATION_M} and less than ${MAX_OBSERVER_ELEVATION_M} meters.`,
+      );
+    }
     const step = parseStep(input.step);
     if (!step) {
       throw ctx.fail(
         'invalid_step',
-        `Invalid step "${input.step}". Expected a positive count plus m, h, d, mo, or y, e.g. "10m".`,
+        `Invalid step "${input.step}". Expected a positive count up to 2147483647 plus m, h, d, mo, or y, e.g. "10m".`,
       );
     }
     const observer =
@@ -314,11 +488,54 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
         ? { latitude: input.latitude, longitude: input.longitude, elevation: input.elevation }
         : undefined;
 
-    const result = await svc.ephemeris(input.designation, start, stop, input.step, ctx, observer);
+    const page = singleInstant
+      ? { stop: closingStop.toISOString(), bounded: false }
+      : pageStop(start, stop, step);
+    const result = await svc.ephemeris(
+      input.designation,
+      start,
+      page.stop,
+      input.step,
+      ctx,
+      observer,
+    );
+    /**
+     * A single-instant request returns at most the row at `start`. Horizons closes some
+     * year-step spans with an extra row at STOP_TIME when the next on-series instant falls
+     * past it, and STOP_TIME here is the 1 ms closing instant, not a sample the caller asked for.
+     */
+    const points = singleInstant ? result.points.filter((p) => p.timeUtc === start) : result.points;
     ctx.log.info('Fetched Horizons ephemeris', {
       designation: input.designation,
-      points: result.points.length,
+      points: points.length,
     });
+
+    /**
+     * The service marks a page truncated when it sees a row past the cap. Under a bounded
+     * stop that row is the last one requested, so a dropped row leaves the cap unreached
+     * with nothing after it — yet the series still continues whenever one step past the
+     * last point lies inside the requested span.
+     */
+    const endsAt = points.at(-1)?.timeUtc;
+    const nextRow = endsAt === undefined ? undefined : nextStepInstant(endsAt, step);
+    const truncated =
+      result.truncated ||
+      (page.bounded &&
+        nextRow !== undefined &&
+        new Date(nextRow).getTime() <= stopInstant.getTime());
+    /**
+     * Every advertised continuation has to be a call that succeeds, so a page that ends
+     * inside the span never resumes past its stop. One step past the last row computes
+     * beyond the stop only when the omitted row is one Horizons prints at STOP_TIME off the
+     * series — a year step closes with a row on its stop date when the next on-series
+     * instant falls past it — and that row is exactly the single instant a resume at the
+     * stop returns.
+     */
+    const endsInside = endsAt !== undefined && new Date(endsAt).getTime() < stopInstant.getTime();
+    const resumeFrom =
+      endsInside && nextRow !== undefined && new Date(nextRow).getTime() > stopInstant.getTime()
+        ? stop
+        : nextRow;
 
     /**
      * `truncated`/`shown`/`cap` are required, so every call populates them or the
@@ -333,7 +550,7 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
      * the earlier.
      */
     const caveats: string[] = [];
-    if (result.truncated) {
+    if (truncated) {
       /**
        * A truncated result is a full page, so its last row is where the returned series
        * ends. Horizons' START_TIME is inclusive of the first output row, so a caller who
@@ -341,8 +558,6 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
        * the pages are concatenated. Advertise the instant one step past it instead, so
        * the continuation picks up the next sample of the same series.
        */
-      const endsAt = result.points.at(-1)?.timeUtc;
-      const resumeFrom = endsAt === undefined ? undefined : nextStepInstant(endsAt, step);
       caveats.push(
         `Capped at ${INLINE_ROW_CAP} rows${endsAt ? `, ending at ${endsAt}` : ''}. To retrieve the omitted samples, re-call with start set to ${resumeFrom ?? 'one step past that instant'} — Horizons includes the start instant in its output, so resuming at the last row returned repeats it — or split the requested range into smaller adjacent spans; keep the same step either way and repeat until truncated is false. Widening the step is not equivalent — it discards samples the original range asked for.`,
       );
@@ -353,8 +568,8 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
       );
     }
     ctx.enrich({
-      truncated: result.truncated,
-      shown: result.points.length,
+      truncated,
+      shown: points.length,
       cap: INLINE_ROW_CAP,
       ...(result.dropped > 0 ? { dropped: result.dropped } : {}),
     });
@@ -363,7 +578,7 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     const out: EphemerisOutputType = {
       designation: result.designation,
       ...(result.targetName ? { target_name: result.targetName } : {}),
-      points: result.points.map((p) => ({
+      points: points.map((p) => ({
         time_utc: p.timeUtc,
         ra_hours: p.raHours,
         dec_degrees: p.decDegrees,
