@@ -2,10 +2,10 @@
 
 **Server:** astronomy-mcp-server
 **Version:** 0.4.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.14`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**Zod:** ^4.6.6
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -20,17 +20,17 @@ Observational astronomy, computed in-process. The core is keyless and offline �
 | Tool | What it computes |
 |:-----|:-----------------|
 | `astronomy_get_sky_position` | Apparent topocentric position of one body or named star — equatorial / horizontal / ecliptic, magnitude, angular diameter, phase, Sun elongation, constellation |
-| `astronomy_get_rise_set` | Rise / set / transit cycles, plus twilight bands for the Sun; circumpolar / never-rises notes |
+| `astronomy_get_rise_set` | Rise / set / transit cycles (31 per call), plus twilight bands for the Sun and `night_in_progress` when the start falls at night; circumpolar / never-rises notes |
 | `astronomy_get_moon_phase` | Phase longitude, illumination, synodic age, next four quarter phases |
-| `astronomy_find_events` | Next N of: equinox, solstice, moon_quarter, lunar/solar eclipse, opposition, conjunction, max_elongation, perigee_apogee |
+| `astronomy_find_events` | Next N (20 per call) of: equinox, solstice, moon_quarter, lunar/solar eclipse, opposition, conjunction (with the Sun, or two bodies via `body2`), max_elongation, perigee_apogee |
 | `astronomy_list_visible` | One-call "what is up now" — naked-eye bodies (+ optional catalog stars) above the horizon, ranked, with a sky-condition gate |
 
 Plus the `astronomy://body/{body}` resource (static reference card) and the `astronomy_stargazing_plan` prompt (chains the tools for a "plan tonight from <place>" workflow).
 
 **Two gated, network-backed extensions** register only when their env gate is on (default deployment is keyless + offline):
 
-- `astronomy_get_ephemeris` — small-body / spacecraft ephemeris from JPL Horizons. Gate: `ASTRONOMY_ENABLE_HORIZONS`.
-- `astronomy_get_satellite_passes` — visible passes via a CelesTrak TLE propagated with SGP4 offline. Gate: `ASTRONOMY_ENABLE_SATELLITES`.
+- `astronomy_get_ephemeris` — small-body / spacecraft ephemeris from JPL Horizons, one page of up to 200 rows per call. Gate: `ASTRONOMY_ENABLE_HORIZONS`.
+- `astronomy_get_satellite_passes` — visible passes (kept by their sunlit, dark-sky stretch, returned as `visible_*`) via a CelesTrak TLE propagated with SGP4 offline, 10 days per call. Gate: `ASTRONOMY_ENABLE_SATELLITES`.
 
 Both extension services carry their own timeout + retry boundary, cache nothing on disk (Horizons is stateless; the satellite TLE cache is an in-process TTL `Map`), and degrade loudly — on any upstream failure they catch the framework's status-mapped `McpError` and re-throw a clean typed domain error (`{ reason, recovery }`, no `statusCode` / `responseBody` / `requestId` / internal URL), carrying the original as `cause` for server-side logs only. They never substitute core output.
 
@@ -238,7 +238,7 @@ Handlers throw — the framework catches, classifies, and formats.
 
 **Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive `ctx.fail(reason, …)` typed against the reason union. TypeScript catches typos at compile time, `data.reason` is auto-populated for observability, linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. The framework puts it on the wire whenever a failure carrying that `reason` arrives without a hint — a bare `ctx.fail('reason')` or a service throw with `data: { reason }` — as `data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim; override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. Every error envelope also carries `data.requestId`, the id the server's log records for that call carry, and `content[]` closes with `(reason … · request <id>)`. Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata, nothing at runtime reads it. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
 
-Most of this server's declared reasons are raised below the handler — `EphemerisService.resolveTime()` / `resolveTimezone()` / `lookupStar()`, `resolveBody()`, and the two extension services — and carry their hint inline because those call sites take no `ctx`. Those entries are marked `thrownBy: 'service'`; the handler-local preconditions (`find_events`'s `incomplete_observer` and `body_required`, `invalid_target`, the `get_ephemeris` argument gates, `unknown_body`) are the ones that throw through `ctx.fail`. A contract entry whose hint is written at a service throw site must repeat that string verbatim, since nothing links the two — `tests/tools/error-contract-coverage.test.ts` holds both halves of that line.
+Most of this server's declared reasons are raised below the handler — `EphemerisService.resolveTime()` / `resolveTimezone()` / `lookupStar()`, `resolveBody()` / `resolvePair()`, and the two extension services — and carry their hint inline because those call sites take no `ctx` — except `resolveTime()`'s `time_out_of_range`, which carries none, so each calling tool's declared `recovery` fills it (the `start` tools say "start date", and `get_satellite_passes` names the element set's epoch). Those entries are marked `thrownBy: 'service'`; the handler-local preconditions (`find_events`'s `incomplete_observer` and `body_required`, `invalid_target`, the `get_ephemeris` argument gates, `unknown_body`) are the ones that throw through `ctx.fail`. A contract entry whose hint is written at a service throw site must repeat that string verbatim, since nothing links the two — `tests/tools/error-contract-coverage.test.ts` holds both halves of that line.
 
 ```ts
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';

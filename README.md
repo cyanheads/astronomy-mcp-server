@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -71,9 +71,11 @@ Design reference: [`docs/design.md`](./docs/design.md).
 
 ### `astronomy_get_rise_set` <sub>tool</sub>
 
-- One `body` searched forward from `start` (default now) for the next `count` cycles, default 1, max 31
+- One `body` searched forward from `start` (default now) for the next `count` cycles, default 1; 31 are served per call, and a `count` up to 366 returns the first 31 with a notice naming the `start` and `count` that continue the series (or saying none can, once the next cycle falls after 2100)
 - Each cycle carries `rise_utc`, `set_utc`, `transit_utc`, and `transit_altitude_degrees`; a circumpolar or never-rising body gets `null` rise/set and a `note` instead of an error, and one already up at `start` gets a `null` `rise_utc`
-- For `body: "sun"`, a `twilight` block holds `civil`, `nautical`, and `astronomical` pairs covering the night after that cycle's set, so each `dawn_utc` falls the day after the cycle's rise
+- For `body: "sun"`, a `twilight` block holds `civil`, `nautical`, and `astronomical` pairs covering the night after that cycle's set (after its culmination when it has none), so each `dawn_utc` falls the day after the cycle's rise; each pair is bounded to its own night, so a depth the night never reaches is `null`
+- A `start` between sunset and sunrise adds `night_in_progress`, the night already under way (its dusk may precede `start`), because the first cycle then opens at the next sunrise; a continuation call repeats there the night the previous call's last cycle carried
+- One cycle covers one day: a day the body neither rises nor sets on (polar night, midnight sun) is a cycle of its own, so each night appears in exactly one cycle; a start in the afternoon of a polar-night day opens with the rest of that day (rise, set, and transit `null`) and its night
 
 ---
 
@@ -86,8 +88,9 @@ Design reference: [`docs/design.md`](./docs/design.md).
 
 ### `astronomy_find_events` <sub>tool</sub>
 
-- One `event` (`solar_eclipse`, `lunar_eclipse`, `equinox`, `solstice`, `moon_quarter`, `opposition`, `conjunction`, `max_elongation`, `perigee_apogee`) and the next `count` occurrences, default 1, max 20; searches stop at the end of 2100, with a notice when that returns fewer
+- One `event` (`solar_eclipse`, `lunar_eclipse`, `equinox`, `solstice`, `moon_quarter`, `opposition`, `conjunction`, `max_elongation`, `perigee_apogee`) and the next `count` occurrences, default 1; 20 are served per call, and a `count` up to 200 returns the first 20 with a notice naming the `start` and `count` that continue the series; searches stop at the end of 2100, with a notice when that returns fewer
 - Body-relative events require `body` (`body_required`), and a body the event doesn't apply to fails as `body_not_supported`: `opposition` takes mars through pluto, `conjunction` any planet, `max_elongation` mercury or venus, and `perigee_apogee` the moon, `earth`, or a planet; `apsis_kind` and `conjunction_kind` label which kind came back
+- `conjunction` with `body` alone is that planet's conjunction with the Sun; adding `body2` (the Moon or a planet, different from `body`) finds the instant the two share an ecliptic longitude seen from Earth's center and reports `separation_degrees` at that instant, which is not always their closest approach. `body2` with any other event, the same body twice, or a `sun`/`earth` `body` fails as `invalid_body_pair`
 - Eclipses take an optional observer (`latitude` and `longitude` together, else `incomplete_observer`) that adds `local_visible` and `contact_altitudes_degrees` and limits `solar_eclipse` to locally visible events; a global solar search reports `peak_latitude_degrees`/`peak_longitude_degrees` for total and annular eclipses
 
 ---
@@ -101,16 +104,17 @@ Design reference: [`docs/design.md`](./docs/design.md).
 
 ### `astronomy_get_ephemeris` <sub>tool</sub>
 
-- `designation` is passed to Horizons verbatim (`"433;"` for a numbered asteroid, `"DES=1P;CAP"` for a periodic comet, a negative SPK-ID for a spacecraft); `start` defaults to now, `stop` to 24 h later, and `step` to `"1h"` (a count plus `m`, `h`, `d`, `mo`, or `y`); `latitude` and `longitude` together add alt/az
-- Up to 200 rows inline, and when `truncated` is true the notice names the `start` to resume from; `target_name` is the object Horizons resolved, since a bare name can land on the wrong one; misses fail as `body_not_found`, and spans outside the target's Horizons data as `time_out_of_range`
+- `designation` is passed to Horizons verbatim (`"433;"` for a numbered asteroid, `"DES=1P;CAP"` for a periodic comet, a negative SPK-ID for a spacecraft); `start` defaults to now, `stop` to 24 h later, and `step` to `"1h"` (a count plus `m`, `h`, `d`, `mo`, or `y`); `latitude` and `longitude` together add alt/az, with `elevation` then limited to the observer altitudes Horizons accepts (`invalid_elevation` outside them; a geocentric request ignores it)
+- One page of up to 200 rows per call, and when `truncated` is true the notice names the `start` to resume from; `stop` equal to `start` returns the single row at that instant; `step` counts can be any positive integer up to 2147483647, months and years follow the calendar from `start`, and fractional seconds in `start` are kept; `start` and `stop` are Gregorian dates (extended before 1582) in years 0100 through 9999
+- `target_name` is the object Horizons resolved, since a bare name can land on the wrong one; a name matching several major bodies fails as `ambiguous_designation` listing each ID number, Earth fails as `observer_is_target`, and a designation with an apostrophe or any character outside printable ASCII fails as `body_not_found` (use `DES=6P;CAP`, not `6P/d'Arrest`, and `2867;`, not `Šteins`); misses fail as `body_not_found`, a `step` longer than the target's data as `invalid_step`, spans outside the target's Horizons data as `time_out_of_range`, and a value Horizons refuses outright as `request_rejected`, which names the input to correct
 - Registered only when `ASTRONOMY_ENABLE_HORIZONS=true`
 
 ---
 
 ### `astronomy_get_satellite_passes` <sub>tool</sub>
 
-- Exactly one of `norad_id` or `name` (ISS, Hubble/HST, and Tiangong/CSS resolve directly; other names are substring-matched against CelesTrak, and an ambiguous one fails as `ambiguous_satellite_name` listing candidates); `start` must be within about a month of today, and `days` defaults to 7, max 10
-- Returns `norad_id`, `satellite_name`, and naked-eye-plausible `passes` (sunlit at peak, observer sky dark), each with rise/peak/set times and azimuths, `peak_altitude_degrees`, and `duration_seconds`
+- Exactly one of `norad_id` or `name` (ISS, Hubble/HST, and Tiangong/CSS resolve directly; other names are substring-matched against CelesTrak, and an ambiguous one fails as `ambiguous_satellite_name` listing candidates); `start` must be within about a month of today, and `days` defaults to 7; 10 are searched per call, and a `days` up to 30 searches the first 10 with a notice naming the `start` and `days` that continue the search, or saying none can when that start would lie more than about a month from the element set's epoch
+- Returns `norad_id`, `satellite_name`, and `passes` kept by their visible stretch (satellite above the horizon and sunlit while the Sun is below −6°, reaching 10° elevation), each with rise/peak/set times (within 1 s) and azimuths, `peak_altitude_degrees`, `duration_seconds`, `sunlit` (illumination at the peak, so it can be `false` on a pass seen only before or after the satellite crosses Earth's shadow), and the stretch itself as `visible_start_utc`/`visible_end_utc` with their `_local`, altitude, and azimuth fields
 - Registered only when `ASTRONOMY_ENABLE_SATELLITES=true`
 
 ---
@@ -125,7 +129,7 @@ Design reference: [`docs/design.md`](./docs/design.md).
 ### `astronomy_stargazing_plan` <sub>prompt</sub>
 
 - Arguments: `location` required; `date` (`YYYY-MM-DD`) optional, defaults to tonight
-- Returns one user message that chains `astronomy_get_rise_set` (sun, then moon), `astronomy_get_moon_phase`, and `astronomy_list_visible` with `include_stars`, anchored to the observer's local night, plus the geocoding and weather steps this server doesn't cover
+- Returns one user message that chains `astronomy_get_rise_set` (sun, then moon), `astronomy_get_moon_phase`, and `astronomy_list_visible` with `include_stars`, anchored to the observer's local night (reading `night_in_progress` when the sun query starts after sunset), plus the geocoding and weather steps this server doesn't cover
 
 ## Features
 
