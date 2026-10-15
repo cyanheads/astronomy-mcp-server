@@ -94,6 +94,7 @@ export const getMoonPhaseTool = tool('astronomy_get_moon_phase', {
       reason: 'time_out_of_range',
       code: JsonRpcErrorCode.InvalidParams,
       when: "The requested instant is outside the engine's high-accuracy span (≈1900–2100).",
+      // resolveTime() throws this reason with no hint, so this string is the wire hint.
       recovery: 'Use a date between 1900 and 2100 and retry.',
       thrownBy: 'service',
     },

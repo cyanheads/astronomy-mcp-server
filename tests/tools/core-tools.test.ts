@@ -6,7 +6,7 @@
  * @module tests/tools/core-tools.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { findEventsTool } from '@/mcp-server/tools/definitions/find-events.tool.js';
 import { getMoonPhaseTool } from '@/mcp-server/tools/definitions/get-moon-phase.tool.js';
@@ -14,7 +14,10 @@ import { getRiseSetTool } from '@/mcp-server/tools/definitions/get-rise-set.tool
 import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
 import { BODY_META } from '@/services/ephemeris/body-data.js';
-import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import {
+  getEphemerisService,
+  initEphemerisService,
+} from '@/services/ephemeris/ephemeris-service.js';
 import { STAR_CATALOG } from '@/services/ephemeris/star-catalog.js';
 import { captureRejected } from '../helpers/capture-thrown.js';
 import { expectExactCarried, expectRoundedDisplay } from '../helpers/content-parity.js';
@@ -250,6 +253,135 @@ describe('astronomy_get_rise_set', () => {
     });
     const result = await getRiseSetTool.handler(input, ctx);
     expect(result.events[0]?.twilight).toBeUndefined();
+  });
+
+  /** Every `content[]` text block joined — `format()` output plus the enrichment trailer. */
+  const textOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+
+  it('returns the night in progress after sunset on both surfaces', async () => {
+    // 19:00 local in Seattle, after the 18:22 sunset.
+    const start = '2026-10-15T02:00:00Z';
+    const timezone = 'America/Los_Angeles';
+    const result = await runToolContract(getRiseSetTool, {
+      body: 'sun',
+      ...SEATTLE,
+      start,
+      timezone,
+    });
+    expect(result.isError).toBeFalsy();
+    const out = getRiseSetTool.output.parse(result.structuredContent);
+    const { nightInProgress } = getEphemerisService().riseSetSearch(
+      'sun',
+      { ...SEATTLE, elevation: 0 },
+      new Date(start),
+      1,
+      timezone,
+    );
+    const depths = ['civil', 'nautical', 'astronomical'] as const;
+    for (const depth of depths) {
+      const p = nightInProgress![depth];
+      expect(out.night_in_progress?.[depth], depth).toEqual({
+        dawn_utc: p.dawnUtc,
+        dusk_utc: p.duskUtc,
+        dawn_local: p.dawnLocal,
+        dusk_local: p.duskLocal,
+      });
+    }
+    // The night is not a cycle: events and the count are what was asked for.
+    expect(out.events).toHaveLength(1);
+    expect((result.structuredContent as { totalCount?: number }).totalCount).toBe(1);
+
+    // content[]: the night renders before the first cycle, carrying every time.
+    const text = textOf(result);
+    const heading = text.indexOf(
+      'Night in progress (under way at the search start; times before the start have already passed):',
+    );
+    const firstCycle = text.indexOf('1. Rise');
+    expect(heading).toBeGreaterThan(-1);
+    expect(heading).toBeLessThan(firstCycle);
+    const block = text.slice(heading, firstCycle);
+    for (const depth of depths) {
+      for (const value of Object.values(out.night_in_progress![depth])) {
+        expect(block).toContain(value as string);
+      }
+    }
+  });
+
+  it('carries no night in progress while the Sun is up', async () => {
+    const day = await runToolContract(getRiseSetTool, {
+      body: 'sun',
+      ...SEATTLE,
+      start: '2026-08-11T20:00:00Z',
+    });
+    expect('night_in_progress' in (day.structuredContent as object)).toBe(false);
+    expect(textOf(day)).not.toContain('Night in progress');
+  });
+
+  const TROMSO = { latitude: 69.65, longitude: 18.96 };
+
+  it('gives each polar-night cycle its own night on both surfaces', async () => {
+    const result = await runToolContract(getRiseSetTool, {
+      body: 'sun',
+      ...TROMSO,
+      start: '2026-11-26T23:00:00Z',
+      count: 2,
+    });
+    expect(result.isError).toBeFalsy();
+    const text = textOf(result);
+    const second = text.slice(text.indexOf('2. Rise'));
+    expect(second).toContain('Never rises above the horizon at this latitude/date.');
+    expect(second).toContain(
+      'Civil twilight: dawn 2026-11-29T07:42:51.928Z, dusk 2026-11-28T13:23:55.715Z',
+    );
+    expect(second).not.toContain('2026-11-27T13:26:39');
+  });
+
+  it('opens a polar-night afternoon with the rest of that day on both surfaces', async () => {
+    const result = await runToolContract(getRiseSetTool, {
+      body: 'sun',
+      ...TROMSO,
+      start: '2026-12-10T12:00:00Z',
+      count: 2,
+      timezone: 'Europe/Oslo',
+    });
+    const out = getRiseSetTool.output.parse(result.structuredContent);
+    const rest = out.events[0]!;
+    expect(rest).toMatchObject({
+      rise_utc: null,
+      set_utc: null,
+      transit_utc: null,
+      transit_altitude_degrees: null,
+    });
+    expect(rest.twilight?.civil).toEqual({
+      dusk_utc: '2026-12-10T12:58:42.578Z',
+      dawn_utc: '2026-12-11T08:16:59.773Z',
+      dusk_local: '2026-12-10T13:58:42+01:00',
+      dawn_local: '2026-12-11T09:16:59+01:00',
+    });
+    expect(out.night_in_progress).toBeUndefined();
+    expect(out.events[1]?.transit_utc?.slice(0, 10)).toBe('2026-12-11');
+    expect(textOf(result)).toContain(
+      `1. Rise none · Set none · Transit none\n   ${rest.note}\n   Civil twilight: dawn 2026-12-11T08:16:59.773Z, dusk 2026-12-10T12:58:42.578Z`,
+    );
+  });
+
+  it('carries no earlier night as in progress on a short polar night, on both surfaces', async () => {
+    // 67.4° N: 2026-12-21 has no sunrise, and the last sunset, on the 20th, began a night
+    // that ended that morning. The first cycle is the rest of the 21st and holds its night.
+    const result = await runToolContract(getRiseSetTool, {
+      body: 'sun',
+      latitude: 67.4,
+      longitude: 18.96,
+      start: '2026-12-21T15:42:11.858Z',
+      count: 4,
+    });
+    const out = getRiseSetTool.output.parse(result.structuredContent);
+    expect('night_in_progress' in (result.structuredContent as object)).toBe(false);
+    expect(out.events[0]?.twilight?.civil.dusk_utc).toBe('2026-12-21T13:29:35.001Z');
+    const text = textOf(result);
+    expect(text).not.toContain('Night in progress');
+    expect(text).not.toContain('2026-12-20T13:29');
   });
 });
 

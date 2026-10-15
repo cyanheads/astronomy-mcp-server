@@ -113,6 +113,15 @@ describe('stargazingPlanPrompt', () => {
     }
   });
 
+  it('reads the night already under way when the dark-window call is made after sunset', async () => {
+    // After sunset the first cycle opens at the next sunrise and its twilight is the
+    // following night's; tonight's dusk and dawn are in night_in_progress.
+    const step2 = stepText(await generate({ location: 'Mount Rainier' }), 2);
+    expect(step2).toContain(
+      "If the call's `start` falls after sunset, read that night's dusk and dawn from `night_in_progress`",
+    );
+  });
+
   it('names the cross-server tools that resolve coordinates and the timezone', async () => {
     // An agent following step 1 literally looks the tools up by name, so each must be a
     // tool that exists: openstreetmap geocodes the place, reference-data names its zone.

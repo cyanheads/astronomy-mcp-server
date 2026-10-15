@@ -8,10 +8,27 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import {
+  AngleBetween,
+  Body,
+  GeoVector,
+  Observer,
+  PairLongitude,
+  SearchAltitude,
+  SearchHourAngle,
+  SearchRiseSet,
+} from 'astronomy-engine';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { findEventsTool } from '@/mcp-server/tools/definitions/find-events.tool.js';
 import { EphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { STAR_CATALOG } from '@/services/ephemeris/star-catalog.js';
-import type { EventBodyName, EventName } from '@/services/ephemeris/types.js';
+import type {
+  EventBodyName,
+  EventName,
+  EventRecord,
+  PairBodyName,
+  RiseSetEvent,
+} from '@/services/ephemeris/types.js';
 import { captureThrown } from '../helpers/capture-thrown.js';
 
 let svc: EphemerisService;
@@ -559,6 +576,249 @@ describe('findEvents — body-relative', () => {
     expect(events[1]!.distanceAu).toBeCloseTo(1.0167, 3);
     expect(events[0]!.body).toBe('earth');
   });
+
+  it('serializes a conjunction with the Sun with no two-body fields, field order pinned', () => {
+    const inner = svc.findEvents('conjunction', {
+      start: new Date('2026-06-01T00:00:00Z'),
+      count: 3,
+      body: 'venus',
+      timezone: 'America/Los_Angeles',
+    });
+    expect(JSON.stringify(inner)).toBe(
+      '[{"event":"conjunction","timeUtc":"2026-10-24T03:33:23.331Z","body":"venus","conjunctionKind":"inferior","timeLocal":"2026-10-23T20:33:23-07:00"},{"event":"conjunction","timeUtc":"2027-08-11T23:42:40.820Z","body":"venus","conjunctionKind":"superior","timeLocal":"2027-08-11T16:42:40-07:00"},{"event":"conjunction","timeUtc":"2028-06-01T09:53:51.660Z","body":"venus","conjunctionKind":"inferior","timeLocal":"2028-06-01T02:53:51-07:00"}]',
+    );
+    const outer = svc.findEvents('conjunction', {
+      start: new Date('2026-01-01T00:00:00Z'),
+      count: 2,
+      body: 'saturn',
+    });
+    expect(JSON.stringify(outer)).toBe(
+      '[{"event":"conjunction","timeUtc":"2026-03-25T08:54:30.738Z","body":"saturn"},{"event":"conjunction","timeUtc":"2027-04-07T17:17:02.159Z","body":"saturn"}]',
+    );
+  });
+});
+
+/** Milliseconds between an event's instant and a reference instant. */
+const offsetMs = (timeUtc: string, reference: string) =>
+  Math.abs(Date.parse(timeUtc) - Date.parse(reference));
+
+/**
+ * Ecliptic longitude of body1 minus body2 as seen from Earth's center, wrapped to
+ * (−180°, 180°] — read straight from astronomy-engine, independent of the service's scan.
+ */
+function longitudeOffset(b1: Body, b2: Body, timeUtc: string): number {
+  const d = PairLongitude(b1, b2, new Date(timeUtc));
+  return d > 180 ? d - 360 : d;
+}
+
+/**
+ * The same conjunctions, one for one. Each instant is refined to within a second of the
+ * true one from whichever bracket the scan found it in, so a search from another start can
+ * land up to two seconds away.
+ */
+function expectSameEvents(actual: EventRecord[], expected: EventRecord[]): void {
+  expect(actual).toHaveLength(expected.length);
+  actual.forEach((e, i) => {
+    const want = expected[i]!;
+    expect([e.event, e.body, e.body2]).toEqual([want.event, want.body, want.body2]);
+    expect(offsetMs(e.timeUtc, want.timeUtc), `#${i + 1}`).toBeLessThan(2000);
+    expect(e.separationDegrees).toBeCloseTo(want.separationDegrees!, 4);
+  });
+}
+
+/**
+ * Two-body conjunctions: the instant the pair share an ecliptic longitude as seen from
+ * Earth's center. Reference instants are JPL Horizons longitude crossings.
+ */
+describe('findEvents — two-body conjunctions', () => {
+  const FROM = new Date('2026-10-15T00:00:00Z');
+
+  it('finds Venus–Jupiter on 2027-08-26 at 0.495° apart', () => {
+    const [e, ...rest] = svc.findEvents('conjunction', {
+      start: FROM,
+      count: 1,
+      body: 'venus',
+      body2: 'jupiter',
+    });
+    expect(rest).toEqual([]);
+    expect(e?.event).toBe('conjunction');
+    expect(e?.body).toBe('venus');
+    expect(e?.body2).toBe('jupiter');
+    expect(offsetMs(e!.timeUtc, '2027-08-26T02:59:41Z')).toBeLessThanOrEqual(120_000);
+    expect(Math.abs(e!.separationDegrees! - 0.495)).toBeLessThanOrEqual(0.005);
+    // The Sun-conjunction label belongs to the one-body search only.
+    expect(e).not.toHaveProperty('conjunctionKind');
+  });
+
+  it('finds Moon–Saturn on 2026-10-24 at 6.08° apart', () => {
+    const [e] = svc.findEvents('conjunction', {
+      start: FROM,
+      count: 1,
+      body: 'moon',
+      body2: 'saturn',
+    });
+    expect(offsetMs(e!.timeUtc, '2026-10-24T13:05:52Z')).toBeLessThanOrEqual(120_000);
+    expect(Math.abs(e!.separationDegrees! - 6.08)).toBeLessThanOrEqual(0.005);
+  });
+
+  it('echoes the pair in the order given and finds the same instants either way', () => {
+    const forward = svc.findEvents('conjunction', {
+      start: FROM,
+      count: 3,
+      body: 'moon',
+      body2: 'venus',
+    });
+    const reversed = svc.findEvents('conjunction', {
+      start: FROM,
+      count: 3,
+      body: 'venus',
+      body2: 'moon',
+    });
+    expect(reversed.map((e) => [e.body, e.body2])).toEqual([
+      ['venus', 'moon'],
+      ['venus', 'moon'],
+      ['venus', 'moon'],
+    ]);
+    reversed.forEach((e, i) => {
+      expect(offsetMs(e.timeUtc, forward[i]!.timeUtc)).toBeLessThanOrEqual(2000);
+    });
+  });
+
+  it('puts both bodies at one ecliptic longitude at every event, and reports their separation then', () => {
+    const events = svc.findEvents('conjunction', {
+      start: FROM,
+      count: 4,
+      body: 'mars',
+      body2: 'saturn',
+      timezone: 'Asia/Tokyo',
+    });
+    expect(events).toHaveLength(4);
+    for (const e of events) {
+      expect(Math.abs(longitudeOffset(Body.Mars, Body.Saturn, e.timeUtc))).toBeLessThan(1e-3);
+      const t = new Date(e.timeUtc);
+      // timeUtc is rounded to the millisecond, so the recomputed angle matches closely, not exactly.
+      expect(e.separationDegrees).toBeCloseTo(
+        AngleBetween(GeoVector(Body.Mars, t, true), GeoVector(Body.Saturn, t, true)),
+        6,
+      );
+      expect(e.timeLocal).toMatch(/\+09:00$/);
+    }
+  });
+
+  it('stops a slow pair at the end of the supported span', () => {
+    const jupiterSaturn = svc.findEvents('conjunction', {
+      start: FROM,
+      count: 5,
+      body: 'jupiter',
+      body2: 'saturn',
+    });
+    expect(jupiterSaturn.map((e) => e.timeUtc.slice(0, 10))).toEqual([
+      '2040-10-31',
+      '2060-04-07',
+      '2080-03-15',
+      '2100-09-18',
+    ]);
+    expect(
+      svc.findEvents('conjunction', { start: FROM, count: 1, body: 'uranus', body2: 'neptune' }),
+    ).toEqual([]);
+  });
+
+  /**
+   * Conjunctions 1900–2100 for every planet pair, counted by a fixed 0.25-day scan of the
+   * longitude offset. Mercury pairs are the ones a coarse scan undercounts: Mercury–Venus
+   * reads 485 at a 10-day step and 493 at 5 days.
+   */
+  const PLANET_PAIR_COUNTS: Array<[PairBodyName, PairBodyName, number]> = [
+    ['mercury', 'venus', 497],
+    ['mercury', 'mars', 313],
+    ['mercury', 'jupiter', 258],
+    ['mercury', 'saturn', 257],
+    ['mercury', 'uranus', 256],
+    ['mercury', 'neptune', 252],
+    ['mercury', 'pluto', 256],
+    ['venus', 'mars', 168],
+    ['venus', 'jupiter', 204],
+    ['venus', 'saturn', 210],
+    ['venus', 'uranus', 210],
+    ['venus', 'neptune', 214],
+    ['venus', 'pluto', 214],
+    ['mars', 'jupiter', 92],
+    ['mars', 'saturn', 102],
+    ['mars', 'uranus', 114],
+    ['mars', 'neptune', 110],
+    ['mars', 'pluto', 108],
+    ['jupiter', 'saturn', 15],
+    ['jupiter', 'uranus', 33],
+    ['jupiter', 'neptune', 26],
+    ['jupiter', 'pluto', 20],
+    ['saturn', 'uranus', 8],
+    ['saturn', 'neptune', 10],
+    ['saturn', 'pluto', 10],
+    ['uranus', 'neptune', 3],
+    ['uranus', 'pluto', 3],
+    ['neptune', 'pluto', 0],
+  ];
+
+  it.each(PLANET_PAIR_COUNTS)(
+    'finds every %s–%s conjunction of 1900–2100 (%i)',
+    (body, body2, expected) => {
+      const events = svc.findEvents('conjunction', {
+        start: new Date('1900-01-01T00:00:00Z'),
+        count: 1000,
+        body,
+        body2,
+      });
+      expect(events).toHaveLength(expected);
+      for (let i = 1; i < events.length; i++) {
+        expect(Date.parse(events[i]!.timeUtc)).toBeGreaterThan(Date.parse(events[i - 1]!.timeUtc));
+      }
+    },
+  );
+
+  it('finds every Moon–Mercury conjunction of 1900–2100', () => {
+    const events = svc.findEvents('conjunction', {
+      start: new Date('1900-01-01T00:00:00Z'),
+      count: 3000,
+      body: 'moon',
+      body2: 'mercury',
+    });
+    expect(events).toHaveLength(2485);
+  });
+
+  it.each([
+    ['mercury', 'venus'],
+    ['moon', 'saturn'],
+    ['venus', 'jupiter'],
+  ] as const)(
+    'resumes %s–%s an hour past the last event without repeating or skipping one',
+    (body, body2) => {
+      const start = new Date('1950-01-01T00:00:00Z');
+      const uncapped = svc.findEvents('conjunction', { start, count: 40, body, body2 });
+      const first = svc.findEvents('conjunction', { start, count: 20, body, body2 });
+      const resumeAt = new Date(Date.parse(first.at(-1)!.timeUtc) + 3_600_000);
+      const rest = svc.findEvents('conjunction', { start: resumeAt, count: 20, body, body2 });
+      expect(rest[0]?.body2).toBe(body2);
+      expectSameEvents([...first, ...rest], uncapped);
+    },
+  );
+
+  it('resumes between the two closest conjunctions of any pair, a day and a half apart', () => {
+    // Mercury–Venus in December 2069 is the tightest spacing of any pair in the span.
+    const start = new Date('2069-12-01T00:00:00Z');
+    const both = svc.findEvents('conjunction', {
+      start,
+      count: 2,
+      body: 'mercury',
+      body2: 'venus',
+    });
+    const gapDays = (Date.parse(both[1]!.timeUtc) - Date.parse(both[0]!.timeUtc)) / 86_400_000;
+    expect(gapDays).toBeLessThan(2);
+    const resumeAt = new Date(Date.parse(both[0]!.timeUtc) + 3_600_000);
+    expectSameEvents(
+      svc.findEvents('conjunction', { start: resumeAt, count: 1, body: 'mercury', body2: 'venus' }),
+      [both[1]!],
+    );
+  });
 });
 
 describe('position', () => {
@@ -779,6 +1039,167 @@ describe('riseSet', () => {
     expect(civil.dawnLocal?.slice(0, 10)).toBe('2026-09-24');
   });
 
+  /**
+   * A mid-latitude September series, pinned whole: each cycle's rise and set, the twilight
+   * of nights that reach every depth, and the instant a continuation resumes from — one
+   * second past the last set.
+   */
+  it('pins a mid-latitude series: rise, set, full twilight, and resume point', () => {
+    const sun = svc.riseSetSearch('sun', SEATTLE, new Date('2026-09-23T07:00:00Z'), 3);
+    expect(sun.events.map((e) => [e.riseUtc?.slice(0, 16), e.setUtc?.slice(0, 16)])).toEqual([
+      ['2026-09-23T13:57', '2026-09-24T02:04'],
+      ['2026-09-24T13:59', '2026-09-25T02:02'],
+      ['2026-09-25T14:00', '2026-09-26T02:00'],
+    ]);
+    expect(sun.events[0]?.twilight).toEqual({
+      civil: { dawnUtc: '2026-09-24T13:28:21.001Z', duskUtc: '2026-09-24T02:35:14.652Z' },
+      nautical: { dawnUtc: '2026-09-24T12:52:14.597Z', duskUtc: '2026-09-24T03:11:17.352Z' },
+      astronomical: { dawnUtc: '2026-09-24T12:15:07.007Z', duskUtc: '2026-09-24T03:48:21.931Z' },
+    });
+    expect(sun.events[1]?.twilight).toEqual({
+      civil: { dawnUtc: '2026-09-25T13:29:43.351Z', duskUtc: '2026-09-25T02:33:10.620Z' },
+      nautical: { dawnUtc: '2026-09-25T12:53:40.430Z', duskUtc: '2026-09-25T03:09:09.762Z' },
+      astronomical: { dawnUtc: '2026-09-25T12:16:39.748Z', duskUtc: '2026-09-25T03:46:07.375Z' },
+    });
+    expect(sun.resumeAt.toISOString()).toBe('2026-09-26T02:00:28.150Z');
+    const moon = svc.riseSetSearch('moon', SEATTLE, new Date('2026-10-15T04:00:00Z'), 2);
+    expect(moon.resumeAt.toISOString()).toBe('2026-10-17T04:44:07.461Z');
+  });
+
+  /** London — astronomical twilight returns in late July after its midsummer absence. */
+  const LONDON = { latitude: 51.5, longitude: -0.12, elevation: 0 };
+
+  it('nulls a depth the cycle_s night never reaches instead of borrowing a later night_s', () => {
+    const [cycle] = svc.riseSet('sun', LONDON, new Date('2026-07-20T00:00:00Z'), 1);
+    expect(cycle?.setUtc).toBe('2026-07-20T20:05:45.758Z');
+    // The Sun gets no deeper than −18° that night; the next night's dusk and dawn fall
+    // 27.6 h and 28.4 h after this set, past the next sunrise that bounds this night.
+    expect(cycle?.twilight?.astronomical).toEqual({ dawnUtc: null, duskUtc: null });
+  });
+
+  it('keeps every twilight time between its cycle_s set and the next rise', () => {
+    const sites = {
+      London: LONDON,
+      Paris: { latitude: 48.86, longitude: 2.35, elevation: 0 },
+      Helsinki: { latitude: 60.17, longitude: 24.94, elevation: 0 },
+    };
+    for (const [name, site] of Object.entries(sites)) {
+      const cycles = svc.riseSet('sun', site, new Date('2026-04-15T12:00:00Z'), 141);
+      for (const [i, cycle] of cycles.slice(0, -1).entries()) {
+        const set = Date.parse(cycle.setUtc as string);
+        const nextRise = Date.parse(cycles[i + 1]!.riseUtc as string);
+        for (const depth of ['civil', 'nautical', 'astronomical'] as const) {
+          for (const at of [cycle.twilight![depth].duskUtc, cycle.twilight![depth].dawnUtc]) {
+            if (at === null) continue;
+            const label = `${name} set ${cycle.setUtc} ${depth} ${at}`;
+            expect(Date.parse(at), label).toBeGreaterThan(set);
+            expect(Date.parse(at), label).toBeLessThan(nextRise);
+          }
+        }
+      }
+    }
+  });
+
+  /**
+   * After sunset the first cycle opens at the next sunrise, so its twilight is the night
+   * after that — the night under way at `start` is carried separately.
+   */
+  describe('the night in progress', () => {
+    const TZ = 'America/Los_Angeles';
+    /** HH:MM local of an ISO local timestamp, with its calendar date. */
+    const hhmm = (local: string | null | undefined) => local?.slice(0, 16);
+
+    it('reports the night under way after sunset, every depth bounded by that night', () => {
+      // 19:00 local, after the 18:22 sunset and inside nautical twilight.
+      const search = svc.riseSetSearch('sun', SEATTLE, new Date('2026-10-15T02:00:00Z'), 1, TZ);
+      const night = search.nightInProgress!;
+      expect(hhmm(night.civil.duskLocal)).toBe('2026-10-14T18:53');
+      expect(hhmm(night.civil.dawnLocal)).toBe('2026-10-15T06:57');
+      expect(hhmm(night.nautical.duskLocal)).toBe('2026-10-14T19:29');
+      expect(hhmm(night.nautical.dawnLocal)).toBe('2026-10-15T06:21');
+      expect(hhmm(night.astronomical.duskLocal)).toBe('2026-10-14T20:04');
+      expect(hhmm(night.astronomical.dawnLocal)).toBe('2026-10-15T05:45');
+      // The cycles are untouched: the first still opens at the next sunrise.
+      expect(search.events).toHaveLength(1);
+      expect(hhmm(search.events[0]?.riseLocal)).toBe('2026-10-15T07:28');
+    });
+
+    it('reports the same night from a pre-dawn start, including dawns already passed', () => {
+      const evening = svc.riseSetSearch('sun', SEATTLE, new Date('2026-10-15T02:00:00Z'), 1, TZ);
+      const predawn = svc.riseSetSearch('sun', SEATTLE, new Date('2026-10-15T13:30:00Z'), 1, TZ);
+      expect(predawn.nightInProgress).toEqual(evening.nightInProgress);
+      // 06:30 local: astronomical and nautical dawn precede the start and are still there.
+      expect(hhmm(predawn.nightInProgress?.astronomical.dawnLocal)).toBe('2026-10-15T05:45');
+      expect(hhmm(predawn.nightInProgress?.nautical.dawnLocal)).toBe('2026-10-15T06:21');
+    });
+
+    it('is absent while the Sun is up', () => {
+      expect(svc.riseSetSearch('sun', SEATTLE, SUN_UP_START, 1).nightInProgress).toBeUndefined();
+    });
+
+    it('nulls a depth that night never reaches', () => {
+      const { nightInProgress } = svc.riseSetSearch(
+        'sun',
+        LONDON,
+        new Date('2026-06-21T22:30:00Z'),
+        1,
+      );
+      expect(nightInProgress).toEqual({
+        civil: { dawnUtc: '2026-06-22T02:55:35.269Z', duskUtc: '2026-06-21T21:09:13.924Z' },
+        nautical: { dawnUtc: '2026-06-22T01:40:59.682Z', duskUtc: '2026-06-21T22:23:49.497Z' },
+        astronomical: { dawnUtc: null, duskUtc: null },
+      });
+    });
+
+    it('is absent when no sunset falls in the two days before start', () => {
+      // Tromsø the morning the polar night ends: a sunrise lies ahead, but no sunset behind.
+      const tromso = { latitude: 69.65, longitude: 18.96, elevation: 0 };
+      const search = svc.riseSetSearch('sun', tromso, new Date('2027-01-15T06:00:00Z'), 1);
+      expect(search.events[0]?.riseUtc).toBe('2027-01-15T10:34:40.655Z');
+      expect(search.nightInProgress).toBeUndefined();
+    });
+
+    /**
+     * Where the polar night lasts a day or two, the sunset inside the two-day look-back can
+     * precede a day the Sun never rose on. That sunset began an earlier night, which ended
+     * before `start`, so it is not the night under way.
+     */
+    it('is absent after the culmination of a day the Sun never rose on', () => {
+      // 67.4° N on the afternoon of 2026-12-21, a day without a sunrise: the first cycle is
+      // the rest of that day and carries its night; the sunset of the 20th is behind it.
+      const north = svc.riseSetSearch(
+        'sun',
+        { latitude: 67.4, longitude: 18.96, elevation: 0 },
+        new Date('2026-12-21T15:42:11.858Z'),
+        4,
+      );
+      expect(north.nightInProgress).toBeUndefined();
+      expect(north.events[0]?.transitUtc).toBeNull();
+      expect(north.events[0]?.twilight?.civil.duskUtc).toBe('2026-12-21T13:29:35.001Z');
+    });
+
+    it('is absent before the first sunrise after a day the Sun never rose on', () => {
+      // 67.39° S before dawn on 2027-06-22: the 21st had no sunrise, and the sunset of the
+      // 20th began the night that ended on the 21st.
+      const south = svc.riseSetSearch(
+        'sun',
+        { latitude: -67.39, longitude: -68.13, elevation: 0 },
+        new Date('2027-06-22T06:34:32.666Z'),
+        3,
+      );
+      expect(south.nightInProgress).toBeUndefined();
+      expect(south.events[0]?.riseUtc).toBe('2027-06-22T16:30:26.788Z');
+    });
+
+    it('is never computed for a body other than the Sun', () => {
+      for (const body of ['moon', 'mars'] as const) {
+        const search = svc.riseSetSearch(body, SEATTLE, new Date('2026-10-15T04:00:00Z'), 2);
+        expect(search.nightInProgress).toBeUndefined();
+        expect(search.events).toHaveLength(2);
+      }
+    });
+  });
+
   it('reports the Sun as circumpolar at the North Pole in June', () => {
     const events = svc.riseSet(
       'sun',
@@ -790,6 +1211,261 @@ describe('riseSet', () => {
     expect(e.riseUtc).toBeNull();
     expect(e.setUtc).toBeNull();
     expect(e.note).toMatch(/[Cc]ircumpolar/);
+  });
+
+  /**
+   * A cycle is one of the body's days. A day with no rise or no set — polar night, midnight
+   * sun, a day the Moon spends wholly below the horizon — is a cycle of its own, and a Sun
+   * cycle carries the night after its day, so consecutive cycles cover consecutive days and
+   * each night lands in exactly one cycle, across any number of continuation calls.
+   */
+  describe('polar days', () => {
+    const TROMSO = { latitude: 69.65, longitude: 18.96, elevation: 0 };
+    const SVALBARD = { latitude: 78.22, longitude: 15.65, elevation: 0 };
+    const minute = (iso: string | null | undefined) => iso?.slice(0, 16) ?? null;
+    const dayOf = (iso: string | null | undefined) => iso?.slice(0, 10) ?? null;
+    const civil = (e: RiseSetEvent) => [e.twilight?.civil.duskUtc, e.twilight?.civil.dawnUtc];
+    const ENGINE: Partial<Record<string, Body>> = {
+      sun: Body.Sun,
+      moon: Body.Moon,
+      venus: Body.Venus,
+    };
+
+    /** Every upper culmination of a body from `from` up to (not including) `until`. */
+    const culminationsBetween = (body: string, site: typeof TROMSO, from: Date, until: number) => {
+      const obs = new Observer(site.latitude, site.longitude, site.elevation);
+      const out: number[] = [];
+      for (let at = from; ; ) {
+        const next = SearchHourAngle(ENGINE[body]!, obs, 0, at, +1).time.date.getTime();
+        if (next >= until) return out;
+        out.push(next);
+        at = new Date(next + 60_000);
+      }
+    };
+
+    /** Every time the Sun's center descends through `altitude` between two instants. */
+    const dusksBetween = (site: typeof TROMSO, altitude: number, from: Date, until: number) => {
+      const obs = new Observer(site.latitude, site.longitude, site.elevation);
+      const out: number[] = [];
+      for (let at = from; at.getTime() < until; ) {
+        const days = (until - at.getTime()) / 86_400_000;
+        const dusk = SearchAltitude(Body.Sun, obs, -1, at, days, altitude);
+        if (!dusk) return out;
+        out.push(dusk.date.getTime());
+        at = new Date(dusk.date.getTime() + 60_000);
+      }
+      return out;
+    };
+
+    it('gives the first never-rises day the night after its own culmination', () => {
+      // The polar night begins at Tromsø on 2026-11-28.
+      const [lastSunrise, firstDark] = svc.riseSet(
+        'sun',
+        TROMSO,
+        new Date('2026-11-26T23:00:00Z'),
+        2,
+      );
+      expect(dayOf(lastSunrise?.riseUtc)).toBe('2026-11-27');
+      expect(civil(lastSunrise!)).toEqual(['2026-11-27T13:26:39.727Z', '2026-11-28T07:39:29.525Z']);
+      expect(firstDark?.riseUtc).toBeNull();
+      expect(minute(firstDark?.transitUtc)).toBe('2026-11-28T10:32');
+      expect(firstDark?.note).toBe('Never rises above the horizon at this latitude/date.');
+      // That day's own night — not the night of the 27th again.
+      expect(civil(firstDark!)).toEqual(['2026-11-28T13:23:55.715Z', '2026-11-29T07:42:51.928Z']);
+    });
+
+    it('keeps the last never-rises day before the Sun returns', () => {
+      // 2027-01-14 is the last day without a sunrise; it and the nights of the 13th and 14th
+      // each get a cycle before the sunrise of the 15th opens the next.
+      const cycles = svc.riseSet('sun', TROMSO, new Date('2027-01-12T12:00:00Z'), 4);
+      expect(cycles.map((e) => dayOf(e.transitUtc))).toEqual([
+        null,
+        '2027-01-13',
+        '2027-01-14',
+        '2027-01-15',
+      ]);
+      expect(dayOf(cycles[3]?.riseUtc)).toBe('2027-01-15');
+      expect(cycles.map((e) => dayOf(e.twilight?.civil.duskUtc))).toEqual([
+        '2027-01-12',
+        '2027-01-13',
+        '2027-01-14',
+        '2027-01-15',
+      ]);
+    });
+
+    it('keeps the last midnight-sun day before the Sun sets again', () => {
+      // The 24th has no sunset and the 25th's is its own cycle's, not the 24th's.
+      const cycles = svc.riseSet('sun', TROMSO, new Date('2026-07-23T00:00:00Z'), 4);
+      expect(cycles.map((e) => dayOf(e.transitUtc))).toEqual([
+        '2026-07-23',
+        '2026-07-24',
+        '2026-07-25',
+        '2026-07-26',
+      ]);
+      expect(cycles[1]?.setUtc).toBeNull();
+      expect(cycles[2]?.setUtc).toBe('2026-07-25T22:36:24.735Z');
+    });
+
+    it('notes a cycle that opens with the Sun up the same way at every position', () => {
+      // The midnight sun ends with the 2026-07-25 sunset: that cycle opens with the Sun
+      // already up, as its second cycle here and as the first of a call started there.
+      const start = new Date('2026-07-24T09:50:42.696Z');
+      const firstSet = svc.riseSet('sun', TROMSO, start, 2)[1]!;
+      expect(firstSet).toMatchObject({ riseUtc: null, setUtc: '2026-07-25T22:36:24.735Z' });
+      const note = 'Already above the horizon when this cycle opens — no rise in this cycle.';
+      expect(firstSet.note).toBe(note);
+      const { resumeAt } = svc.riseSetSearch('sun', TROMSO, start, 1);
+      const [paged] = svc.riseSet('sun', TROMSO, resumeAt, 1);
+      expect(paged).toEqual(firstSet);
+    });
+
+    it('keeps a rise and set that follow the start on the day it falls in', () => {
+      // 89.9° N near the March equinox: the Sun culminated below the horizon at 10:52Z, then
+      // rises a second after `start` and sets again before the day's lower culmination.
+      const [first] = svc.riseSet(
+        'sun',
+        { latitude: 89.9, longitude: 18.96, elevation: 0 },
+        new Date('2027-03-18T12:10:26.779Z'),
+        1,
+      );
+      expect(first?.riseUtc).toBe('2027-03-18T12:10:27.852Z');
+      expect(first?.setUtc).toBe('2027-03-18T14:53:56.784Z');
+    });
+
+    it('opens a polar-night afternoon with the rest of that day and its night', () => {
+      // 2026-12-10 at Tromsø: the Sun culminates below the horizon at 10:37Z.
+      const [rest, next] = svc.riseSet('sun', TROMSO, new Date('2026-12-10T12:00:00Z'), 2);
+      expect(rest).toMatchObject({
+        riseUtc: null,
+        setUtc: null,
+        transitUtc: null,
+        transitAltitudeDegrees: null,
+      });
+      expect(rest?.note).toBe(
+        'Below the horizon for the rest of a day whose culmination precedes the search start: no rise, set, or transit remains, and the twilight is the night that follows it.',
+      );
+      expect(civil(rest!)).toEqual(['2026-12-10T12:58:42.578Z', '2026-12-11T08:16:59.773Z']);
+      expect(minute(next?.transitUtc)).toBe('2026-12-11T10:37');
+      expect(dayOf(next?.twilight?.civil.duskUtc)).toBe('2026-12-11');
+      // Started after that dusk, the night keeps it rather than reading as one it never reaches.
+      const [late] = svc.riseSet('sun', TROMSO, new Date('2026-12-10T20:00:00Z'), 1);
+      expect(civil(late!)).toEqual(['2026-12-10T12:58:42.578Z', '2026-12-11T08:16:59.773Z']);
+    });
+
+    it('opens the evening of the last sunset with that night, and no night in progress', () => {
+      // The Sun set at 10:42Z and does not rise within the forward window, so the night
+      // under way has no defined end and is carried by the first cycle instead.
+      const start = new Date('2026-11-27T15:00:00Z');
+      const sunset = SearchRiseSet(Body.Sun, new Observer(69.65, 18.96, 0), -1, start, -2);
+      expect(sunset?.date.toISOString().slice(0, 16)).toBe('2026-11-27T10:42');
+      const search = svc.riseSetSearch('sun', TROMSO, start, 2);
+      const [rest, firstDark] = search.events;
+      expect(rest).toMatchObject({ riseUtc: null, setUtc: null, transitUtc: null });
+      expect(civil(rest!)).toEqual(['2026-11-27T13:26:39.728Z', '2026-11-28T07:39:29.525Z']);
+      expect(minute(firstDark?.transitUtc)).toBe('2026-11-28T10:32');
+      expect(dayOf(firstDark?.twilight?.civil.duskUtc)).toBe('2026-11-28');
+      expect(search.nightInProgress).toBeUndefined();
+    });
+
+    it('resumes past a polar-night boundary without repeating its night', () => {
+      // The last sunrise day alone, then a continuation from where it stopped.
+      const lastSunrise = svc.riseSetSearch('sun', TROMSO, new Date('2026-11-27T05:00:00Z'), 1);
+      const [after] = svc.riseSet('sun', TROMSO, lastSunrise.resumeAt, 1);
+      expect(dayOf(lastSunrise.events[0]?.twilight?.civil.duskUtc)).toBe('2026-11-27');
+      expect(minute(after?.transitUtc)).toBe('2026-11-28T10:32');
+      expect(dayOf(after?.twilight?.civil.duskUtc)).toBe('2026-11-28');
+      // The rest of a dark day resumes at the next day, not at a second rest of the same one.
+      const rest = svc.riseSetSearch('sun', TROMSO, new Date('2026-12-10T12:00:00Z'), 1);
+      const [following] = svc.riseSet('sun', TROMSO, rest.resumeAt, 1);
+      expect(minute(following?.transitUtc)).toBe('2026-12-11T10:37');
+      expect(dayOf(following?.twilight?.civil.duskUtc)).toBe('2026-12-11');
+    });
+
+    it('reports every culmination once and every Sun night once across a polar year', () => {
+      const walks = [
+        { body: 'sun', site: TROMSO, start: '2026-07-01T09:00:00Z', count: 366 },
+        { body: 'sun', site: SVALBARD, start: '2026-01-01T18:00:00Z', count: 366 },
+        { body: 'moon', site: TROMSO, start: '2026-01-03T00:00:00Z', count: 200 },
+        {
+          body: 'moon',
+          site: { latitude: 64, longitude: 18.96, elevation: 0 },
+          start: '2026-01-03T00:00:00Z',
+          count: 200,
+        },
+        { body: 'venus', site: TROMSO, start: '2026-01-03T07:13:00Z', count: 366 },
+      ] as const;
+      for (const { body, site, start, count } of walks) {
+        const label = `${body} at ${site.latitude} from ${start}`;
+        const cycles = svc.riseSet(body, site, new Date(start), count);
+        expect(cycles, label).toHaveLength(count);
+        const last = cycles.at(-1)!;
+        const until = Date.parse(last.riseUtc ?? last.transitUtc ?? last.setUtc!);
+        const transits = cycles.flatMap((e) => (e.transitUtc ? [Date.parse(e.transitUtc)] : []));
+        // No culmination reported twice, none stepped over.
+        const expected = culminationsBetween(
+          body,
+          site,
+          new Date(start),
+          transits.at(-1)! + 60_000,
+        );
+        const missing = expected.filter((t) => !transits.some((r) => Math.abs(r - t) < 120_000));
+        expect(
+          missing.map((t) => new Date(t).toISOString()),
+          label,
+        ).toEqual([]);
+        expect(transits, label).toHaveLength(expected.length);
+        if (body !== 'sun') continue;
+        for (const [depth, altitude] of [
+          ['civil', -6],
+          ['nautical', -12],
+          ['astronomical', -18],
+        ] as const) {
+          const dusks = cycles.flatMap((e) => {
+            const d = e.twilight![depth].duskUtc;
+            return d ? [Date.parse(d)] : [];
+          });
+          // No night in two cycles, and none dropped between them.
+          expect(new Set(dusks).size, `${label} ${depth}`).toBe(dusks.length);
+          const actual = dusksBetween(site, altitude, new Date(start), until);
+          const dropped = actual.filter((t) => !dusks.some((r) => Math.abs(r - t) < 120_000));
+          expect(
+            dropped.map((t) => new Date(t).toISOString()),
+            `${label} ${depth}`,
+          ).toEqual([]);
+          for (const e of cycles) {
+            const { duskUtc, dawnUtc } = e.twilight![depth];
+            if (duskUtc && dawnUtc) {
+              expect(Date.parse(dawnUtc), label).toBeGreaterThan(Date.parse(duskUtc));
+            }
+          }
+        }
+      }
+    });
+
+    it('serves a paged series across polar transitions exactly as one search does', () => {
+      const walks = [
+        { body: 'sun', site: TROMSO, start: '2026-11-01T12:00:00Z', count: 100 },
+        { body: 'sun', site: TROMSO, start: '2026-12-10T12:00:00Z', count: 70 },
+        { body: 'sun', site: SVALBARD, start: '2026-04-01T00:00:00Z', count: 100 },
+        { body: 'sun', site: SVALBARD, start: '2026-08-01T00:00:00Z', count: 100 },
+        { body: 'moon', site: TROMSO, start: '2026-01-03T00:00:00Z', count: 100 },
+      ] as const;
+      for (const { body, site, start, count } of walks) {
+        const label = `${body} at ${site.latitude} from ${start}`;
+        const direct = svc.riseSet(body, site, new Date(start), count);
+        const paged: RiseSetEvent[] = [];
+        let cursor = new Date(start);
+        let pages = 0;
+        while (paged.length < count) {
+          const page = svc.riseSetSearch(body, site, cursor, Math.min(31, count - paged.length));
+          paged.push(...page.events);
+          cursor = page.resumeAt;
+          pages++;
+        }
+        expect(pages, label).toBeGreaterThanOrEqual(3);
+        expect(paged, label).toEqual(direct);
+      }
+    });
   });
 });
 
@@ -1200,12 +1876,12 @@ describe('input validation', () => {
     },
   );
 
-  it('keeps the time_out_of_range hint intact for a year outside the span', () => {
+  it("leaves the time_out_of_range hint to the calling tool's contract", () => {
     const err = captureThrown(() => {
       svc.resolveTime('2200-01-01T00:00:00Z');
     });
     expect(err?.data?.reason).toBe('time_out_of_range');
-    expect(err?.data?.recovery?.hint).toBe('Use a date between 1900 and 2100.');
+    expect(err?.data?.recovery).toBeUndefined();
   });
 
   it('tags the unknown-timezone error with reason invalid_timezone', () => {
@@ -1306,6 +1982,54 @@ describe('findEvents — validation reasons', () => {
       expect(err?.data?.recovery?.hint).toMatch(/mercury/i);
       expect(err?.data?.recovery?.hint).not.toMatch(/outer planets/i);
     }
+  });
+
+  const notConjunction = (event: string) =>
+    `body2 applies only to the conjunction event, not "${event}".`;
+  const notPairable = (body: string) =>
+    `A two-body conjunction pairs the Moon and the planets; body "${body}" is not one of them.`;
+
+  it.each([
+    ['opposition', 'mars', 'jupiter', notConjunction('opposition')],
+    ['max_elongation', 'venus', 'jupiter', notConjunction('max_elongation')],
+    ['equinox', undefined, 'jupiter', notConjunction('equinox')],
+    [
+      'conjunction',
+      'saturn',
+      'saturn',
+      'body and body2 are both "saturn"; a conjunction needs two different bodies.',
+    ],
+    ['conjunction', 'sun', 'jupiter', notPairable('sun')],
+    ['conjunction', 'earth', 'moon', notPairable('earth')],
+  ] as const)(
+    'throws invalid_body_pair for %s of %s with body2 %s',
+    (event, body, body2, message) => {
+      const err = captureThrown(() => {
+        svc.findEvents(event, {
+          start: new Date('2026-01-01T00:00:00Z'),
+          count: 1,
+          ...(body ? { body } : {}),
+          body2,
+        });
+      });
+      expect(err?.data?.reason).toBe('invalid_body_pair');
+      expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err?.message).toBe(message);
+      expect(err?.data?.recovery?.hint).toBe(
+        findEventsTool.errors?.find((e) => e.reason === 'invalid_body_pair')?.recovery,
+      );
+    },
+  );
+
+  it('throws body_required for a two-body conjunction without a body', () => {
+    const err = captureThrown(() => {
+      svc.findEvents('conjunction', {
+        start: new Date('2026-01-01T00:00:00Z'),
+        count: 1,
+        body2: 'jupiter',
+      });
+    });
+    expect(err?.data?.reason).toBe('body_required');
   });
 
   it('still accepts the bodies each event class is defined for', () => {

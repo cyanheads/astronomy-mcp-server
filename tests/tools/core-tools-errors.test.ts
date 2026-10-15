@@ -7,7 +7,8 @@
  *   pagination), and format() completeness on the tools the happy-path file does
  *   not exercise. Closes with the contracts EphemerisService raises on all five
  *   (invalid_time, invalid_timezone, time_out_of_range), asserting each declared
- *   `recovery` is the same string the resolver throws, and one tool's error
+ *   `recovery` is the same string the resolver throws (time_out_of_range is thrown
+ *   with none, so the declared one fills it), and one tool's error
  *   reaching both client surfaces. The deterministic numeric correctness lives in
  *   the EphemerisService tests; here we assert the tool-layer contracts.
  * @module tests/tools/core-tools-errors.test
@@ -15,18 +16,30 @@
 
 import { type ErrorContract, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   type FindEventsOutputType,
   findEventsTool,
 } from '@/mcp-server/tools/definitions/find-events.tool.js';
 import { getMoonPhaseTool } from '@/mcp-server/tools/definitions/get-moon-phase.tool.js';
-import { getRiseSetTool } from '@/mcp-server/tools/definitions/get-rise-set.tool.js';
+import {
+  getRiseSetTool,
+  type RiseSetOutputType,
+} from '@/mcp-server/tools/definitions/get-rise-set.tool.js';
 import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
 import { num } from '@/mcp-server/tools/format-numbers.js';
-import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import {
+  getEphemerisService,
+  initEphemerisService,
+} from '@/services/ephemeris/ephemeris-service.js';
 import { STAR_CATALOG } from '@/services/ephemeris/star-catalog.js';
+import type {
+  EventBodyName,
+  EventName,
+  PairBodyName,
+  RiseSetEvent,
+} from '@/services/ephemeris/types.js';
 import { captureThrown } from '../helpers/capture-thrown.js';
 import {
   displayValuesOf,
@@ -240,8 +253,12 @@ describe('astronomy_get_rise_set — boundaries and contracts', () => {
     expect(result.events).toHaveLength(3);
   });
 
-  it('rejects a count above the maximum of 31', () => {
-    expect(() => getRiseSetTool.input.parse({ body: 'sun', ...SEATTLE, count: 50 })).toThrow();
+  it('rejects a count above the ceiling of 366, and a non-integer count', () => {
+    // Up to 366 is served 31 per call (see the per-call cap block below); past it the
+    // schema still rejects.
+    expect(() => getRiseSetTool.input.parse({ body: 'sun', ...SEATTLE, count: 367 })).toThrow();
+    expect(() => getRiseSetTool.input.parse({ body: 'sun', ...SEATTLE, count: 1.5 })).toThrow();
+    expect(getRiseSetTool.input.parse({ body: 'sun', ...SEATTLE, count: 366 }).count).toBe(366);
   });
 
   it('rejects a count below 1', () => {
@@ -300,6 +317,187 @@ describe('astronomy_get_rise_set — boundaries and contracts', () => {
       expect(text).toContain(`max alt ${v.toFixed(1)}°`);
       // A content[]-only client can recover the structured value, not just the rounding.
       expect(text).toContain(`[${v}]`);
+    }
+  });
+});
+
+/**
+ * A count past the 31-per-call cap is served up to the cap, with a notice naming the exact
+ * `start` that continues the series — the instant the cycle loop itself would resume from.
+ */
+describe('astronomy_get_rise_set — a count past the per-call cap', () => {
+  const call = async (input: Parameters<typeof runToolContract<typeof getRiseSetTool>>[1]) => {
+    const result = await runToolContract(getRiseSetTool, input);
+    expect(result.isError).toBeFalsy();
+    return { result, out: result.structuredContent as RiseSetOutputType & CapEnrichment };
+  };
+  /** One cycle's instants, in a form the wire and service shapes both reduce to. */
+  const wireKey = (e: RiseSetOutputType['events'][number]) =>
+    JSON.stringify([e.rise_utc, e.set_utc, e.transit_utc, e.note ?? null, e.twilight ?? null]);
+  const serviceKey = (e: RiseSetEvent) =>
+    JSON.stringify([
+      e.riseUtc,
+      e.setUtc,
+      e.transitUtc,
+      e.note ?? null,
+      e.twilight
+        ? Object.fromEntries(
+            (['civil', 'nautical', 'astronomical'] as const).map((d) => [
+              d,
+              { dawn_utc: e.twilight![d].dawnUtc, dusk_utc: e.twilight![d].duskUtc },
+            ]),
+          )
+        : null,
+    ]);
+
+  it('serves 31 cycles and names the exact resume start on both surfaces', async () => {
+    const { result, out } = await call({
+      body: 'sun',
+      ...SEATTLE,
+      start: '2026-10-15T19:00:00Z',
+      count: 40,
+    });
+    expect(out.events).toHaveLength(31);
+    expect(out.totalCount).toBe(31);
+    expect(out.truncated).toBe(true);
+    expect(out.shown).toBe(31);
+    expect(out.cap).toBe(31);
+    // One second past the 31st cycle's set, 2026-11-15T00:33:45.555Z.
+    expect(out.events[30]?.set_utc).toBe('2026-11-15T00:33:45.555Z');
+    expect(out.notice).toBe(
+      'Returned 31 of the 40 requested cycles (31 per call). Re-call with start 2026-11-15T00:33:46.555Z and count 9 for the rest.',
+    );
+    expect(allText(result)).toContain(out.notice!);
+  });
+
+  it('resumes at the named start without repeating or skipping a cycle', async () => {
+    const svc = getEphemerisService();
+    const sites = [
+      { latitude: 47.6, longitude: -122.33 },
+      { latitude: 69.65, longitude: 18.96 },
+      { latitude: -33.9, longitude: 18.4 },
+    ];
+    for (const site of sites) {
+      for (const body of ['sun', 'moon', 'mars', 'jupiter'] as const) {
+        const label = `${body} at ${site.latitude}`;
+        const start = '2026-10-15T19:00:00Z';
+        const first = await call({ body, ...site, start, count: 40 });
+        const resume = resumeOf(first.out.notice);
+        expect(resume?.count, label).toBe(9);
+        const rest = await call({ body, ...site, ...resume });
+        expect(rest.out.notice, label).toBeUndefined();
+        const uncapped = svc.riseSet(body, { ...site, elevation: 0 }, new Date(start), 40);
+        expect([...first.out.events, ...rest.out.events].map(wireKey), label).toEqual(
+          uncapped.map(serviceKey),
+        );
+      }
+    }
+  });
+
+  it('resumes just past the lower culmination of a last cycle that has no set', async () => {
+    // Tromsø's midnight sun: every cycle is circumpolar, so the loop resumes past each day's lower culmination.
+    const tromso = { latitude: 69.65, longitude: 18.96 };
+    const first = await call({ body: 'sun', ...tromso, start: '2026-06-01T00:00:00Z', count: 40 });
+    expect(first.out.events[30]?.set_utc).toBeNull();
+    const resume = resumeOf(first.out.notice);
+    expect(resume).toEqual({ start: '2026-07-01T22:48:09.206Z', count: 9 });
+    const rest = await call({ body: 'sun', ...tromso, ...resume });
+    const uncapped = getEphemerisService().riseSet(
+      'sun',
+      { ...tromso, elevation: 0 },
+      new Date('2026-06-01T00:00:00Z'),
+      40,
+    );
+    expect(rest.out.events.map(wireKey)).toEqual(uncapped.slice(31).map(serviceKey));
+  });
+
+  /**
+   * The named start falls one second past the last cycle's set, so the Sun is down there and
+   * the continuation reports the night under way — the one the previous call's last cycle
+   * already carried. Its events pick up at the next sunrise without repeating it.
+   */
+  it('repeats the last cycle_s night as the continuation_s night in progress', async () => {
+    const start = '2026-10-15T19:00:00Z';
+    const first = await call({ body: 'sun', ...SEATTLE, start, count: 40 });
+    const rest = await call({ body: 'sun', ...SEATTLE, ...resumeOf(first.out.notice) });
+    const last = first.out.events[30]!;
+    const night = rest.out.night_in_progress!;
+    for (const depth of ['civil', 'nautical', 'astronomical'] as const) {
+      for (const side of ['dusk_utc', 'dawn_utc'] as const) {
+        const label = `${depth} ${side}`;
+        const carried = Date.parse(night[depth][side]!);
+        const previous = Date.parse(last.twilight![depth][side]!);
+        expect(Math.abs(carried - previous), label).toBeLessThan(1000);
+        expect(allText(rest.result), label).toContain(night[depth][side]!);
+      }
+    }
+    expect(Date.parse(rest.out.events[0]!.rise_utc!)).toBeGreaterThan(Date.parse(last.set_utc!));
+    const uncapped = getEphemerisService().riseSet(
+      'sun',
+      { ...SEATTLE, elevation: 0 },
+      new Date(start),
+      40,
+    );
+    expect([...first.out.events, ...rest.out.events].map(wireKey)).toEqual(
+      uncapped.map(serviceKey),
+    );
+  });
+
+  it('names the whole remainder at the ceiling', async () => {
+    const { out } = await call({
+      body: 'moon',
+      ...SEATTLE,
+      start: '2026-10-15T19:00:00Z',
+      count: 366,
+    });
+    expect(out.events).toHaveLength(31);
+    expect(out.notice).toMatch(
+      /^Returned 31 of the 366 requested cycles \(31 per call\)\. Re-call with start \S+ and count 335 for the rest\.$/,
+    );
+  });
+
+  it('names no continuation when the next cycle starts past the supported span', async () => {
+    // The 31st sunset from 2100-12-15 falls in 2101, so the start that would continue the
+    // series — one second past it — lies where every call fails time_out_of_range.
+    const { result, out } = await call({
+      body: 'sun',
+      ...SEATTLE,
+      start: '2100-12-15T00:00:00Z',
+      count: 40,
+    });
+    expect(out.events).toHaveLength(31);
+    expect(out.events[30]?.set_utc).toBe('2101-01-14T00:42:22.254Z');
+    expect(out).toMatchObject({ truncated: true, shown: 31, cap: 31 });
+    expect(out.notice).toBe(
+      'Returned 31 of the 40 requested cycles (31 per call). The next cycle starts past the end of the supported span (2100), so no call can continue the series.',
+    );
+    expect(allText(result)).toContain(out.notice!);
+    const next = await runToolContract(getRiseSetTool, {
+      body: 'sun',
+      ...SEATTLE,
+      start: '2101-01-14T00:42:23.254Z',
+      count: 9,
+    });
+    expect(errorEnvelope(next)?.data?.reason).toBe('time_out_of_range');
+  });
+
+  it('names a continuation that lands inside the span, and it succeeds', async () => {
+    const first = await call({ body: 'sun', ...SEATTLE, start: '2100-11-01T00:00:00Z', count: 40 });
+    const resume = resumeOf(first.out.notice);
+    expect(resume).toEqual({ start: '2100-12-01T00:20:14.028Z', count: 9 });
+    const rest = await call({ body: 'sun', ...SEATTLE, ...resume });
+    expect(rest.out.events).toHaveLength(9);
+    expect(rest.out.notice).toBeUndefined();
+  });
+
+  it('adds no notice or truncation at or under the cap', async () => {
+    for (const count of [1, 31]) {
+      const { out } = await call({ body: 'sun', ...SEATTLE, start: '2026-10-15T19:00:00Z', count });
+      expect(out.events).toHaveLength(count);
+      expect(out.totalCount).toBe(count);
+      for (const key of ['notice', 'truncated', 'shown', 'cap']) {
+        expect(key in out, `${key} at count ${count}`).toBe(false);
+      }
     }
   });
 });
@@ -436,8 +634,36 @@ describe('astronomy_find_events — error contracts and validation', () => {
     expect(e.contacts?.peak_utc).toBeTruthy();
   });
 
-  it('rejects a count above the maximum of 20', () => {
-    expect(() => findEventsTool.input.parse({ event: 'equinox', count: 21 })).toThrow();
+  it('rejects a count above the ceiling of 200, below 1, or fractional', () => {
+    for (const count of [201, 0, 1.5]) {
+      expect(() => findEventsTool.input.parse({ event: 'equinox', count }), `${count}`).toThrow();
+    }
+    expect(findEventsTool.input.parse({ event: 'equinox', count: 200 }).count).toBe(200);
+  });
+
+  it('passes body2 on an event other than conjunction through to fail invalid_body_pair', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'opposition',
+      body: 'mars',
+      body2: 'saturn',
+      start: '2026-01-01T00:00:00Z',
+    });
+    const err = errorEnvelope(result);
+    expect(result.isError).toBe(true);
+    expect(err?.data?.reason).toBe('invalid_body_pair');
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.recovery?.hint).toBe(
+      declaredRecovery(findEventsTool.errors, 'invalid_body_pair'),
+    );
+  });
+
+  it('rejects the Sun or Earth as body2 at the schema', () => {
+    for (const body2 of ['sun', 'earth']) {
+      expect(
+        findEventsTool.input.safeParse({ event: 'conjunction', body: 'venus', body2 }).success,
+        body2,
+      ).toBe(false);
+    }
   });
 
   it('format() renders a body-relative event headline (perigee_apogee)', async () => {
@@ -744,6 +970,326 @@ describe('astronomy_find_events — the end of the supported span', () => {
     expect(eventsOf(result)).toHaveLength(4);
     expect(noticeOf(result)).toBeUndefined();
     expect(allText(result)).not.toContain('supported span');
+  });
+
+  it('stops a slow two-body pair at the span end with the same notice', async () => {
+    const jupiterSaturn = await runToolContract(findEventsTool, {
+      event: 'conjunction',
+      body: 'jupiter',
+      body2: 'saturn',
+      start: '2026-10-15T00:00:00Z',
+      count: 5,
+    });
+    expect(eventsOf(jupiterSaturn)).toHaveLength(4);
+    expect(noticeOf(jupiterSaturn)).toBe(
+      'The search reached the end of the supported span (2100) after 4 of 5 requested events; no occurrence after 2100 is computed.',
+    );
+
+    const uranusNeptune = await runToolContract(findEventsTool, {
+      event: 'conjunction',
+      body: 'uranus',
+      body2: 'neptune',
+      start: '2026-10-15T00:00:00Z',
+    });
+    expect(eventsOf(uranusNeptune)).toEqual([]);
+    expect(noticeOf(uranusNeptune)).toBe(
+      'The search reached the end of the supported span (2100) after 0 of 1 requested events; no occurrence after 2100 is computed.',
+    );
+    expect(allText(uranusNeptune)).toContain(noticeOf(uranusNeptune)!);
+  });
+});
+
+/**
+ * Two-body conjunctions name both bodies and carry the separation at the conjunction
+ * instant, on both client surfaces.
+ */
+describe('astronomy_find_events — two-body conjunctions on both surfaces', () => {
+  it('reports Venus–Jupiter with both bodies and the separation', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'conjunction',
+      body: 'venus',
+      body2: 'jupiter',
+      start: '2026-10-15T00:00:00Z',
+      timezone: 'Europe/Rome',
+    });
+    expect(result.isError).toBeFalsy();
+    const out = findEventsTool.output.parse(result.structuredContent);
+    const e = out.events[0]!;
+    expect(e.event).toBe('conjunction');
+    expect(e.body).toBe('venus');
+    expect(e.body2).toBe('jupiter');
+    expect(e.time_utc.slice(0, 16)).toBe('2027-08-26T02:59');
+    expect(e.time_local?.slice(0, 16)).toBe('2027-08-26T04:59');
+    expect(Math.abs(e.separation_degrees! - 0.495)).toBeLessThanOrEqual(0.005);
+    expect(e.conjunction_kind).toBeUndefined();
+
+    const text = firstText(result);
+    expect(text).toContain('### conjunction — venus and jupiter');
+    expect(text).toContain(`**Separation:** ${num(e.separation_degrees!, 3, '°')}`);
+    expectContentCarriesEveryNumber(result);
+    expectRoundedDisplay(text);
+  });
+
+  it('keeps a conjunction with the Sun free of the two-body fields', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'conjunction',
+      body: 'venus',
+      start: '2026-10-15T00:00:00Z',
+    });
+    const e = eventsOf(result)[0]!;
+    expect(e.conjunction_kind).toBe('inferior');
+    expect('body2' in e).toBe(false);
+    expect('separation_degrees' in e).toBe(false);
+    const text = firstText(result);
+    expect(text).toContain('### conjunction — venus\n');
+    expect(text).not.toContain('Separation');
+  });
+});
+
+/**
+ * A `count` past 20 is served 20 at a time. The notice names the exact `start` that
+ * continues the series — an hour past the last event returned, ten days past the last
+ * eclipse.
+ */
+describe('astronomy_find_events — a count past the per-call cap', () => {
+  const call = async (input: Parameters<typeof runToolContract<typeof findEventsTool>>[1]) => {
+    const result = await runToolContract(findEventsTool, input);
+    expect(result.isError).toBeFalsy();
+    return { result, out: result.structuredContent as FindEventsOutputType & CapEnrichment };
+  };
+  /**
+   * The served events match an uncapped search one for one. Each instant is refined to
+   * within a second of the true one, from whichever bracket the search starts in, so the
+   * two can differ by under two seconds — never by an event.
+   */
+  const expectSameInstants = (
+    served: FindEventsOutputType['events'],
+    uncapped: ReadonlyArray<{ timeUtc: string }>,
+  ) => {
+    expect(served).toHaveLength(uncapped.length);
+    served.forEach((e, i) => {
+      expect(
+        Math.abs(Date.parse(e.time_utc) - Date.parse(uncapped[i]!.timeUtc)),
+        `#${i + 1}`,
+      ).toBeLessThan(2000);
+    });
+  };
+
+  it('serves 20 events and names the exact resume start on both surfaces', async () => {
+    const { result, out } = await call({
+      event: 'moon_quarter',
+      start: '2026-10-15T00:00:00Z',
+      count: 24,
+    });
+    expect(out.events).toHaveLength(20);
+    expect(out.totalCount).toBe(20);
+    expect(out.truncated).toBe(true);
+    expect(out.shown).toBe(20);
+    expect(out.cap).toBe(20);
+    // One hour past the 20th event, 2027-03-08T09:30:07.391Z.
+    expect(out.events[19]?.time_utc).toBe('2027-03-08T09:30:07.391Z');
+    expect(out.notice).toBe(
+      'Returned 20 of the 24 requested events (20 per call). Re-call with start 2027-03-08T10:30:07.391Z and count 4 for the rest.',
+    );
+    expect(allText(result)).toContain(out.notice!);
+  });
+
+  /**
+   * One search per hour-offset class: the event and its body or pair. The eclipse classes,
+   * which resume ten days on, are walked page by page below.
+   */
+  interface ClassCase {
+    body?: EventBodyName;
+    body2?: PairBodyName;
+    event: EventName;
+  }
+  const CLASSES: Array<[string, ClassCase]> = [
+    ['equinox', { event: 'equinox' }],
+    ['solstice', { event: 'solstice' }],
+    ['moon_quarter', { event: 'moon_quarter' }],
+    ['opposition of jupiter', { event: 'opposition', body: 'jupiter' }],
+    ['conjunction of venus', { event: 'conjunction', body: 'venus' }],
+    ['conjunction of mercury', { event: 'conjunction', body: 'mercury' }],
+    ['max_elongation of mercury', { event: 'max_elongation', body: 'mercury' }],
+    ['perigee_apogee of the moon', { event: 'perigee_apogee', body: 'moon' }],
+    ['perigee_apogee of earth', { event: 'perigee_apogee', body: 'earth' }],
+    ['conjunction of mercury and venus', { event: 'conjunction', body: 'mercury', body2: 'venus' }],
+    ['conjunction of the moon and saturn', { event: 'conjunction', body: 'moon', body2: 'saturn' }],
+  ];
+
+  it.each(CLASSES)(
+    'resumes %s at the named start without repeating or skipping an event',
+    async (_label, { event, body, body2 }) => {
+      const start = '2026-10-15T00:00:00Z';
+      const args = { event, ...(body ? { body } : {}), ...(body2 ? { body2 } : {}) };
+      const first = await call({ ...args, start, count: 40 });
+      expect(first.out.events).toHaveLength(20);
+      const resume = resumeOf(first.out.notice);
+      expect(resume?.count).toBe(20);
+      const rest = await call({ ...args, ...resume });
+      expect(rest.out.notice).toBeUndefined();
+      const uncapped = getEphemerisService().findEvents(event, {
+        start: new Date(start),
+        count: 40,
+        ...(body ? { body } : {}),
+        ...(body2 ? { body2 } : {}),
+      });
+      expectSameInstants([...first.out.events, ...rest.out.events], uncapped);
+    },
+  );
+
+  /**
+   * Every eclipse search restarts at the next new or full moon after its start, and a local
+   * solar eclipse can peak hours before the geocentric new moon, so a resume start an hour
+   * past such a peak would still find it. An eclipse series resumes ten days past its last
+   * eclipse — the step astronomy-engine itself takes between consecutive eclipses.
+   */
+  it('resumes a local solar eclipse series past the eclipse it ended on', async () => {
+    const args = { event: 'solar_eclipse', latitude: 0, longitude: 0 } as const;
+    const first = await call({ ...args, start: '1950-03-01T00:00:00Z', count: 24 });
+    expect(first.out.events).toHaveLength(20);
+    expect(first.out.events[19]?.time_utc).toBe('2002-12-04T05:47:26.311Z');
+    expect(first.out.notice).toBe(
+      'Returned 20 of the 24 requested events (20 per call). Re-call with start 2002-12-14T05:47:26.311Z and count 4 for the rest.',
+    );
+    expect(allText(first.result)).toContain(first.out.notice!);
+    const rest = await call({ ...args, ...resumeOf(first.out.notice) });
+    expect(rest.out.events.map((e) => e.time_utc)).toEqual([
+      '2005-10-03T10:05:17.375Z',
+      '2006-03-29T09:02:30.840Z',
+      '2006-09-22T11:02:06.755Z',
+      '2010-01-15T05:17:24.355Z',
+    ]);
+    expect(rest.out.notice).toBeUndefined();
+  });
+
+  it.each([
+    ['lunar_eclipse', { event: 'lunar_eclipse' }],
+    ['lunar_eclipse from 60° N, 60° E', { event: 'lunar_eclipse', latitude: 60, longitude: 60 }],
+    ['global solar_eclipse', { event: 'solar_eclipse' }],
+    ['solar_eclipse from 0°, 0°', { event: 'solar_eclipse', latitude: 0, longitude: 0 }],
+    ['solar_eclipse from 30° S, 60° E', { event: 'solar_eclipse', latitude: -30, longitude: 60 }],
+  ] as const)(
+    'walks every page of %s from 1900 without repeating or skipping an eclipse',
+    async (_label, args) => {
+      const start = '1900-01-01T00:00:00Z';
+      const observer =
+        'latitude' in args
+          ? { latitude: args.latitude, longitude: args.longitude, elevation: 0 }
+          : undefined;
+      const uncapped = getEphemerisService().findEvents(args.event, {
+        start: new Date(start),
+        count: 200,
+        ...(observer ? { observer } : {}),
+      });
+      const served: FindEventsOutputType['events'] = [];
+      let next: { start: string; count: number } | undefined = { start, count: 200 };
+      let lastNotice: string | undefined;
+      for (let page = 1; next; page++) {
+        expect(page, 'pages walked').toBeLessThanOrEqual(11);
+        const { out } = await call({ ...args, ...next });
+        served.push(...out.events);
+        lastNotice = out.notice;
+        next = resumeOf(out.notice);
+      }
+      // The four solar walks past an observer end at 2100 with fewer than 200 eclipses.
+      if (uncapped.length === 200) expect(lastNotice).toBeUndefined();
+      else expect(lastNotice).toMatch(/^The search reached the end of the supported span/);
+      expectSameInstants(served, uncapped);
+    },
+  );
+
+  it('names the whole remainder at the ceiling', async () => {
+    const { out } = await call({
+      event: 'moon_quarter',
+      start: '2026-10-15T00:00:00Z',
+      count: 200,
+    });
+    expect(out.events).toHaveLength(20);
+    expect(out.notice).toMatch(
+      /^Returned 20 of the 200 requested events \(20 per call\)\. Re-call with start \S+ and count 180 for the rest\.$/,
+    );
+  });
+
+  /**
+   * A 20th event whose resume start would leave the span: an hour past it for most
+   * classes, ten days past it for an eclipse. No class has an event that close to the end
+   * of 2100, so the service is stubbed at the tool seam with 20 events of the class ending
+   * at the instant under test, spaced as that class's events are. From 2100-12-31T23:00Z
+   * (2100-12-22T00:00Z for an eclipse) on, the resume start falls past 2100 and the span
+   * notice replaces the cap notice; no event of the class lies in that gap, so none is lost.
+   */
+  describe('a 20th event at the edge of the span', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+    const SPAN_NOTICE =
+      'The search reached the end of the supported span (2100) after 20 of 40 requested events; no occurrence after 2100 is computed.';
+    const CAP_NOTICE =
+      'Returned 20 of the 40 requested events (20 per call). Re-call with start 2100-12-31T23:59:59.999Z and count 20 for the rest.';
+    const RECORDS = {
+      moon_quarter: { record: { event: 'moon_quarter', quarter: 'new' }, spacingDays: 7 },
+      lunar_eclipse: { record: { event: 'lunar_eclipse', kind: 'penumbral' }, spacingDays: 177 },
+    } as const;
+
+    it.each([
+      ['moon_quarter', '2100-12-31T23:00:00.000Z', SPAN_NOTICE],
+      ['moon_quarter', '2100-12-31T22:59:59.999Z', CAP_NOTICE],
+      ['lunar_eclipse', '2100-12-22T00:00:00.000Z', SPAN_NOTICE],
+      ['lunar_eclipse', '2100-12-21T23:59:59.999Z', CAP_NOTICE],
+    ] as const)('%s ending at %s', async (event, lastIso, notice) => {
+      const { record, spacingDays } = RECORDS[event];
+      vi.spyOn(getEphemerisService(), 'findEvents').mockReturnValue(
+        Array.from({ length: 20 }, (_unused, k) => ({
+          ...record,
+          timeUtc: new Date(
+            Date.parse(lastIso) - (19 - k) * spacingDays * 86_400_000,
+          ).toISOString(),
+        })),
+      );
+      const { result, out } = await call({ event, start: '2091-01-01T00:00:00Z', count: 40 });
+      expect(out.events).toHaveLength(20);
+      expect(out.notice).toBe(notice);
+      expect(allText(result)).toContain(notice);
+      if (notice === CAP_NOTICE) expect(out).toMatchObject({ truncated: true, shown: 20, cap: 20 });
+      else for (const key of ['truncated', 'shown', 'cap']) expect(key in out, key).toBe(false);
+    });
+  });
+
+  it('adds no notice or truncation at or under the cap', async () => {
+    for (const count of [1, 20]) {
+      const { out } = await call({ event: 'moon_quarter', start: '2026-10-15T00:00:00Z', count });
+      expect(out.events).toHaveLength(count);
+      expect(out.totalCount).toBe(count);
+      for (const key of ['notice', 'truncated', 'shown', 'cap']) {
+        expect(key in out, `${key} at count ${count}`).toBe(false);
+      }
+    }
+  });
+
+  it('gives the span notice alone when the span ends before the cap', async () => {
+    const { out } = await call({ event: 'moon_quarter', start: '2100-11-01T00:00:00Z', count: 40 });
+    expect(out.events).toHaveLength(9);
+    expect(out.notice).toBe(
+      'The search reached the end of the supported span (2100) after 9 of 40 requested events; no occurrence after 2100 is computed.',
+    );
+    for (const key of ['truncated', 'shown', 'cap']) expect(key in out, key).toBe(false);
+  });
+
+  it('gives the cap notice alone when exactly 20 events remain, and the span notice on the resume', async () => {
+    // The last 20 moon quarters of the span begin 2100-08-12.
+    const first = await call({ event: 'moon_quarter', start: '2100-08-10T00:00:00Z', count: 40 });
+    expect(first.out.events).toHaveLength(20);
+    expect(first.out.truncated).toBe(true);
+    expect(first.out.notice).toBe(
+      'Returned 20 of the 40 requested events (20 per call). Re-call with start 2100-12-31T00:56:53.058Z and count 20 for the rest.',
+    );
+    const rest = await call({ event: 'moon_quarter', ...resumeOf(first.out.notice) });
+    expect(rest.out.events).toEqual([]);
+    expect(rest.out.notice).toBe(
+      'The search reached the end of the supported span (2100) after 0 of 20 requested events; no occurrence after 2100 is computed.',
+    );
+    expect('truncated' in rest.out).toBe(false);
   });
 });
 
@@ -1080,6 +1626,21 @@ function declaredRecovery(errors: readonly ErrorContract[] | undefined, reason: 
   return entry.recovery;
 }
 
+/** The enrichment a capped series adds beside a successful call's output. */
+interface CapEnrichment {
+  cap?: number;
+  notice?: string;
+  shown?: number;
+  totalCount?: number;
+  truncated?: boolean;
+}
+
+/** The resume `start` and `count` a per-call cap notice names. */
+function resumeOf(notice: string | undefined): { start: string; count: number } | undefined {
+  const match = /Re-call with start (\S+) and count (\d+) for the rest\.$/.exec(notice ?? '');
+  return match?.[1] && match[2] ? { start: match[1], count: Number(match[2]) } : undefined;
+}
+
 /** One core tool, with everything needed to drive its handler through the resolvers. */
 interface CoreToolCase {
   /** Parse `raw` against this tool's input schema and run its handler on a wired ctx. */
@@ -1155,7 +1716,9 @@ const CORE_TOOL_CASES: CoreToolCase[] = [
  * throw site rather than resolved from the calling tool's contract. Nothing links the
  * two, so a declared `recovery` can drift into documenting a next move no client is
  * ever handed — or, as here, a reachable reason can go undeclared entirely. Each case
- * asserts the declared string and the thrown hint are the same string.
+ * asserts the declared string and the thrown hint are the same string. `time_out_of_range`
+ * is the exception: it is thrown with no hint, so the framework sends each tool's own
+ * declared recovery (asserted on the wire in error-contract-coverage.test.ts).
  */
 describe.each(CORE_TOOL_CASES)('$name — service-raised contracts', (c) => {
   it('declares the invalid_time hint resolveTime() throws', () => {
@@ -1176,13 +1739,13 @@ describe.each(CORE_TOOL_CASES)('$name — service-raised contracts', (c) => {
     expect(err?.data?.recovery?.hint).toBe(declaredRecovery(c.errors, 'invalid_timezone'));
   });
 
-  it('leaves time_out_of_range on the wire unchanged', () => {
+  it('raises time_out_of_range with no hint, leaving the declared recovery to fill it', () => {
     const err = captureThrown(() => {
       c.call({ ...c.valid, [c.timeField]: '1850-01-01T00:00:00Z' });
     });
     expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(err?.data?.reason).toBe('time_out_of_range');
-    expect(err?.data?.recovery?.hint).toBe('Use a date between 1900 and 2100.');
+    expect(err?.data?.recovery).toBeUndefined();
   });
 
   it('still answers a real instant in a known zone', async () => {

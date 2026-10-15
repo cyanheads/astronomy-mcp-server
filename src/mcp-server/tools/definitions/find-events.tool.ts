@@ -2,8 +2,11 @@
  * @fileoverview astronomy_find_events — consolidated forward search for nine event
  *   classes under one `event` enum. Both eclipse classes take an optional observer:
  *   solar eclipses are global without one and local with one, and lunar eclipses gain
- *   the Moon's altitude at each contact. Every other class is geocentric. Every search
- *   stops at the end of the supported span, with a notice when that cuts a list short.
+ *   the Moon's altitude at each contact. Every other class is geocentric; `body2` turns a
+ *   conjunction with the Sun into one of two bodies. Every search stops at the end of the
+ *   supported span, with a notice when that cuts a list short, and serves at most
+ *   `EVENTS_PER_CALL` events per call with a notice naming the `start` and `count` that
+ *   continue.
  *   Validation gates fail fast when an event needs a body that was not supplied, when an
  *   eclipse observer is half-specified, or when the body has no such event.
  * @module mcp-server/tools/definitions/find-events.tool
@@ -14,7 +17,36 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { num, pct, sig } from '@/mcp-server/tools/format-numbers.js';
 import { getEphemerisService, SUPPORTED_SPAN } from '@/services/ephemeris/ephemeris-service.js';
-import { EVENT_BODY_NAMES, EVENT_NAMES, type EventName } from '@/services/ephemeris/types.js';
+import {
+  EVENT_BODY_NAMES,
+  EVENT_NAMES,
+  type EventName,
+  PAIR_BODY_NAMES,
+} from '@/services/ephemeris/types.js';
+
+/** Events computed per call; a larger `count` is served this many with a resume notice. */
+const EVENTS_PER_CALL = 20;
+
+/** Largest `count` accepted. Past it the schema rejects. */
+const EVENTS_COUNT_CEILING = 200;
+
+/**
+ * How far past the last returned event the resume `start` falls for every class but the
+ * eclipses. A second is too close for a search that can find the event it starts on
+ * again; an hour clears that and stays well under the closest spacing of two consecutive
+ * events of one search, about a day and a half.
+ */
+const RESUME_OFFSET_MS = 3_600_000;
+
+/**
+ * The resume offset for both eclipse classes: ten days, the step astronomy-engine's own
+ * `Next*Eclipse` takes from one peak to the next search, so a continued series is the one
+ * a single search returns. Each eclipse search restarts at the next new or full moon after
+ * its start, and a local solar eclipse can peak more than two hours before the geocentric
+ * new moon, so an hour past it is still before that new moon and finds the same eclipse.
+ * Consecutive eclipses of one class lie at least 29 days apart, so none is skipped.
+ */
+const ECLIPSE_RESUME_OFFSET_MS = 10 * 86_400_000;
 
 const BODY_EVENTS = new Set<EventName>([
   'opposition',
@@ -23,7 +55,7 @@ const BODY_EVENTS = new Set<EventName>([
   'perigee_apogee',
 ]);
 
-/** The event classes whose records an observer changes. */
+/** The event classes whose records an observer changes, and that resume ten days on. */
 const ECLIPSE_EVENTS = new Set<EventName>(['solar_eclipse', 'lunar_eclipse']);
 
 export const FindEventsOutput = z.object({
@@ -94,13 +126,25 @@ export const FindEventsOutput = z.object({
             .string()
             .optional()
             .describe(
-              'The target body. Present for opposition/conjunction/max_elongation/perigee_apogee.',
+              'The target body — the first of the pair for a two-body conjunction. Present for opposition/conjunction/max_elongation/perigee_apogee.',
+            ),
+          body2: z
+            .string()
+            .optional()
+            .describe(
+              'The second body of a two-body conjunction, as requested. Present only when `body2` was supplied.',
+            ),
+          separation_degrees: z
+            .number()
+            .optional()
+            .describe(
+              "Angular separation in degrees between body and body2 seen from Earth's center at the conjunction instant. Not always their closest approach: two planets can pass closer days or weeks away. Present only for a two-body conjunction.",
             ),
           conjunction_kind: z
             .enum(['inferior', 'superior'])
             .optional()
             .describe(
-              'Whether the planet passes between Earth and the Sun (inferior) or behind the Sun (superior). Present only for mercury and venus conjunctions, the two bodies that reach both.',
+              'Whether the planet passes between Earth and the Sun (inferior) or behind the Sun (superior). Present only for mercury and venus conjunctions with the Sun, the two bodies that reach both.',
             ),
           elongation_degrees: z
             .number()
@@ -143,7 +187,7 @@ export type FindEventsOutputType = z.infer<typeof FindEventsOutput>;
 export const findEventsTool = tool('astronomy_find_events', {
   title: 'astronomy-mcp-server: find sky events',
   description:
-    "Search forward from a start time for the next occurrences of one sky-event class, selected by the `event` enum: solar_eclipse, lunar_eclipse, equinox, solstice, moon_quarter, opposition, conjunction, max_elongation, or perigee_apogee. Both eclipse classes take an optional observer (latitude and longitude together). solar_eclipse without one returns global eclipses — kind, peak time, obscuration, and for a total or annular eclipse the latitude/longitude where it is greatest; with one it returns only eclipses visible from that point, with local contact times, `local_visible`, and the Sun's altitude at each contact. lunar_eclipse returns geocentric contact times, the same instants everywhere on Earth; an observer adds `local_visible` and the Moon's altitude at each contact. Every other class is geocentric and ignores a location. The body-relative events (opposition, conjunction, max_elongation, perigee_apogee) require a `body`: opposition applies to the superior planets (mars through pluto), conjunction to any planet, max_elongation to mercury and venus, and perigee_apogee to the moon (perigee/apogee), earth, or a planet (perihelion/aphelion). Returns the next `count` occurrences (default 1). Searches stop at the end of 2100, the close of the supported span; when that leaves fewer than `count`, a notice says so. Start defaults to now; pass an IANA `timezone` for observer-local timestamps.",
+    "Search forward from a start time for the next occurrences of one sky-event class, selected by the `event` enum: solar_eclipse, lunar_eclipse, equinox, solstice, moon_quarter, opposition, conjunction, max_elongation, or perigee_apogee. Both eclipse classes take an optional observer (latitude and longitude together). solar_eclipse without one returns global eclipses — kind, peak time, obscuration, and for a total or annular eclipse the latitude/longitude where it is greatest; with one it returns only eclipses visible from that point, with local contact times, `local_visible`, and the Sun's altitude at each contact. lunar_eclipse returns geocentric contact times, the same instants everywhere on Earth; an observer adds `local_visible` and the Moon's altitude at each contact. Every other class is geocentric and ignores a location. The body-relative events (opposition, conjunction, max_elongation, perigee_apogee) require a `body`: opposition applies to the superior planets (mars through pluto), conjunction to any planet, max_elongation to mercury and venus, and perigee_apogee to the moon (perigee/apogee), earth, or a planet (perihelion/aphelion). conjunction with `body` alone is that planet's conjunction with the Sun. Add `body2` for a conjunction of two bodies — the Moon or a planet with another: the instant they share one ecliptic longitude seen from Earth's center, with their `separation_degrees` at that instant. That separation is not always their closest approach, since two planets can pass closer days or weeks away, and listings that time conjunctions by right ascension differ by hours, or by days for slow pairs. Returns the next `count` occurrences (default 1), up to 20 per call: a larger `count`, up to 200, returns the first 20 and a notice naming the exact `start` and `count` that continue the series. Searches stop at the end of 2100, the close of the supported span; when that leaves fewer than `count`, a notice says so. Start defaults to now; pass an IANA `timezone` for observer-local timestamps.",
   annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
     event: z.enum(EVENT_NAMES).describe('Which class of event to search for.'),
@@ -157,14 +201,22 @@ export const findEventsTool = tool('astronomy_find_events', {
       .number()
       .int()
       .min(1)
-      .max(20)
+      .max(EVENTS_COUNT_CEILING)
       .default(1)
-      .describe('Number of forward occurrences to return. Default 1, max 20.'),
+      .describe(
+        `Number of forward occurrences to return. Default 1. At most ${EVENTS_PER_CALL} are computed per call; a count up to ${EVENTS_COUNT_CEILING} returns the first ${EVENTS_PER_CALL} with a notice naming the \`start\` and \`count\` that continue the series.`,
+      ),
     body: z
       .enum(EVENT_BODY_NAMES)
       .optional()
       .describe(
-        'Target body — required for opposition, conjunction, max_elongation, and perigee_apogee; ignored otherwise. "earth" is accepted only for perigee_apogee, which returns its perihelion and aphelion.',
+        'Target body — required for opposition, conjunction, max_elongation, and perigee_apogee; ignored otherwise. "earth" is accepted only for perigee_apogee, which returns its perihelion and aphelion. With `body2`, the Moon or a planet.',
+      ),
+    body2: z
+      .enum(PAIR_BODY_NAMES)
+      .optional()
+      .describe(
+        'Second body for a conjunction of two bodies: the Moon or a planet, different from `body`. Accepted only with event "conjunction", where it replaces the conjunction of `body` with the Sun by the conjunction of `body` and `body2` in ecliptic longitude seen from Earth\'s center. For the Moon meeting the Sun, search moon_quarter for the new moon.',
       ),
     latitude: z
       .number()
@@ -196,11 +248,17 @@ export const findEventsTool = tool('astronomy_find_events', {
   output: FindEventsOutput,
   enrichment: {
     totalCount: z.number().describe('Number of event occurrences returned.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when `count` exceeded the per-call cap and only the first events came back.'),
+    shown: z.number().optional().describe('Number of events returned when the cap applied.'),
+    cap: z.number().optional().describe('The per-call event cap that was applied.'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Why the list is shorter than the requested count: the search reached the end of the supported span (2100). Absent when every requested occurrence came back.',
+        'Why the list is shorter than the requested count: either the per-call cap held events back, and the notice names the exact `start` and `count` to re-call with, or the search reached the end of the supported span (2100). Absent when every requested occurrence came back.',
       ),
   },
   errors: [
@@ -221,9 +279,18 @@ export const findEventsTool = tool('astronomy_find_events', {
     {
       reason: 'body_not_supported',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'The body has no such event — opposition for the Sun, Moon, Earth, or an inner planet; conjunction for the Sun, Moon, or Earth; max_elongation for anything but mercury or venus; perigee_apogee for the Sun.',
+      when: 'The body has no such event — opposition for the Sun, Moon, Earth, or an inner planet; conjunction without `body2` for the Sun, Moon, or Earth; max_elongation for anything but mercury or venus; perigee_apogee for the Sun.',
       recovery:
-        'Pick a body the event is defined for: a superior planet (mars through pluto) for opposition, any planet for conjunction, mercury or venus for max_elongation, and the moon, earth, or a planet for perigee_apogee.',
+        'Pick a body the event is defined for: a superior planet (mars through pluto) for opposition, any planet for conjunction (or the Moon with a planet as body2), mercury or venus for max_elongation, and the moon, earth, or a planet for perigee_apogee.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'invalid_body_pair',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: '`body2` was supplied with an event other than conjunction, names the same body as `body`, or is paired with a `body` of sun or earth.',
+      // Verbatim the hint EphemerisService throws with where it rejects the pair.
+      recovery:
+        'body2 applies only to event "conjunction" and pairs two different bodies among the Moon and the planets (mercury through pluto). For a planet\'s conjunction with the Sun, pass the planet as body and omit body2; for the Moon\'s, search moon_quarter for the new moon.',
       thrownBy: 'service',
     },
     {
@@ -240,6 +307,7 @@ export const findEventsTool = tool('astronomy_find_events', {
       reason: 'time_out_of_range',
       code: JsonRpcErrorCode.InvalidParams,
       when: "The requested start instant is outside the engine's high-accuracy span (≈1900–2100).",
+      // resolveTime() throws this reason with no hint, so this string is the wire hint.
       recovery: 'Use a start date between 1900 and 2100 and retry.',
       thrownBy: 'service',
     },
@@ -284,10 +352,12 @@ export const findEventsTool = tool('astronomy_find_events', {
         }
       : undefined;
 
+    const served = Math.min(input.count, EVENTS_PER_CALL);
     const records = svc.findEvents(input.event, {
       start,
-      count: input.count,
+      count: served,
       ...(input.body ? { body: input.body } : {}),
+      ...(input.body2 ? { body2: input.body2 } : {}),
       ...(observer ? { observer } : {}),
       ...(timezone ? { timezone } : {}),
     });
@@ -296,17 +366,32 @@ export const findEventsTool = tool('astronomy_find_events', {
     ctx.enrich.total(records.length);
 
     /**
-     * Every search is unbounded except by the supported span, so a short list means the
-     * span ended. `notice` is last-wins across enrichment writers, so caveats are collected
-     * and written once.
+     * Every search is unbounded except by the supported span, so fewer than `served` means
+     * the span ended; a full `served` short of `count` means the cap held the rest back. The
+     * two never coincide, so `notice` — last-wins across enrichment writers — has one writer.
      */
-    const caveats: string[] = [];
-    if (records.length < input.count) {
-      caveats.push(
-        `The search reached the end of the supported span (${SUPPORTED_SPAN.lastYear}) after ${records.length} of ${input.count} requested events; no occurrence after ${SUPPORTED_SPAN.lastYear} is computed.`,
-      );
+    const last = records.at(-1);
+    const spanEnd = `The search reached the end of the supported span (${SUPPORTED_SPAN.lastYear}) after ${records.length} of ${input.count} requested events; no occurrence after ${SUPPORTED_SPAN.lastYear} is computed.`;
+    if (records.length < served) {
+      ctx.enrich.notice(spanEnd);
+    } else if (input.count > served && last) {
+      /**
+       * A 20th event within the resume offset of the span end puts the resume start past
+       * it, where every call fails time_out_of_range. The offset is shorter than the gap to
+       * the next event of the class, so no event lies in that window and the span ended.
+       */
+      const offset = ECLIPSE_EVENTS.has(input.event) ? ECLIPSE_RESUME_OFFSET_MS : RESUME_OFFSET_MS;
+      const resumeAt = new Date(Date.parse(last.timeUtc) + offset);
+      if (resumeAt.getUTCFullYear() > SUPPORTED_SPAN.lastYear) {
+        ctx.enrich.notice(spanEnd);
+      } else {
+        ctx.enrich.truncated({
+          shown: records.length,
+          cap: EVENTS_PER_CALL,
+          guidance: `Returned ${records.length} of the ${input.count} requested events (${EVENTS_PER_CALL} per call). Re-call with start ${resumeAt.toISOString()} and count ${input.count - records.length} for the rest.`,
+        });
+      }
     }
-    if (caveats.length > 0) ctx.enrich.notice(caveats.join(' '));
 
     const out: FindEventsOutputType = {
       events: records.map((r) => ({
@@ -329,6 +414,8 @@ export const findEventsTool = tool('astronomy_find_events', {
         ...(r.which ? { which: r.which } : {}),
         ...(r.quarter ? { quarter: r.quarter } : {}),
         ...(r.body ? { body: r.body } : {}),
+        ...(r.body2 ? { body2: r.body2 } : {}),
+        ...(r.separationDegrees !== undefined ? { separation_degrees: r.separationDegrees } : {}),
         ...(r.conjunctionKind ? { conjunction_kind: r.conjunctionKind } : {}),
         ...(r.elongationDegrees !== undefined ? { elongation_degrees: r.elongationDegrees } : {}),
         ...(r.visibility ? { visibility: r.visibility } : {}),
@@ -347,11 +434,13 @@ export const findEventsTool = tool('astronomy_find_events', {
       let headline = `### ${e.event}`;
       if (e.which) headline += ` (${e.which})`;
       if (e.quarter) headline += ` (${e.quarter})`;
-      if (e.body) headline += ` — ${e.body}`;
+      if (e.body) headline += ` — ${e.body}${e.body2 ? ` and ${e.body2}` : ''}`;
       lines.push(headline);
       lines.push(`time_utc: ${e.time_utc}${e.time_local ? ` | time_local: ${e.time_local}` : ''}`);
       if (e.kind) lines.push(`**Kind:** ${e.kind}`);
       if (e.conjunction_kind) lines.push(`**Conjunction:** ${e.conjunction_kind}`);
+      if (e.separation_degrees !== undefined)
+        lines.push(`**Separation:** ${num(e.separation_degrees, 3, '°')}`);
       if (e.obscuration !== undefined)
         lines.push(
           `**Obscuration:** ${e.obscuration === null ? 'unavailable' : pct(e.obscuration, 1)}`,

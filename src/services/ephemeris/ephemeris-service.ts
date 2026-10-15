@@ -11,6 +11,7 @@
 
 import { invalidParams, notFound } from '@cyanheads/mcp-ts-core/errors';
 import {
+  AngleBetween,
   AngleFromSun,
   type Apsis,
   ApsisKind,
@@ -21,7 +22,9 @@ import {
   type EclipseEvent,
   Ecliptic,
   Equator,
+  GeoVector,
   Horizon,
+  type HourAngleEvent,
   Illumination,
   type LocalSolarEclipseInfo,
   type LunarEclipseInfo,
@@ -34,6 +37,8 @@ import {
   NextMoonQuarter,
   NextPlanetApsis,
   Observer,
+  PairLongitude,
+  Search,
   SearchAltitude,
   SearchGlobalSolarEclipse,
   SearchHourAngle,
@@ -58,12 +63,15 @@ import type {
   EventBodyName,
   EventName,
   EventRecord,
+  FindEventsOptions,
   ListVisibleResult,
   MoonPhaseResult,
   ObserverInput,
+  PairBodyName,
   QuarterEvent,
   QuarterName,
   RiseSetEvent,
+  RiseSetSearch,
   SkyCondition,
   SkyPosition,
   TwilightPair,
@@ -108,6 +116,37 @@ const ASTRONOMICAL_DEG = -18;
  */
 const RISE_SET_WINDOW_DAYS = 2;
 
+/** The step past a cycle's last event that the next cycle's search resumes from. */
+const RESUME_STEP_MS = 1000;
+
+/**
+ * Shorter than any body's culmination-to-lower-culmination interval: half a sidereal day is
+ * 11.97 h, the Sun's and Moon's are longer, and no planet's retrograde motion shortens one by
+ * an hour. A rise or set this soon after a culmination is inside that culmination's day.
+ */
+const MIN_HALF_DAY_MS = 11 * 3_600_000;
+
+/** The next rise, set, and culmination searched forward from one cursor. */
+interface Crossings {
+  /** The body is above the horizon at the cursor: the next set precedes the next rise. */
+  alreadyUp: boolean;
+  culmination: HourAngleEvent;
+  rise: AstroTime | null;
+  set: AstroTime | null;
+}
+
+/** One rise/set cycle before its twilight and local times are attached. */
+interface DayCycle {
+  /** Where the night this cycle carries is searched from: its rise, its culmination, or its cursor. */
+  nightFrom: Date;
+  note: string | undefined;
+  /** The cursor the next cycle is searched from. */
+  resume: () => Date;
+  rise: AstroTime | null;
+  set: AstroTime | null;
+  transit: HourAngleEvent | null;
+}
+
 /** Longest synodic month, rounded up — the widest a new-moon look-back needs to be. */
 const MAX_SYNODIC_MONTH_DAYS = 29.9;
 
@@ -131,6 +170,37 @@ const INNER_PLANETS = new Set<EventBodyName>(['mercury', 'venus']);
 
 /** Superior planets — the only ones that reach opposition. */
 const SUPERIOR_PLANETS = new Set<EventBodyName>(PLANETS.filter((p) => !INNER_PLANETS.has(p)));
+
+/**
+ * Upper bound on how fast each pairable body's ecliptic longitude, seen from Earth's
+ * center, changes — in degrees per day, either direction. Each is its 1900–2100 maximum
+ * rounded up with a margin (Moon 15.40, Mercury 2.20, Venus 1.26, Mars 0.79, Jupiter
+ * 0.242, Saturn 0.130, Uranus 0.063, Neptune 0.038, Pluto 0.041). Two bodies' longitude
+ * offset can change no faster than the sum of their two bounds, which is what lets the
+ * conjunction scan step over a stretch where the offset cannot reach zero.
+ */
+const MAX_LONGITUDE_RATE_DEG_PER_DAY: Record<PairBodyName, number> = {
+  moon: 16.5,
+  mercury: 2.5,
+  venus: 1.5,
+  mars: 1,
+  jupiter: 0.3,
+  saturn: 0.15,
+  uranus: 0.08,
+  neptune: 0.05,
+  pluto: 0.05,
+};
+
+/**
+ * Shortest step of the conjunction scan, in days. Consecutive conjunctions of one pair
+ * are never closer than about 1.5 days in the supported span (Mercury–Venus), so a step
+ * this short holds at most one.
+ */
+const PAIR_SCAN_MIN_STEP_DAYS = 1;
+
+/** Whether a body can be one half of a two-body conjunction. */
+const isPairBody = (body: EventBodyName): body is PairBodyName =>
+  Object.hasOwn(MAX_LONGITUDE_RATE_DEG_PER_DAY, body);
 
 /** Map a wire body name to the engine's Body enum. */
 const BODY_ENUM: Record<EventBodyName, Body> = {
@@ -189,9 +259,12 @@ export class EphemerisService {
    * strict ISO 8601 instant or names a day that does not exist, and with reason
    * `time_out_of_range` outside the span.
    *
-   * Both throws carry their recovery hint inline. A throw-site hint wins over the
-   * one a calling tool declares for the same reason in `errors[]`, so every caller
-   * hands the client this same `data.recovery.hint` and `Recovery:` line.
+   * `invalid_time` carries its recovery hint inline: a throw-site hint wins over the one
+   * a calling tool declares for the same reason in `errors[]`, so every caller hands the
+   * client that same hint. `time_out_of_range` carries none: the next move depends on the
+   * calling tool — which input field it exposes (`time` or `start`), and for satellite
+   * passes the element set's epoch window — so the framework fills that tool's declared
+   * recovery instead.
    */
   resolveTime(time?: string): Date {
     const date = time ? parseIsoInstant(time) : new Date();
@@ -211,10 +284,7 @@ export class EphemerisService {
     if (year < firstYear || year > lastYear) {
       throw invalidParams(
         `Time ${date.toISOString()} is outside the high-accuracy span (${firstYear}–${lastYear}).`,
-        {
-          reason: 'time_out_of_range',
-          recovery: { hint: `Use a date between ${firstYear} and ${lastYear}.` },
-        },
+        { reason: 'time_out_of_range' },
       );
     }
     return date;
@@ -395,7 +465,7 @@ export class EphemerisService {
 
   // ---- Rise / set / transit + twilight ------------------------------------
 
-  /** Rise/set/transit cycles for a body, searching forward from `start`. */
+  /** Rise/set/transit cycles for a body, searching forward from `start` — the cycles alone. */
   riseSet(
     body: BodyName,
     observer: ObserverInput,
@@ -403,102 +473,306 @@ export class EphemerisService {
     count: number,
     timezone?: string,
   ): RiseSetEvent[] {
-    const obs = this.toObserver(observer);
-    const events: RiseSetEvent[] = [];
-    let cursor = start;
-
-    for (let i = 0; i < count; i++) {
-      const rise = SearchRiseSet(BODY_ENUM[body], obs, +1, cursor, RISE_SET_WINDOW_DAYS);
-      const set = SearchRiseSet(BODY_ENUM[body], obs, -1, cursor, RISE_SET_WINDOW_DAYS);
-      /**
-       * Both searches run forward from the cursor, so when the body is already up the next
-       * set arrives before the next rise and the two belong to different cycles — pairing
-       * them reports a set hours before its own rise. The interval in progress is the one
-       * the caller is standing in, and its rise is behind the cursor where a forward-only
-       * search cannot reach it, so report that interval as a partial cycle naming the
-       * imminent set. Beginning at the next complete cycle instead would be chronologically
-       * tidy and quietly drop tonight's set, which is the event a caller asking during the
-       * day most needs.
-       */
-      const alreadyUp = set !== null && (rise === null || set.date < rise.date);
-      const cycleRise = alreadyUp ? null : rise;
-
-      let transitUtc: string | null = null;
-      let transitAlt: number | null = null;
-      try {
-        const transit = SearchHourAngle(BODY_ENUM[body], obs, 0, cursor, +1);
-        /**
-         * The meridian crossing is found regardless of altitude, so the next one after the
-         * cursor can belong to a neighbouring cycle — before this cycle's rise, or after
-         * its set. Report it only when it falls inside the interval it is attached to.
-         */
-        const at = transit.time.date;
-        if ((cycleRise === null || at > cycleRise.date) && (set === null || at < set.date)) {
-          transitUtc = transit.time.toString();
-          transitAlt = transit.hor.altitude;
-        }
-      } catch {
-        transitUtc = null;
-      }
-
-      const event: RiseSetEvent = {
-        riseUtc: cycleRise ? cycleRise.toString() : null,
-        setUtc: set ? set.toString() : null,
-        transitUtc,
-        transitAltitudeDegrees: transitAlt,
-      };
-
-      if (cycleRise === null && set === null) {
-        // Circumpolar or never-rises: distinguish by transit altitude.
-        event.note =
-          transitAlt !== null && transitAlt > 0
-            ? 'Circumpolar — never sets at this latitude/date.'
-            : 'Never rises above the horizon at this latitude/date.';
-      } else if (cycleRise === null) {
-        event.note = 'Already above the horizon at the search start — no rise in this cycle.';
-      } else if (set === null) {
-        event.note = 'Does not set before the next rise — circumpolar window.';
-      }
-
-      if (body === 'sun') {
-        /**
-         * Anchor the pair to this cycle's own rise, not the resume cursor: the cursor sits
-         * just past the previous set, which is still short of that evening's dusk, so a
-         * cursor-anchored search hands the next cycle the previous evening's twilight while
-         * its rise and set have already moved on a day.
-         */
-        event.twilight = this.twilight(obs, cycleRise?.date ?? cursor, timezone);
-      }
-
-      if (timezone) {
-        if (cycleRise) event.riseLocal = this.formatLocal(cycleRise.date, timezone);
-        if (set) event.setLocal = this.formatLocal(set.date, timezone);
-        if (transitUtc) event.transitLocal = this.formatLocal(new Date(transitUtc), timezone);
-      }
-
-      events.push(event);
-
-      /**
-       * Resume just past this cycle's set, so the next search finds the following rise and
-       * the set that closes it. Advancing a whole day from the rise instead overshot the
-       * next day's set for any body that rises earlier each day, dropping a full cycle from
-       * a multi-count call. With no set to resume from the body is circumpolar for this
-       * window, where a day is the only meaningful step.
-       */
-      cursor = set
-        ? new Date(set.date.getTime() + 1000)
-        : new Date(cursor.getTime() + 24 * 3600 * 1000);
-    }
-
-    return events;
+    return this.riseSetSearch(body, observer, start, count, timezone).events;
   }
 
-  /** Civil/nautical/astronomical dawn+dusk pairs for the Sun on the search day. */
-  private twilight(obs: Observer, start: Date, timezone?: string): TwilightSet {
+  /**
+   * Rise/set/transit cycles for a body, searching forward from `start`, plus where the search
+   * stopped and — for the Sun when `start` falls at night — the night already under way.
+   *
+   * A cycle is one of the body's days: a culmination with the rise before it and the set after
+   * it. A day with neither — the Sun's polar night or midnight sun, a day the Moon spends wholly
+   * below or above the horizon — is a cycle of its own, never folded into a neighbour, so
+   * consecutive cycles cover consecutive days. A Sun cycle also carries the night after its day,
+   * which ends where the next cycle's day begins, so each night falls in exactly one cycle.
+   */
+  riseSetSearch(
+    body: BodyName,
+    observer: ObserverInput,
+    start: Date,
+    count: number,
+    timezone?: string,
+  ): RiseSetSearch {
+    const obs = this.toObserver(observer);
+    const target = BODY_ENUM[body];
+    const isSun = body === 'sun';
+    /**
+     * The next rise from a cursor, searched once per cursor: a Sun cycle that closes with a set
+     * looks ahead for the following sunrise to place its resume point, and the cycle resumed
+     * there opens with that same search.
+     */
+    const rises = new Map<number, AstroTime | null>();
+    const riseFrom = (cursor: Date): AstroTime | null => {
+      const key = cursor.getTime();
+      if (!rises.has(key)) {
+        rises.set(key, SearchRiseSet(target, obs, +1, cursor, RISE_SET_WINDOW_DAYS));
+      }
+      return rises.get(key) ?? null;
+    };
+    const cycleAt = (cursor: Date, crossings = this.crossingsFrom(target, obs, cursor, riseFrom)) =>
+      this.dayCycle(target, obs, cursor, crossings, isSun, riseFrom);
+
+    const opening = this.crossingsFrom(target, obs, start, riseFrom);
+    const firstRise = opening.alreadyUp ? null : opening.rise;
+    const sunsetBefore =
+      isSun && firstRise ? SearchRiseSet(Body.Sun, obs, -1, start, -RISE_SET_WINDOW_DAYS) : null;
+
+    let cycle =
+      (isSun ? this.restOfDarkDay(obs, start, opening, sunsetBefore) : undefined) ??
+      cycleAt(start, opening);
+    const opener = cycle;
+    const cycles = [cycle];
+    let resumeAt = cycle.resume();
+    while (cycles.length < count) {
+      cycle = cycleAt(resumeAt);
+      cycles.push(cycle);
+      resumeAt = cycle.resume();
+    }
+
+    /**
+     * A Sun cycle's night runs from its own day to the start of the next cycle's: dusk after its
+     * set (or, with no set, after its culmination) and dawn before the next cycle's rise or
+     * culmination. The search stops there, so a depth this night never reaches is null rather
+     * than a later night's time. The last cycle's night ends where the cycle a continuation from
+     * `resumeAt` opens with begins, so a series served across calls splits its cycles' nights
+     * exactly as one search does. `nightInProgress` is the exception: a continuation that
+     * resumes past a set starts at night, so it reports again the night the last cycle carried.
+     */
+    const nightEnds = isSun
+      ? [...cycles.slice(1).map((c) => c.nightFrom), cycleAt(resumeAt).nightFrom]
+      : [];
+
+    const events = cycles.map((c, i) => {
+      const event: RiseSetEvent = {
+        riseUtc: c.rise ? c.rise.toString() : null,
+        setUtc: c.set ? c.set.toString() : null,
+        transitUtc: c.transit ? c.transit.time.toString() : null,
+        transitAltitudeDegrees: c.transit ? c.transit.hor.altitude : null,
+      };
+      if (c.note) event.note = c.note;
+      const nightEnd = nightEnds[i];
+      if (nightEnd) event.twilight = this.twilight(obs, c.nightFrom, nightEnd, timezone);
+      if (timezone) {
+        if (c.rise) event.riseLocal = this.formatLocal(c.rise.date, timezone);
+        if (c.set) event.setLocal = this.formatLocal(c.set.date, timezone);
+        if (c.transit) event.transitLocal = this.formatLocal(c.transit.time.date, timezone);
+      }
+      return event;
+    });
+
+    const search: RiseSetSearch = { events, resumeAt };
+    /**
+     * A search that opens with a rise means the Sun was below the horizon at `start`, so the
+     * cycles begin at the next sunrise and their twilight is the night after it. The night under
+     * way is reported on its own, from the sunset that began it to where the first cycle's night
+     * begins — that sunrise, or the culmination of a day the Sun does not rise on; times in it
+     * before `start` have passed but stay, so null keeps meaning only "this night never reaches
+     * the depth". The sunset counts only when it follows the Sun's last culmination before
+     * `start`. A sunset before that culmination began an earlier night: a day the Sun did not
+     * rise on has come between, and the night under way began at its culmination, not at a
+     * sunset. That night is omitted, as is one with no sunset in the look-back window (the end of
+     * a polar night) or no sunrise in the forward window (its beginning); before that day's lower
+     * culmination the rest-of-day first cycle carries it instead.
+     */
+    if (
+      firstRise &&
+      sunsetBefore &&
+      sunsetBefore.date > SearchHourAngle(Body.Sun, obs, 0, start, -1).time.date
+    ) {
+      search.nightInProgress = this.twilight(obs, sunsetBefore.date, opener.nightFrom, timezone);
+    }
+    return search;
+  }
+
+  /** The next rise, set, and culmination searched forward from one cursor. */
+  private crossingsFrom(
+    target: Body,
+    obs: Observer,
+    cursor: Date,
+    riseFrom: (cursor: Date) => AstroTime | null,
+  ): Crossings {
+    const rise = riseFrom(cursor);
+    const set = SearchRiseSet(target, obs, -1, cursor, RISE_SET_WINDOW_DAYS);
+    return {
+      rise,
+      set,
+      /**
+       * Both searches run forward from the cursor, so when the body is already up the next set
+       * arrives before the next rise and the two belong to different cycles — pairing them
+       * reports a set hours before its own rise. The interval in progress is the one the caller
+       * is standing in, and its rise is behind the cursor where a forward-only search cannot
+       * reach it, so that interval is reported as a partial cycle naming the imminent set.
+       * Beginning at the next complete cycle instead would be chronologically tidy and quietly
+       * drop tonight's set, which is the event a caller asking during the day most needs.
+       */
+      alreadyUp: set !== null && (rise === null || set.date < rise.date),
+      culmination: SearchHourAngle(target, obs, 0, cursor, +1),
+    };
+  }
+
+  /**
+   * The cycle that opens at `cursor`: the day of the next culmination, or — when the body is
+   * already up — the interval in progress.
+   */
+  private dayCycle(
+    target: Body,
+    obs: Observer,
+    cursor: Date,
+    crossings: Crossings,
+    isSun: boolean,
+    riseFrom: (cursor: Date) => AstroTime | null,
+  ): DayCycle {
+    const { alreadyUp, culmination } = crossings;
+    const noon = culmination.time;
+    const pastMidnight = () => this.pastLowerCulmination(target, obs, noon);
+    const next = alreadyUp ? crossings.set : crossings.rise;
+
+    /**
+     * No crossing inside the search window, or the first one belongs to a later day: the body
+     * neither rises nor sets on this culmination's day. That day is a cycle of its own — taking
+     * the later day's crossing here instead folded this day into it and dropped it. Its night is
+     * the one after its culmination, where a set would have put it.
+     */
+    if (next === null || this.inLaterDay(target, obs, noon, next, alreadyUp ? 'set' : 'rise')) {
+      return {
+        rise: null,
+        set: null,
+        transit: culmination,
+        note:
+          culmination.hor.altitude > 0
+            ? 'Circumpolar — never sets at this latitude/date.'
+            : 'Never rises above the horizon at this latitude/date.',
+        nightFrom: noon.date,
+        resume: pastMidnight,
+      };
+    }
+
+    const rise = alreadyUp ? null : crossings.rise;
+    const set =
+      crossings.set && (alreadyUp || !this.inLaterDay(target, obs, noon, crossings.set, 'set'))
+        ? crossings.set
+        : null;
+    /**
+     * The meridian crossing is found regardless of altitude, so the next one after the cursor
+     * can belong to a neighbouring cycle — before this cycle's rise, or after its set. Report it
+     * only when it falls inside the interval it is attached to.
+     */
+    const inside =
+      (rise === null || noon.date > rise.date) && (set === null || noon.date < set.date);
+    return {
+      rise,
+      set,
+      transit: inside ? culmination : null,
+      note:
+        rise === null
+          ? 'Already above the horizon when this cycle opens — no rise in this cycle.'
+          : set === null
+            ? 'Does not set before the next rise — circumpolar window.'
+            : undefined,
+      nightFrom: rise?.date ?? cursor,
+      resume: set ? () => this.pastSet(target, obs, set, isSun, riseFrom) : pastMidnight,
+    };
+  }
+
+  /**
+   * The rest of a dark day, as the first cycle of a Sun search: `start` falls after the day's
+   * culmination, the Sun is below the horizon, and nothing else would carry the night that
+   * follows — a polar-night afternoon, or the evening of the last sunset before a polar night.
+   * Neither has a sunrise ahead that opens the next cycle within a day, so without this cycle
+   * the night under way falls between the cycles. Its night runs from the day's culmination,
+   * so a dusk `start` has already passed is kept, as `nightInProgress` keeps passed times. A
+   * rise before the day's lower culmination means the day is not dark for its rest — near the
+   * pole at an equinox the Sun can rise and set again after a culmination below the horizon —
+   * so the ordinary cycle from `start` reports them instead.
+   */
+  private restOfDarkDay(
+    obs: Observer,
+    start: Date,
+    crossings: Crossings,
+    sunsetBefore: AstroTime | null,
+  ): DayCycle | undefined {
+    const { alreadyUp, rise, culmination } = crossings;
+    if (alreadyUp || (rise === null && culmination.hor.altitude > 0)) return;
+    const midnight = SearchHourAngle(Body.Sun, obs, 12, start, +1).time;
+    // A lower culmination before the next culmination means `start` is past this day's.
+    if (midnight.date > culmination.time.date) return;
+    if (rise !== null && rise.date < midnight.date) return;
+    const noon = SearchHourAngle(Body.Sun, obs, 0, start, -1).time;
+    // An ordinary evening: the sunrise ahead opens the next cycle and nightInProgress carries this night.
+    if (rise !== null && sunsetBefore !== null && sunsetBefore.date > noon.date) return;
+    return {
+      rise: null,
+      set: null,
+      transit: null,
+      note: 'Below the horizon for the rest of a day whose culmination precedes the search start: no rise, set, or transit remains, and the twilight is the night that follows it.',
+      nightFrom: noon.date,
+      resume: () => new Date(midnight.date.getTime() + RESUME_STEP_MS),
+    };
+  }
+
+  /**
+   * Whether a rise or set found after a culmination belongs to a later day than that
+   * culmination's. A rise opens the day whose culmination follows it, so one past this day's
+   * lower culmination opens a later day; a set closes the day whose culmination precedes it,
+   * so only one past the next culmination does.
+   */
+  private inLaterDay(
+    target: Body,
+    obs: Observer,
+    noon: AstroTime,
+    crossing: AstroTime,
+    kind: 'rise' | 'set',
+  ): boolean {
+    if (crossing.date.getTime() - noon.date.getTime() < MIN_HALF_DAY_MS) return false;
+    const midnight = SearchHourAngle(target, obs, 12, noon, +1).time;
+    if (crossing.date <= midnight.date) return false;
+    return (
+      kind === 'rise' || crossing.date > SearchHourAngle(target, obs, 0, midnight, +1).time.date
+    );
+  }
+
+  /**
+   * Resume just past a cycle's set, so the next search finds the following rise and the set
+   * that closes it. Advancing a whole day from the rise instead overshot the next day's set
+   * for any body that rises earlier each day, dropping a full cycle from a multi-count call.
+   * A sunset with no sunrise in the window after it is the last before a polar night: resuming
+   * past that day's lower culmination keeps a continuation from opening on the same evening,
+   * which `restOfDarkDay` would report again as the rest of that day.
+   */
+  private pastSet(
+    target: Body,
+    obs: Observer,
+    set: AstroTime,
+    isSun: boolean,
+    riseFrom: (cursor: Date) => AstroTime | null,
+  ): Date {
+    const next = new Date(set.date.getTime() + RESUME_STEP_MS);
+    return isSun && riseFrom(next) === null ? this.pastLowerCulmination(target, obs, next) : next;
+  }
+
+  /**
+   * Resume just past the lower culmination after `from`, where a cycle with no set ends: the
+   * next culmination is then the next day's, and any rise on that day still lies ahead.
+   * Stepping a fixed 24 h instead drifts against the culminations — the Moon's come about 50
+   * minutes later each day, a planet's about 4 minutes earlier — so one culmination came back
+   * in two cycles, or one was stepped over.
+   */
+  private pastLowerCulmination(target: Body, obs: Observer, from: AstroTime | Date): Date {
+    const midnight = SearchHourAngle(target, obs, 12, from, +1).time;
+    return new Date(midnight.date.getTime() + RESUME_STEP_MS);
+  }
+
+  /**
+   * Civil/nautical/astronomical dawn+dusk pairs for the Sun, searched forward from `start` and
+   * stopping at `until` — the sunrise, or the culmination of a day without one, that ends the
+   * night the pairs belong to — so a depth that night never reaches comes back null.
+   */
+  private twilight(obs: Observer, start: Date, until: Date, timezone?: string): TwilightSet {
+    const limitDays = (until.getTime() - start.getTime()) / 86_400_000;
     const pair = (altitude: number): TwilightPair => {
       // Dawn = Sun ascending (+1) through the altitude; dusk = descending (-1).
-      const dawn = SearchAltitude(Body.Sun, obs, +1, start, 2, altitude);
-      const dusk = SearchAltitude(Body.Sun, obs, -1, start, 2, altitude);
+      const dawn = SearchAltitude(Body.Sun, obs, +1, start, limitDays, altitude);
+      const dusk = SearchAltitude(Body.Sun, obs, -1, start, limitDays, altitude);
       const out: TwilightPair = {
         dawnUtc: dawn ? dawn.toString() : null,
         duskUtc: dusk ? dusk.toString() : null,
@@ -576,18 +850,13 @@ export class EphemerisService {
    * Search forward for the next `count` occurrences of an event class. Every search stops
    * at the end of the supported span, which is the only reason fewer than `count` come back.
    * An observer adds local circumstances to either eclipse class, and for solar eclipses it
-   * switches the search from global to observer-local.
+   * switches the search from global to observer-local. `body2` turns a conjunction with
+   * the Sun into a conjunction of two bodies, and is rejected on every other class.
    */
-  findEvents(
-    event: EventName,
-    opts: {
-      start: Date;
-      count: number;
-      body?: EventBodyName;
-      observer?: ObserverInput;
-      timezone?: string;
-    },
-  ): EventRecord[] {
+  findEvents(event: EventName, opts: FindEventsOptions): EventRecord[] {
+    if (opts.body2 !== undefined && event !== 'conjunction') {
+      throw invalidBodyPair(`body2 applies only to the conjunction event, not "${event}".`);
+    }
     switch (event) {
       case 'equinox':
       case 'solstice':
@@ -600,6 +869,14 @@ export class EphemerisService {
         return this.solarEclipseEvents(opts.start, opts.count, opts.observer, opts.timezone);
       case 'opposition':
       case 'conjunction':
+        if (opts.body2 !== undefined) {
+          return this.pairConjunctionEvents(
+            ...resolvePair(opts.body, opts.body2),
+            opts.start,
+            opts.count,
+            opts.timezone,
+          );
+        }
         return this.relativeLongitudeEvents(
           event,
           resolveBody(event, opts.body),
@@ -833,6 +1110,57 @@ export class EphemerisService {
       out.push(rec);
       // Step past this event by a few days to find the next.
       cursor = next.time.AddDays(5).date;
+    }
+    return out;
+  }
+
+  /**
+   * Conjunctions of two bodies: the instants they share an ecliptic longitude seen from
+   * Earth's center. The longitude offset is sampled forward and each zero crossing refined
+   * with `Search`. Each step lasts as long as the offset cannot reach zero at the pair's
+   * fastest combined motion, and never less than `PAIR_SCAN_MIN_STEP_DAYS`, so a step holds
+   * at most one conjunction.
+   */
+  private pairConjunctionEvents(
+    body: PairBodyName,
+    body2: PairBodyName,
+    start: Date,
+    count: number,
+    timezone?: string,
+  ): EventRecord[] {
+    const [b1, b2] = [BODY_ENUM[body], BODY_ENUM[body2]];
+    const maxRate = MAX_LONGITUDE_RATE_DEG_PER_DAY[body] + MAX_LONGITUDE_RATE_DEG_PER_DAY[body2];
+    /** `body`'s longitude minus `body2`'s in (−180°, 180°]: 0 at conjunction, ±180 opposite. */
+    const offset = (t: AstroTime) => {
+      const d = PairLongitude(b1, b2, t);
+      return d > 180 ? d - 360 : d;
+    };
+
+    const end = MakeTime(SPAN_END);
+    const out: EventRecord[] = [];
+    let t1 = MakeTime(start);
+    let f1 = offset(t1);
+    while (out.length < count && t1.ut < end.ut) {
+      const t2 = t1.AddDays(Math.max(PAIR_SCAN_MIN_STEP_DAYS, Math.abs(f1) / maxRate));
+      const f2 = offset(t2);
+      // A sign change smaller than 180° passes through 0; a larger one is the wrap at ±180°.
+      if (f1 < 0 !== f2 < 0 && Math.abs(f1 - f2) < 180) {
+        const rising = f1 < 0;
+        const time = Search((t) => (rising ? offset(t) : -offset(t)), t1, t2);
+        if (!time) throw new Error(`Conjunction search found no crossing between ${t1} and ${t2}.`);
+        if (!withinSpan(time.date)) break;
+        const rec: EventRecord = {
+          event: 'conjunction',
+          timeUtc: time.toString(),
+          body,
+          body2,
+          separationDegrees: AngleBetween(GeoVector(b1, time, true), GeoVector(b2, time, true)),
+        };
+        if (timezone) rec.timeLocal = this.formatLocal(time.date, timezone);
+        out.push(rec);
+      }
+      t1 = t2;
+      f1 = f2;
     }
     return out;
   }
@@ -1148,7 +1476,7 @@ const EVENT_BODIES: Record<BodyEventName, { bodies: ReadonlySet<EventBodyName>; 
   },
   conjunction: {
     bodies: new Set<EventBodyName>(PLANETS),
-    hint: 'Use a planet — mercury through pluto. Conjunction measures a planet against the Sun, so the Sun, Moon, and Earth have none.',
+    hint: 'Use a planet — mercury through pluto. Without body2, conjunction measures a planet against the Sun, so the Sun, Moon, and Earth have none; for the Moon meeting a planet, add that planet as body2.',
   },
   max_elongation: {
     bodies: INNER_PLANETS,
@@ -1166,12 +1494,7 @@ const EVENT_BODIES: Record<BodyEventName, { bodies: ReadonlySet<EventBodyName>; 
  * `body_not_supported` contract reason.
  */
 function resolveBody(event: BodyEventName, body: EventBodyName | undefined): EventBodyName {
-  if (!body) {
-    throw invalidParams(`The "${event}" event requires a target body.`, {
-      reason: 'body_required',
-      recovery: { hint: 'Add the target body (e.g. "mars" or "jupiter") and retry.' },
-    });
-  }
+  if (!body) throw bodyRequired(event);
   const spec = EVENT_BODIES[event];
   if (!spec.bodies.has(body)) {
     throw invalidParams(`The "${event}" event is not defined for ${body}.`, {
@@ -1180,6 +1503,50 @@ function resolveBody(event: BodyEventName, body: EventBodyName | undefined): Eve
     });
   }
   return body;
+}
+
+/** A body-relative event searched without its target body — the `body_required` reason. */
+function bodyRequired(event: BodyEventName) {
+  return invalidParams(`The "${event}" event requires a target body.`, {
+    reason: 'body_required',
+    recovery: { hint: 'Add the target body (e.g. "mars" or "jupiter") and retry.' },
+  });
+}
+
+/**
+ * A `body2` the search cannot pair — the `invalid_body_pair` reason. The hint is written
+ * here, with no ctx to resolve it from, so astronomy_find_events declares the same string.
+ */
+function invalidBodyPair(message: string) {
+  return invalidParams(message, {
+    reason: 'invalid_body_pair',
+    recovery: {
+      hint: 'body2 applies only to event "conjunction" and pairs two different bodies among the Moon and the planets (mercury through pluto). For a planet\'s conjunction with the Sun, pass the planet as body and omit body2; for the Moon\'s, search moon_quarter for the new moon.',
+    },
+  });
+}
+
+/**
+ * Resolve the two bodies of a two-body conjunction: require `body`, and reject one that
+ * cannot be paired (the Sun or Earth) or a pair of the same body twice. Throws with the
+ * `body_required` or `invalid_body_pair` contract reason.
+ */
+function resolvePair(
+  body: EventBodyName | undefined,
+  body2: PairBodyName,
+): [PairBodyName, PairBodyName] {
+  if (!body) throw bodyRequired('conjunction');
+  if (!isPairBody(body)) {
+    throw invalidBodyPair(
+      `A two-body conjunction pairs the Moon and the planets; body "${body}" is not one of them.`,
+    );
+  }
+  if (body === body2) {
+    throw invalidBodyPair(
+      `body and body2 are both "${body}"; a conjunction needs two different bodies.`,
+    );
+  }
+  return [body, body2];
 }
 
 // --- Init / accessor pattern ------------------------------------------------

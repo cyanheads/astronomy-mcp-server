@@ -9,8 +9,8 @@
  *   request resolves to a different instant on a differently-configured deployment;
  *   this module reads it as UTC, which is what every tool here documents its times to
  *   be. It rejects the first two and normalizes the third, while leaving the accepted
- *   epoch range to the caller — the in-process engine restricts it to 1900–2100, JPL
- *   Horizons does not.
+ *   epoch range to the caller — the in-process engine restricts it to 1900–2100, and
+ *   astronomy_get_ephemeris to years 0100 through 9999.
  * @module services/ephemeris/iso-time
  */
 
@@ -22,9 +22,9 @@
  * space is accepted alongside `T` as that separator, and a zone suffix is not
  * required, so both stay as permissive as they were before this check existed.
  *
- * The expanded-year alternative is deliberate: JPL Horizons answers epochs far
- * outside the four-digit range, and a grammar that only knew `\d{4}` would newly
- * reject a valid deep-past or deep-future request.
+ * The expanded-year alternative is deliberate: an expanded year parses so the caller's
+ * own range check rejects it by name (astronomy_get_ephemeris: years 0100 through 9999;
+ * the core engine: 1900–2100), rather than failing here as an unparseable timestamp.
  */
 const ISO_CALENDAR_HEAD = /^([+-]\d{6}|\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:[Tt ](.*))?$/;
 

@@ -32,6 +32,25 @@ export const EVENT_BODY_NAMES = [...BODY_NAMES, 'earth'] as const;
 
 export type EventBodyName = (typeof EVENT_BODY_NAMES)[number];
 
+/**
+ * Bodies a two-body conjunction pairs: the Moon and the planets. The Sun is left out —
+ * a body's conjunction with it is the one-body `conjunction` search, and the Moon's is
+ * new moon — and so is Earth, which has no longitude seen from its own center.
+ */
+export const PAIR_BODY_NAMES = [
+  'moon',
+  'mercury',
+  'venus',
+  'mars',
+  'jupiter',
+  'saturn',
+  'uranus',
+  'neptune',
+  'pluto',
+] as const;
+
+export type PairBodyName = (typeof PAIR_BODY_NAMES)[number];
+
 /** The nine consolidated event classes for astronomy_find_events. */
 export const EVENT_NAMES = [
   'solar_eclipse',
@@ -144,6 +163,19 @@ export interface RiseSetEvent {
   twilight?: TwilightSet;
 }
 
+/** One forward rise/set search: its cycles, the Sun's night under way at the start, and where it stops. */
+export interface RiseSetSearch {
+  events: RiseSetEvent[];
+  /**
+   * Sun only, and only when `start` falls after a sunset in the preceding search window and
+   * before the next sunrise: that night's twilight pairs, each bounded by the sunset and
+   * sunrise. Not one of `events`.
+   */
+  nightInProgress?: TwilightSet;
+  /** The instant the cycle loop would resume from — a continuation searched from here repeats and skips nothing. */
+  resumeAt: Date;
+}
+
 export type QuarterName = 'new' | 'first_quarter' | 'full' | 'last_quarter';
 
 export interface QuarterEvent {
@@ -186,7 +218,9 @@ export interface EventRecord {
   apsisKind?: 'perigee' | 'apogee' | 'perihelion' | 'aphelion';
   /** Body the event pertains to (opposition/conjunction/elongation/apsis). */
   body?: string;
-  /** Which conjunction an inner planet reaches — inferior (near side) or superior (far side). */
+  /** Two-body conjunction only: the second body, in the order the caller named the pair. */
+  body2?: string;
+  /** Which conjunction an inner planet reaches with the Sun — inferior (near side) or superior (far side). */
   conjunctionKind?: 'inferior' | 'superior';
   /**
    * Refracted altitude in degrees of the eclipsed body (Sun for solar, Moon for lunar) at
@@ -212,12 +246,33 @@ export interface EventRecord {
   peakLongitudeDegrees?: number;
   /** Moon quarter name. */
   quarter?: QuarterName;
+  /**
+   * Two-body conjunction only: the pair's angular separation in degrees, seen from Earth's
+   * center at the conjunction instant. Not their closest approach, which for two planets
+   * can fall days or weeks away and be degrees closer.
+   */
+  separationDegrees?: number;
   timeLocal?: string;
   timeUtc: string;
   /** Morning/evening apparition (max elongation). */
   visibility?: 'morning' | 'evening';
   /** Which equinox/solstice. */
   which?: 'march' | 'september' | 'june' | 'december';
+}
+
+/** One forward event search. `body`, `body2`, and `observer` apply to some classes only. */
+export interface FindEventsOptions {
+  /** Target body of a body-relative class. */
+  body?: EventBodyName;
+  /** Second body of a two-body conjunction; valid with `event: 'conjunction'` only. */
+  body2?: PairBodyName;
+  /** Occurrences to return; the search stops sooner at the end of the supported span. */
+  count: number;
+  /** Eclipse classes only: switches solar eclipses to local, and adds local circumstances. */
+  observer?: ObserverInput;
+  start: Date;
+  /** IANA zone for `timeLocal`. */
+  timezone?: string;
 }
 
 /** A bundled bright-star catalog entry, J2000 EQJ. */
