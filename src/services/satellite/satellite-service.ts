@@ -5,11 +5,14 @@
  *   via satellite.js (offline), and returns above-horizon passes. One request builder
  *   serves both lookups: by catalog number (`CATNR=`) and by name (`NAME=`, a
  *   case-insensitive substring match whose single-match response already carries the
- *   element set, so resolving a name costs no extra round trip). A pass is "visible"
- *   only when the satellite is sunlit at peak AND the observer's sky is dark — the
- *   ground-darkness gate reuses the core sun-altitude logic. A pass already underway
- *   when the window opens is omitted rather than reported with the query boundary as its
- *   rise, and one still up when the window closes is followed to its set. Well-known
+ *   element set, so resolving a name costs no extra round trip). Horizon crossings are
+ *   bisected to the second between 30-second scan samples. A pass is reported when its
+ *   visible stretch — above the horizon, the satellite sunlit, and the Sun below −6° for
+ *   the observer — reaches 10° altitude, wherever in the pass that stretch falls; the
+ *   ground-darkness test reuses the core sun-altitude logic. A pass up longer than one
+ *   scan step when the window opens is omitted rather than reported with the query
+ *   boundary as its rise (one rising in the 30 s before the start is reported), and one
+ *   still up when the window closes is followed to its set. Well-known
  *   common names (ISS, Hubble, Tiangong) resolve through a fixed alias table to their
  *   catalog numbers before any `NAME=` search. A start beyond the element set's epoch
  *   horizon is rejected on that distance alone, and inside the horizon an element set
@@ -34,11 +37,13 @@ import {
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { Body, Equator, Horizon, MakeTime, Observer } from 'astronomy-engine';
 import {
+  type EciVec3,
   ecfToLookAngles,
   eciToEcf,
   gstime,
   jday,
   json2satrec,
+  type Kilometer,
   propagate,
   type SatRec,
   shadowFraction,
@@ -75,10 +80,19 @@ const JD_UNIX_EPOCH = 2440587.5;
  * request is what overreached, whether or not the propagation would have succeeded.
  */
 const MAX_EPOCH_DISTANCE_DAYS = 30;
-/** Minimum peak elevation (deg) for a pass to count — below this it grazes the horizon. */
+/**
+ * Altitude (deg) a pass's visible stretch has to reach for the pass to be reported — below
+ * it the satellite stays in the murk near the horizon. A pass whose peak falls short is
+ * passed over before any illumination test.
+ */
 const MIN_PEAK_ELEVATION = 10;
 /** Propagation step in seconds while scanning for passes. */
 const STEP_SECONDS = 30;
+/**
+ * Resolution, in ms, to which a horizon crossing or a visible-stretch edge is bisected
+ * between the scan samples bracketing it. Five halvings of a 30-second step.
+ */
+const EDGE_RESOLUTION_MS = 1000;
 /** Ground is "dark enough" for a naked-eye pass when the Sun is below this altitude (civil dusk). */
 const GROUND_DARK_SUN_ALT = -6;
 /**
@@ -145,6 +159,54 @@ interface CachedElementSet {
  * keeps that invariant from being re-checked at each use.
  */
 type MatchedRecords = [OmmRecord, ...OmmRecord[]];
+
+/** What every propagation in one prediction needs: the orbit, and the observer two ways. */
+interface ScanSite {
+  /** Observer in radians and km, as satellite.js takes it. */
+  geodetic: { longitude: number; latitude: number; height: number };
+  satrec: SatRec;
+  /** The same observer as astronomy-engine takes it, for the Sun's altitude. */
+  sky: Observer;
+}
+
+/** One propagated instant: where the satellite sits in the observer's sky and in space. */
+interface Sample {
+  azimuthDeg: number;
+  elevationDeg: number;
+  /** ECI position (km), kept so the shadow test reuses the propagation. */
+  position: EciVec3<Kilometer>;
+  time: Date;
+}
+
+/** One end of a visible stretch. */
+interface StretchEdge {
+  altitude: number;
+  azimuth: number;
+  time: Date;
+}
+
+/** A run of a pass visible to the naked eye, with the highest altitude it reaches. */
+interface VisibleStretch {
+  end: StretchEdge;
+  highest: number;
+  start: StretchEdge;
+}
+
+const isUp = (s: Sample): boolean => s.elevationDeg > 0;
+
+/** A stretch edge on a horizon crossing: the crossing itself, at the horizon's altitude. */
+const horizonEdge = (s: Sample): StretchEdge => ({
+  time: s.time,
+  altitude: 0,
+  azimuth: s.azimuthDeg,
+});
+
+/** A stretch edge inside the pass, where the satellite enters or leaves shadow or twilight. */
+const skyEdge = (s: Sample): StretchEdge => ({
+  time: s.time,
+  altitude: s.elevationDeg,
+  azimuth: s.azimuthDeg,
+});
 
 export class SatelliteService {
   private readonly cache = new Map<string, CachedElementSet>();
@@ -384,8 +446,9 @@ export class SatelliteService {
 
   /**
    * Predict visible passes over the next `days` from `start`. Steps the orbit with
-   * SGP4, brackets above-horizon intervals, and keeps passes whose peak is sunlit
-   * and over a dark-enough ground.
+   * SGP4 every `STEP_SECONDS`, brackets above-horizon intervals, refines each horizon
+   * crossing to the second, and keeps a pass when its visible stretch — sunlit, over a
+   * dark-enough sky — reaches `MIN_PEAK_ELEVATION`.
    *
    * Throws `time_out_of_range` when `start` lies beyond the element set's epoch horizon,
    * and `object_decayed` when a window inside that horizon will not propagate at all.
@@ -422,12 +485,15 @@ export class SatelliteService {
     if (!propagate(satrec, start, PROPAGATE_OPTIONS)) {
       throw this.objectDecayed(elements.noradId);
     }
-    const observerGd = {
-      longitude: (observer.longitude * Math.PI) / 180,
-      latitude: (observer.latitude * Math.PI) / 180,
-      height: observer.elevation / 1000,
+    const site: ScanSite = {
+      satrec,
+      geodetic: {
+        longitude: (observer.longitude * Math.PI) / 180,
+        latitude: (observer.latitude * Math.PI) / 180,
+        height: observer.elevation / 1000,
+      },
+      sky: new Observer(observer.latitude, observer.longitude, observer.elevation),
     };
-    const engineObserver = new Observer(observer.latitude, observer.longitude, observer.elevation);
 
     const passes: SatellitePass[] = [];
     const totalSteps = Math.floor((days * 86400) / STEP_SECONDS);
@@ -441,88 +507,187 @@ export class SatelliteService {
      */
     const overrunSteps = Math.ceil(((2 * Math.PI) / satrec.no) * (60 / STEP_SECONDS));
 
-    let inPass = false;
-    let riseTime: Date | null = null;
-    let riseAz = 0;
-    let peakElevation = -90;
-    let peakAz = 0;
-    let peakTime: Date | null = null;
-    let lastAz = 0;
     /**
-     * A rise is a below→above transition. When the window opens with the satellite
-     * already up, the first sample is the query boundary, not an acquisition —
-     * reporting it as `riseUtc` would misstate the rise time, the rise azimuth, and the
-     * duration, so that leading partial pass is omitted and reporting starts at the
-     * first complete one. Deciding that needs the step *before* `start`: a satellite
-     * below the horizon there is rising exactly at `start`, which is a genuine
-     * acquisition, and dropping it would lose the pass for any caller who took a
-     * previously reported `riseUtc` and passed it back as `start`.
+     * A rise is a below→above transition between scan samples. When the window opens with
+     * the satellite already up, the first sample is the query boundary, not an
+     * acquisition — reporting it as `riseUtc` would misstate the rise time, the rise
+     * azimuth, and the duration, so that leading partial pass is omitted and reporting
+     * starts at the first complete one. Deciding that needs the step *before* `start`: a
+     * satellite below the horizon there rose inside the step that ends at `start`, which is
+     * an acquisition this window owns, and dropping it would lose the pass for any caller
+     * who passed a previously reported `riseUtc` back as `start` — or who resumed a capped
+     * search one step past its window, where that step belongs to no earlier window.
      */
-    const priorLook = this.lookAngles(
-      satrec,
-      new Date(start.getTime() - STEP_SECONDS * 1000),
-      observerGd,
-    );
-    let sawBelowHorizon = priorLook !== null && priorLook.elevation <= 0;
+    const prior = this.sample(site, new Date(start.getTime() - STEP_SECONDS * 1000));
+    let lastBelow = prior !== null && prior.elevationDeg <= 0 ? prior : null;
+    let pass: { below: Sample; above: [Sample, ...Sample[]] } | null = null;
 
-    for (let i = 0; i <= totalSteps || (inPass && i <= totalSteps + overrunSteps); i++) {
-      const t = new Date(start.getTime() + i * STEP_SECONDS * 1000);
-      const look = this.lookAngles(satrec, t, observerGd);
-      if (!look) continue;
-      const elevationDeg = look.elevation * DEG;
-      const azimuthDeg = (((look.azimuth * DEG) % 360) + 360) % 360;
-
-      if (elevationDeg > 0) {
-        if (!sawBelowHorizon) continue;
-        if (!inPass) {
-          inPass = true;
-          riseTime = t;
-          riseAz = azimuthDeg;
-          peakElevation = elevationDeg;
-          peakAz = azimuthDeg;
-          peakTime = t;
-        } else if (elevationDeg > peakElevation) {
-          peakElevation = elevationDeg;
-          peakAz = azimuthDeg;
-          peakTime = t;
-        }
-        lastAz = azimuthDeg;
-      } else {
-        sawBelowHorizon = true;
-        if (!inPass) continue;
-        // Pass just ended at the previous step.
-        inPass = false;
-        if (riseTime && peakTime && peakElevation >= MIN_PEAK_ELEVATION) {
-          const setTime = t;
-          const sunlit = this.isSunlit(satrec, peakTime);
-          const groundDark = this.isGroundDark(engineObserver, peakTime);
-          if (sunlit && groundDark) {
-            const pass: SatellitePass = {
-              riseUtc: riseTime.toISOString(),
-              peakUtc: peakTime.toISOString(),
-              setUtc: setTime.toISOString(),
-              peakAltitudeDegrees: peakElevation,
-              riseAzimuthDegrees: riseAz,
-              setAzimuthDegrees: lastAz,
-              peakAzimuthDegrees: peakAz,
-              durationSeconds: (setTime.getTime() - riseTime.getTime()) / 1000,
-              sunlit,
-            };
-            if (formatLocal) {
-              pass.riseLocal = formatLocal(riseTime);
-              pass.peakLocal = formatLocal(peakTime);
-              pass.setLocal = formatLocal(setTime);
-            }
-            passes.push(pass);
-          }
-        }
-        riseTime = null;
-        peakTime = null;
-        peakElevation = -90;
+    for (let i = 0; i <= totalSteps || (pass !== null && i <= totalSteps + overrunSteps); i++) {
+      const s = this.sample(site, new Date(start.getTime() + i * STEP_SECONDS * 1000));
+      if (!s) continue;
+      if (s.elevationDeg > 0) {
+        if (pass) pass.above.push(s);
+        else if (lastBelow) pass = { below: lastBelow, above: [s] };
+        continue;
       }
+      if (pass) {
+        const visible = this.completePass(site, pass.below, pass.above, s, formatLocal);
+        if (visible) passes.push(visible);
+        pass = null;
+      }
+      lastBelow = s;
     }
 
-    return { noradId: elements.noradId, satelliteName: elements.name, passes };
+    const windowEnd = new Date(start.getTime() + totalSteps * STEP_SECONDS * 1000);
+    const resumeAt = new Date(windowEnd.getTime() + STEP_SECONDS * 1000);
+    return {
+      noradId: elements.noradId,
+      satelliteName: elements.name,
+      passes,
+      windowEnd,
+      resumeAt,
+      resumeInRange: this.epochDistanceDays(satrec, resumeAt) <= MAX_EPOCH_DISTANCE_DAYS,
+    };
+  }
+
+  /**
+   * Turn one bracketed above-horizon interval into a reported pass, or `null` when it is
+   * not visible enough to report. `below` and `after` are the scan samples on either side
+   * of the interval, both at or under the horizon; `above` is every sample over it.
+   *
+   * The peak stays the highest scan sample. The rise and set are bisected between the
+   * samples bracketing each crossing, and the visible stretch is located on the crossings
+   * plus the samples between them: a sample counts as visible when the satellite is
+   * sunlit and the Sun is below `GROUND_DARK_SUN_ALT`, an edge inside the pass is bisected
+   * the same way, and an edge on a crossing is that crossing at altitude 0. Testing only
+   * the peak instant dropped every pass that crosses into or out of Earth's shadow on the
+   * dark side of its peak, however long it is lit over a dark sky.
+   */
+  private completePass(
+    site: ScanSite,
+    below: Sample,
+    above: [Sample, ...Sample[]],
+    after: Sample,
+    formatLocal: ((d: Date) => string) | undefined,
+  ): SatellitePass | null {
+    const peak = above.reduce((best, s) => (s.elevationDeg > best.elevationDeg ? s : best));
+    // A pass grazing the horizon is skipped before any bisection or illumination work.
+    if (peak.elevationDeg < MIN_PEAK_ELEVATION) return null;
+
+    const first = above[0];
+    const last = above.at(-1) ?? first;
+    const rise = this.bisect(site, below, first, isUp)[1];
+    const set = this.bisect(site, last, after, isUp)[1];
+
+    const visibility = new Map<Sample, boolean>();
+    const isVisible = (s: Sample): boolean => {
+      let visible = visibility.get(s);
+      if (visible === undefined) {
+        // Shadow first: it is the cheaper test, and the Sun's altitude only matters when lit.
+        visible = this.isSunlit(s) && this.isGroundDark(site.sky, s.time);
+        visibility.set(s, visible);
+      }
+      return visible;
+    };
+    const points = [...(rise === first ? [] : [rise]), ...above, set];
+    const stretch = this.visibleStretch(site, points, isVisible);
+    if (!stretch || stretch.highest < MIN_PEAK_ELEVATION) return null;
+
+    const result: SatellitePass = {
+      riseUtc: rise.time.toISOString(),
+      peakUtc: peak.time.toISOString(),
+      setUtc: set.time.toISOString(),
+      peakAltitudeDegrees: peak.elevationDeg,
+      riseAzimuthDegrees: rise.azimuthDeg,
+      setAzimuthDegrees: set.azimuthDeg,
+      peakAzimuthDegrees: peak.azimuthDeg,
+      durationSeconds: (set.time.getTime() - rise.time.getTime()) / 1000,
+      sunlit: this.isSunlit(peak),
+      visibleStartUtc: stretch.start.time.toISOString(),
+      visibleEndUtc: stretch.end.time.toISOString(),
+      visibleStartAltitudeDegrees: stretch.start.altitude,
+      visibleEndAltitudeDegrees: stretch.end.altitude,
+      visibleStartAzimuthDegrees: stretch.start.azimuth,
+      visibleEndAzimuthDegrees: stretch.end.azimuth,
+    };
+    if (formatLocal) {
+      result.riseLocal = formatLocal(rise.time);
+      result.peakLocal = formatLocal(peak.time);
+      result.setLocal = formatLocal(set.time);
+      result.visibleStartLocal = formatLocal(stretch.start.time);
+      result.visibleEndLocal = formatLocal(stretch.end.time);
+    }
+    return result;
+  }
+
+  /**
+   * The visible stretch of a pass reaching the highest altitude, or `null` when no point
+   * of it is visible. `points` runs from the rise crossing through the scan samples to the
+   * set crossing. A pass rarely holds more than one stretch — that takes an eclipse
+   * shorter than the pass — but when it does, the one climbing higher is the one to look
+   * for, and the earlier one wins a tie.
+   */
+  private visibleStretch(
+    site: ScanSite,
+    points: Sample[],
+    isVisible: (s: Sample) => boolean,
+  ): VisibleStretch | null {
+    const visible = points.map(isVisible);
+    let best: VisibleStretch | null = null;
+    for (let i = 0; i < points.length; i++) {
+      const first = points[i];
+      if (!first || !visible[i]) continue;
+      let j = i;
+      while (visible[j + 1]) j++;
+      const last = points[j] ?? first;
+      const before = points[i - 1];
+      const beyond = points[j + 1];
+      // Off either end of `points` is a crossing, the edge of the pass itself.
+      const start = before
+        ? skyEdge(this.bisect(site, before, first, isVisible)[1])
+        : horizonEdge(first);
+      const end = beyond
+        ? skyEdge(this.bisect(site, last, beyond, isVisible)[0])
+        : horizonEdge(last);
+      const highest = Math.max(
+        start.altitude,
+        end.altitude,
+        ...points.slice(i, j + 1).map((s) => s.elevationDeg),
+      );
+      if (!best || highest > best.highest) best = { start, end, highest };
+      i = j;
+    }
+    return best;
+  }
+
+  /**
+   * Narrow the instant where `test` changes value between two samples it disagrees on,
+   * `from` the earlier. Halves on whole seconds counted from `from` until the ends are
+   * `EDGE_RESOLUTION_MS` apart and returns both ends, so the caller reports the side it
+   * means. Counting from a scan sample keeps every probe on the scan's own second grid,
+   * so the instant found is the first whole second past the change — what a one-second
+   * scan from the same start reports — however the 30-second samples fall around it.
+   */
+  private bisect(
+    site: ScanSite,
+    from: Sample,
+    to: Sample,
+    test: (s: Sample) => boolean,
+  ): [Sample, Sample] {
+    const fromSide = test(from);
+    let early = from;
+    let late = to;
+    while (late.time.getTime() - early.time.getTime() > EDGE_RESOLUTION_MS) {
+      const gapSteps = (late.time.getTime() - early.time.getTime()) / EDGE_RESOLUTION_MS;
+      const mid = this.sample(
+        site,
+        new Date(early.time.getTime() + Math.floor(gapSteps / 2) * EDGE_RESOLUTION_MS),
+      );
+      if (!mid) break;
+      if (test(mid) === fromSide) early = mid;
+      else late = mid;
+    }
+    return [early, late];
   }
 
   /** How far an instant sits from the element set's epoch, in days, on either side. */
@@ -566,27 +731,25 @@ export class SatelliteService {
     );
   }
 
-  /** Compute look angles (az/el) of the satellite from the observer at one instant. */
-  private lookAngles(
-    satrec: SatRec,
-    date: Date,
-    observerGd: { longitude: number; latitude: number; height: number },
-  ): { azimuth: number; elevation: number } | null {
-    const pv = propagate(satrec, date, PROPAGATE_OPTIONS);
+  /** Propagate to one instant and place the satellite in the observer's sky. */
+  private sample(site: ScanSite, time: Date): Sample | null {
+    const pv = propagate(site.satrec, time, PROPAGATE_OPTIONS);
     if (!pv) return null;
-    const gmst = gstime(date);
-    const ecf = eciToEcf(pv.position, gmst);
-    const look = ecfToLookAngles(observerGd, ecf);
-    return { azimuth: look.azimuth, elevation: look.elevation };
+    const look = ecfToLookAngles(site.geodetic, eciToEcf(pv.position, gstime(time)));
+    return {
+      time,
+      elevationDeg: look.elevation * DEG,
+      azimuthDeg: (((look.azimuth * DEG) % 360) + 360) % 360,
+      position: pv.position,
+    };
   }
 
-  /** True when the satellite is in sunlight (not in Earth's umbra) at the given time. */
-  private isSunlit(satrec: SatRec, date: Date): boolean {
-    const pv = propagate(satrec, date, PROPAGATE_OPTIONS);
-    if (!pv) return false;
-    const sun = sunPos(jday(date));
-    const fraction = shadowFraction(sun.rsun, pv.position);
-    return fraction < 0.5;
+  /**
+   * True when the satellite is in sunlight at a sample — Earth covers less than half the
+   * solar disc. Reads the sample's own position, so it costs no propagation.
+   */
+  private isSunlit(s: Sample): boolean {
+    return shadowFraction(sunPos(jday(s.time)).rsun, s.position) < 0.5;
   }
 
   /** True when the observer's sky is dark enough (Sun below civil dusk) for a naked-eye pass. */

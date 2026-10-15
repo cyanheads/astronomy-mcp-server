@@ -7,7 +7,13 @@
 
 import { z } from '@cyanheads/mcp-ts-core';
 
-/** A single visible pass of a satellite over an observer. */
+/**
+ * A single visible pass of a satellite over an observer. Rise and set are the horizon
+ * crossings, refined to the second; the peak is the highest sample of the 30-second scan.
+ * The `visible*` fields bound the stretch of the pass that is visible to the naked eye —
+ * above the horizon, sunlit, and over a sky dark enough — which can start after the rise
+ * or end before the set.
+ */
 export interface SatellitePass {
   durationSeconds: number;
   peakAltitudeDegrees: number;
@@ -20,14 +26,42 @@ export interface SatellitePass {
   setAzimuthDegrees: number;
   setLocal?: string;
   setUtc: string;
-  /** Satellite is sunlit at peak (naked-eye visible only when this is true and the ground is dark). */
+  /**
+   * Satellite is sunlit at the peak instant. A pass that enters Earth's shadow before its
+   * peak, or leaves it after, is returned with this false — its visible stretch says when
+   * it can be seen.
+   */
   sunlit: boolean;
+  /** Altitude where the visible stretch ends — 0 when it ends at the set. */
+  visibleEndAltitudeDegrees: number;
+  visibleEndAzimuthDegrees: number;
+  visibleEndLocal?: string;
+  visibleEndUtc: string;
+  /** Altitude where the visible stretch starts — 0 when it starts at the rise. */
+  visibleStartAltitudeDegrees: number;
+  visibleStartAzimuthDegrees: number;
+  visibleStartLocal?: string;
+  visibleStartUtc: string;
 }
 
 export interface SatellitePassResult {
   noradId: number;
   passes: SatellitePass[];
+  /**
+   * Where a search continuing this one starts: one scan step past `windowEnd`. A pass
+   * rising by `windowEnd` is in this result through its set, and one still up at the
+   * resume instant counts as underway there, so the continuation neither repeats nor
+   * skips a pass.
+   */
+  resumeAt: Date;
+  /**
+   * Whether `resumeAt` lies inside the element set's epoch horizon, so a search starting
+   * there is accepted. Beyond it the continuation would fail `time_out_of_range`.
+   */
+  resumeInRange: boolean;
   satelliteName: string;
+  /** The last instant the scan looked for a rise — `days` after the start. */
+  windowEnd: Date;
 }
 
 /**
