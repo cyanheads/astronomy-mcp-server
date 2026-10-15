@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-10-15
+
+Two-body conjunctions in astronomy_find_events, per-call caps with continuation notices on rise/set, events, and satellite passes, night_in_progress and polar-day cycles in astronomy_get_rise_set, a visible-stretch pass rule for satellites, and Horizons paging, refusal, and calendar fixes.
+
 ## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-10-08
 
 mcp-ts-core 0.13.14: tool error results carry their request ID, integers and numeric strings are repaired before argument validation, the Docker image installs dependencies in a build-platform deps stage, and the registry entries launch through npx.
