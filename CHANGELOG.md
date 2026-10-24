@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.3](changelog/0.4.x/0.4.3.md) — 2026-10-24
+
+Correct eclipse peak boundaries, shallow horizon crossings, and preceding polar-night twilight.
+
 ## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-10-15
 
 Two-body conjunctions in astronomy_find_events, per-call caps with continuation notices on rise/set, events, and satellite passes, night_in_progress and polar-day cycles in astronomy_get_rise_set, a visible-stretch pass rule for satellites, and Horizons paging, refusal, and calendar fixes.
