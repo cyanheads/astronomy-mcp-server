@@ -1,6 +1,6 @@
 # astronomy-mcp-server - Directory Structure
 
-Generated on: 2026-10-08 11:30:22
+Generated on: 2026-10-24 18:58:56
 
 ```text
 astronomy-mcp-server/
@@ -187,6 +187,7 @@ astronomy-mcp-server/
 │       ├── core-tools-errors.test.ts
 │       ├── core-tools.test.ts
 │       ├── error-contract-coverage.test.ts
+│       ├── extension-formatting.test.ts
 │       └── extension-tools.test.ts
 ├── .dockerignore
 ├── .env.example
