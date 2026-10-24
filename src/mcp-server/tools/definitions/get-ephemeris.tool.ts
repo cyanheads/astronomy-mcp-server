@@ -7,6 +7,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { num, sig } from '@/mcp-server/tools/format-numbers.js';
 import { parseIsoInstant } from '@/services/ephemeris/iso-time.js';
 import { getHorizonsService } from '@/services/horizons/horizons-service.js';
@@ -593,8 +594,10 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
 
   format: (r) => {
     const lines: string[] = [];
-    const target = r.target_name ? ` (Horizons target: ${r.target_name})` : '';
-    lines.push(`## ${r.designation}${target} — ${r.points.length} points`);
+    const target = r.target_name
+      ? ` (Horizons target: ${escapeMarkdownInline(r.target_name)})`
+      : '';
+    lines.push(`## ${escapeMarkdownInline(r.designation)}${target} — ${r.points.length} points`);
     for (const p of r.points) {
       const altAz =
         p.altitude_degrees === undefined

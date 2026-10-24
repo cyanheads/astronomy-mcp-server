@@ -11,6 +11,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { num } from '@/mcp-server/tools/format-numbers.js';
 import { getEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
@@ -418,11 +419,12 @@ export const getSatellitePassesTool = tool('astronomy_get_satellite_passes', {
 
   format: (r) => {
     const lines: string[] = [];
-    const nameLabel = r.satellite_name ? `${r.satellite_name} ` : '';
+    const nameLabel = r.satellite_name ? `${escapeMarkdownInline(r.satellite_name)} ` : '';
     lines.push(
       `## ${nameLabel}(NORAD ${r.norad_id}) — ${r.passes.length} visible pass${r.passes.length === 1 ? '' : 'es'}`,
     );
-    if (r.resolved_from_name) lines.push(`Resolved from the name query "${r.resolved_from_name}".`);
+    if (r.resolved_from_name)
+      lines.push(`Resolved from the name query "${escapeMarkdownInline(r.resolved_from_name)}".`);
     if (r.passes.length === 0)
       lines.push(
         'No visible passes in the window searched (sunlit satellite over a dark sky, reaching 10°).',

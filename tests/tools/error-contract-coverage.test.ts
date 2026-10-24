@@ -473,7 +473,7 @@ describe('a bare ctx.fail reaches the wire with its declared hint', () => {
     expect(result.isError).toBe(true);
     expect(errorEnvelope(result)?.data?.reason).toBe(c.reason);
     expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
-    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+    expect(firstText(result)).toContain(`Recovery: ${hint.replaceAll('`', '\\`')}`);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

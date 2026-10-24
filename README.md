@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -73,7 +73,7 @@ Design reference: [`docs/design.md`](./docs/design.md).
 
 - One `body` searched forward from `start` (default now) for the next `count` cycles, default 1; 31 are served per call, and a `count` up to 366 returns the first 31 with a notice naming the `start` and `count` that continue the series
 - Each cycle carries `rise_utc`, `set_utc`, `transit_utc`, and `transit_altitude_degrees`; a circumpolar or never-rising body gets `null` rise/set and a `note` instead of an error
-- For `body: "sun"`, a `twilight` block holds `civil`, `nautical`, and `astronomical` dusk/dawn pairs for the night after each set; a `start` between sunset and sunrise adds `night_in_progress`
+- For `body: "sun"`, `twilight` holds civil, nautical, and astronomical dusk/dawn pairs for the night after each cycle's day. When the first day begins after `start`, `night_in_progress` holds the preceding night, including polar nights without a sunset; the first cycle otherwise carries its own night. Each pair stays within that night, and times before `start` remain included
 
 ---
 
@@ -89,6 +89,7 @@ Design reference: [`docs/design.md`](./docs/design.md).
 - One `event` (`solar_eclipse`, `lunar_eclipse`, `equinox`, `solstice`, `moon_quarter`, `opposition`, `conjunction`, `max_elongation`, `perigee_apogee`) and the next `count` occurrences, default 1; 20 are served per call, and a `count` up to 200 returns the first 20 with a notice naming the `start` and `count` that continue the series; searches stop at the end of 2100
 - Body-relative events require `body` (`body_required`); a body the event doesn't apply to fails as `body_not_supported`, and `conjunction` with `body2` takes the Moon or a planet different from `body` (`invalid_body_pair` otherwise) and reports `separation_degrees`
 - Eclipses take an optional observer (`latitude` and `longitude` together, else `incomplete_observer`) that adds `local_visible` and `contact_altitudes_degrees`
+- Eclipses are included when their peak is at or after `start`; their contacts may precede `start`
 
 ---
 
@@ -152,18 +153,40 @@ Agent-friendly output:
 
 ### Public Hosted Instance
 
-A public instance is available at `https://astronomy.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+A public instance is available at `https://astronomy.caseyjhand.com/mcp` — no installation required. It serves Streamable HTTP; each client takes its own config shape.
+
+For Claude Code:
+
+```sh
+claude mcp add --transport http astronomy-mcp-server https://astronomy.caseyjhand.com/mcp
+```
+
+For Cline (`cline_mcp_settings.json`):
 
 ```json
 {
   "mcpServers": {
     "astronomy-mcp-server": {
-      "type": "streamable-http",
+      "type": "streamableHttp",
       "url": "https://astronomy.caseyjhand.com/mcp"
     }
   }
 }
 ```
+
+For Cursor (`mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "astronomy-mcp-server": {
+      "url": "https://astronomy.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+Claude Desktop adds remote servers under Settings → Connectors.
 
 ### Self-Hosted / Local
 
