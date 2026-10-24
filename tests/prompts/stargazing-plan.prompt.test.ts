@@ -113,13 +113,14 @@ describe('stargazingPlanPrompt', () => {
     }
   });
 
-  it('reads the night already under way when the dark-window call is made after sunset', async () => {
+  it('selects the night already under way including polar nights without a sunset', async () => {
     // After sunset the first cycle opens at the next sunrise and its twilight is the
     // following night's; tonight's dusk and dawn are in night_in_progress.
     const step2 = stepText(await generate({ location: 'Mount Rainier' }), 2);
     expect(step2).toContain(
-      "If the call's `start` falls after sunset, read that night's dusk and dawn from `night_in_progress`",
+      'Read the night under way from `night_in_progress` when present, including polar nights without a sunset',
     );
+    expect(step2).toContain("Otherwise use the first cycle's twilight");
   });
 
   it('names the cross-server tools that resolve coordinates and the timezone', async () => {

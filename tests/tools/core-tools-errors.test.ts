@@ -394,6 +394,36 @@ describe('astronomy_get_rise_set — a count past the per-call cap', () => {
     }
   });
 
+  it('re-slices corrected shallow crossings and polar nights through two continuation pages', async () => {
+    for (const input of [
+      { body: 'moon' as const, latitude: 68, longitude: 18.96, start: '2026-09-07T12:00:00Z' },
+      {
+        body: 'sun' as const,
+        latitude: -67.39,
+        longitude: -68.13,
+        start: '2027-06-22T06:34:32.666Z',
+      },
+    ]) {
+      const first = await call({ ...input, count: 65 });
+      const second = await call({ ...input, ...resumeOf(first.out.notice) });
+      const third = await call({ ...input, ...resumeOf(second.out.notice) });
+      expect(first.out.events).toHaveLength(31);
+      expect(second.out.events).toHaveLength(31);
+      expect(third.out.events).toHaveLength(3);
+      expect(third.out.notice).toBeUndefined();
+      const whole = getEphemerisService().riseSet(
+        input.body,
+        { latitude: input.latitude, longitude: input.longitude, elevation: 0 },
+        new Date(input.start),
+        65,
+      );
+      expect([...first.out.events, ...second.out.events, ...third.out.events].map(wireKey)).toEqual(
+        whole.map(serviceKey),
+      );
+      for (const page of [first, second]) expect(allText(page.result)).toContain(page.out.notice!);
+    }
+  });
+
   it('resumes just past the lower culmination of a last cycle that has no set', async () => {
     // Tromsø's midnight sun: every cycle is circumpolar, so the loop resumes past each day's lower culmination.
     const tromso = { latitude: 69.65, longitude: 18.96 };
@@ -831,6 +861,23 @@ describe('astronomy_find_events — eclipse circumstances on both surfaces', () 
     }
   });
 
+  it('returns an eclipse whose peak follows start with its earlier contacts on both surfaces', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'solar_eclipse',
+      start: '2024-04-08T18:42:00Z',
+      latitude: 32.78,
+      longitude: -96.8,
+    });
+    expect(result.isError).toBeFalsy();
+    const event = eventsOf(result)[0]!;
+    expect(event.time_utc).toBe('2024-04-08T18:42:37.121Z');
+    expect(Date.parse(event.contacts!.partial_begin_utc!)).toBeLessThan(
+      Date.parse('2024-04-08T18:42:00Z'),
+    );
+    expect(firstText(result)).toContain('2024-04-08T18:42:37.121Z');
+    expect(firstText(result)).toContain(event.contacts!.partial_begin_utc!);
+  });
+
   it('returns global solar eclipses with peak coordinates when no observer is supplied', async () => {
     const result = await runToolContract(findEventsTool, {
       event: 'solar_eclipse',
@@ -1139,10 +1186,8 @@ describe('astronomy_find_events — a count past the per-call cap', () => {
   );
 
   /**
-   * Every eclipse search restarts at the next new or full moon after its start, and a local
-   * solar eclipse can peak hours before the geocentric new moon, so a resume start an hour
-   * past such a peak would still find it. An eclipse series resumes ten days past its last
-   * eclipse — the step astronomy-engine itself takes between consecutive eclipses.
+   * Eclipse continuation retains the ten-day offset used by astronomy-engine's
+   * next-eclipse iterators.
    */
   it('resumes a local solar eclipse series past the eclipse it ended on', async () => {
     const args = { event: 'solar_eclipse', latitude: 0, longitude: 0 } as const;

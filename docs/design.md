@@ -18,7 +18,7 @@ idea sketch — not renamed, added, or dropped.
 | Tool | Summary | readOnlyHint | openWorldHint | Key inputs | Output shape |
 |---|---|---|---|---|---|
 | `astronomy_get_sky_position` | Apparent position of one body for an observer + time: equatorial (RA/Dec), horizontal (alt/az), ecliptic lon/lat, distance, magnitude, angular diameter, phase angle/fraction, angular distance from the Sun, constellation. For a solar-system body it also carries that body card (type, mean radius, naked-eye) inline, so a resource-less client reaches it without a second surface; absent for a catalog star. The atomic "where is X right now." Topocentric by default. | `true` | `false` | `body`, `star?`, `latitude`, `longitude`, `elevation?`, `time?`, `timezone?` | single position record |
-| `astronomy_get_rise_set` | Rise, set, and culmination (transit) times for a body at a location/date, plus max altitude at transit. For the Sun, also the three twilight pairs (civil/nautical/astronomical), each a dusk and the following dawn. Searches forward from `start`; returns the next `count` cycles (default 1; 31 per call, `count` up to 366 returns the first 31 with a notice naming the `start` that continues). A body already above the horizon at `start` yields a partial first cycle (null `rise`, the imminent `set`) rather than a set paired with the following day's rise. A Sun search starting between sunset and sunrise adds `night_in_progress`, the night already under way. | `true` | `false` | `body`, `latitude`, `longitude`, `elevation?`, `start?`, `count?`, `timezone?` | array of rise/set/transit events + `night_in_progress?` |
+| `astronomy_get_rise_set` | Rise, set, and culmination (transit) times for a body at a location/date, plus max altitude at transit. For the Sun, also the three twilight pairs (civil/nautical/astronomical), each a dusk and the following dawn. Searches forward from `start`; returns the next `count` cycles (default 1; 31 per call, `count` up to 366 returns the first 31 with a notice naming the `start` that continues). A body already above the horizon at `start` yields a partial first cycle (null `rise`, the imminent `set`) rather than a set paired with the following day's rise. When the Sun is down and the first cycle's day begins after `start`, `night_in_progress` carries the preceding night, including polar nights without a sunset. | `true` | `false` | `body`, `latitude`, `longitude`, `elevation?`, `start?`, `count?`, `timezone?` | array of rise/set/transit events + `night_in_progress?` |
 | `astronomy_get_moon_phase` | Moon phase for a date: illuminated fraction, phase name, age (days since new), phase longitude (Moon–Sun ecliptic-longitude difference), and the next four quarter phases (new/first/full/last) with timestamps. | `true` | `false` | `time?`, `timezone?` | phase record + next 4 quarters |
 | `astronomy_find_events` | Search upcoming sky events from a start time, consolidated by an `event` enum. Both eclipse classes take an optional observer: solar eclipses are global without one (peak location for total/annular) and local with one; lunar contact times are geocentric, and an observer adds local visibility + the Moon's altitude at each contact. The rest are geocentric. Returns the next `count` occurrences (default 1; 20 per call, `count` up to 200 returns the first 20 with a notice naming the `start` that continues), stopping at the end of 2100. `body` is required for `opposition`, `conjunction`, `max_elongation`, and `perigee_apogee`; a `conjunction` with `body` alone is that planet's conjunction with the Sun, and `body2` makes it a two-body conjunction (the Moon or a planet) with `separation_degrees`. | `true` | `false` | `event`, `start?`, `count?`, `body?`, `body2?`, `latitude?`, `longitude?`, `elevation?`, `timezone?` | array of event records |
 | `astronomy_list_visible` | Workflow flagship. For a location + instant, iterate every naked-eye body (sun, moon, planets; optional bundled bright stars), compute alt/az, filter to above-horizon, return a ranked "what's up" list with a visibility note and each body's angular distance from the Sun. Sun-altitude gate flags daylight/twilight/dark, and the note says when daylight, civil twilight, or the Sun's glare hides or dims a body. `time` is a single evaluation instant, not a window — for "tonight" pick a time after astronomical dusk. | `true` | `false` | `latitude`, `longitude`, `elevation?`, `time?`, `timezone?`, `min_altitude?`, `include_stars?` | ranked visible-body list + sky condition |
@@ -201,7 +201,7 @@ type Body =
   rise_local?: string; set_local?: string; transit_local?: string;  // iff timezone supplied
   // Sun-only, present when body === 'sun'. Each pair spans the night after this cycle's set:
   // dusk that evening, dawn the following morning (a day after this cycle's rise). Each depth is
-  // searched only up to that morning's sunrise, so a depth the night never reaches is null.
+  // searched only up to the next day's sunrise or culmination; an absent crossing is null.
   twilight?: {
     civil:        { dawn_utc: string | null; dusk_utc: string | null; dawn_local?: string | null; dusk_local?: string | null };  // SearchAltitude(-6)
     nautical:     { dawn_utc: string | null; dusk_utc: string | null; dawn_local?: string | null; dusk_local?: string | null };  // SearchAltitude(-12)
@@ -214,11 +214,10 @@ type Body =
 {
   body: string;
   events: RiseSetEvent[];
-  // Sun-only: present only when the Sun is below the horizon at `start`, set since its last
-  // culmination and within the two days before, and rises within the two days after. The first
-  // cycle then opens with the next day, so this holds the night already under way (dusk on the
-  // evening of that sunset, dawn before the first cycle's day begins; times before `start` have
-  // passed). Absent when a day the Sun never rose on fell between that sunset and `start`. A
+  // Sun-only: present when the Sun is below the horizon and the first cycle's day begins after
+  // `start`. Holds the preceding night, bounded from the previous culmination or a later sunset
+  // to the first day's sunrise or culmination. Times before `start` remain included; a night
+  // already owned by the first cycle is not repeated here. A
   // continuation call repeats here the night the previous call's last cycle carried. Same
   // three-pair shape as `twilight`; not one of `events`, not counted by `count`.
   night_in_progress?: { civil; nautical; astronomical };
@@ -550,6 +549,8 @@ service.
   "when is the next total eclipse, and where?" from the global search; requiring an observer
   left that question unanswerable. A lunar eclipse's contact times are geocentric either way,
   so an observer only adds local circumstances rather than changing the search.
+- **Eclipses are selected by peak at or after `start`.** Contacts may precede `start`, so a
+  search during an eclipse still returns it while its peak lies ahead.
 - **One visibility rule for both eclipse classes: the eclipsed body above the horizon at any
   contact**, with the per-contact altitude alongside. A peak-only check reported an eclipse
   observable for most of an hour before sunset as not visible. Because the local solar search
@@ -745,7 +746,7 @@ so it is documented on every twilight field rather than changed. The dawn before
 sunrise is the previous cycle's. A search that starts between sunset and sunrise has no previous
 cycle to read it from, so the night under way comes back as `night_in_progress` instead (dusks
 that precede `start` included). Each pair is searched only within its own night, up to the next
-cycle's sunrise (its culmination when it has none), so a depth the night never reaches is null
+cycle's sunrise (its culmination when it has none), so a crossing absent from that night is null
 rather than the next night's crossing.
 
 **One cycle is one of the body's days.** Near the poles a day the body neither rises nor sets on
@@ -756,9 +757,11 @@ let one cycle swallow the polar day between two crossings; a cycle with no set n
 past its lower culmination. A Sun cycle with no set carries the night after its culmination. A
 Sun search starting after the culmination of a polar-night day, or after the last sunset before
 one, opens with the rest of that day (rise, set, and transit null) carrying that night:
-`night_in_progress` is defined by a sunset and sunrise the polar night lacks, so without it
-tonight's twilight would be lost. For the same reason `night_in_progress` is left out when a
-polar-night day fell between the last sunset and `start`: that sunset began an earlier night.
+the first cycle owns that night, so `night_in_progress` is absent. When the first cycle's day
+begins after `start`, `night_in_progress` carries the preceding night even without a sunset.
+It begins at the previous culmination unless a later sunset exists, and ends at the first day's
+sunrise or culmination. This keeps a stale sunset before an intervening polar day from anchoring
+the wrong night, while retaining twilight earlier than `start`.
 
 **A continuation call repeats the last night in `night_in_progress`.** The cap notice's `start`
 is one second past the last cycle's set, so the next call starts at night and reports that night

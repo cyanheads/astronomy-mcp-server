@@ -41,10 +41,8 @@ const RESUME_OFFSET_MS = 3_600_000;
 /**
  * The resume offset for both eclipse classes: ten days, the step astronomy-engine's own
  * `Next*Eclipse` takes from one peak to the next search, so a continued series is the one
- * a single search returns. Each eclipse search restarts at the next new or full moon after
- * its start, and a local solar eclipse can peak more than two hours before the geocentric
- * new moon, so an hour past it is still before that new moon and finds the same eclipse.
- * Consecutive eclipses of one class lie at least 29 days apart, so none is skipped.
+ * a single search returns. The service includes only peaks at or after the requested start.
+ * Consecutive eclipses of one class lie at least 29 days apart, so this offset skips none.
  */
 const ECLIPSE_RESUME_OFFSET_MS = 10 * 86_400_000;
 
@@ -195,7 +193,7 @@ export const findEventsTool = tool('astronomy_find_events', {
       .string()
       .optional()
       .describe(
-        'Search start as an ISO 8601 UTC string, e.g. "2024-01-01T00:00:00Z". Defaults to now. A value with no zone designator is read as UTC, not the local zone of the server process.',
+        'Search start as an ISO 8601 UTC string, e.g. "2024-01-01T00:00:00Z". Eclipses are included when their peak is at or after start; earlier contacts may still be returned. Defaults to now. A value with no zone designator is read as UTC, not the local zone of the server process.',
       ),
     count: z
       .number()

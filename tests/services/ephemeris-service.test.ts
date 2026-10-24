@@ -10,8 +10,11 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   AngleBetween,
+  Atmosphere,
   Body,
+  Equator,
   GeoVector,
+  Horizon,
   Observer,
   PairLongitude,
   SearchAltitude,
@@ -139,6 +142,52 @@ describe('findEvents — equinox/solstice', () => {
     expect(t.getUTCMonth()).toBe(5); // June
     expect(t.getUTCDate()).toBe(20);
   });
+});
+
+describe('findEvents — eclipse peak start boundary', () => {
+  it.each([
+    { event: 'solar_eclipse' as const, peak: '1900-05-28T14:53:50' },
+    { event: 'lunar_eclipse' as const, peak: '1900-06-13T03:27:40' },
+  ])('keeps $event in range at the earliest accepted start', ({ event, peak }) => {
+    const events = svc.findEvents(event, { start: new Date('1900-01-01T00:00:00Z'), count: 1 });
+    expect(events).toHaveLength(1);
+    expect(events[0]?.timeUtc.slice(0, 19)).toBe(peak);
+  });
+  const cases: Array<{
+    event: 'solar_eclipse' | 'lunar_eclipse';
+    observer?: typeof DALLAS;
+    peak: string;
+  }> = [
+    {
+      event: 'solar_eclipse',
+      observer: { latitude: 32.78, longitude: -96.8, elevation: 0 },
+      peak: '2024-04-08T18:42:37.121Z',
+    },
+    { event: 'solar_eclipse', peak: '2024-04-08T18:17:19.495Z' },
+    { event: 'lunar_eclipse', peak: '2025-03-14T06:58:42.343Z' },
+  ];
+
+  it.each(cases)(
+    'includes $event immediately before $peak and excludes it immediately after',
+    ({ event, observer, peak }) => {
+      const peakMs = Date.parse(peak);
+      const before = svc.findEvents(event, {
+        start: new Date(peakMs - 1000),
+        count: 2,
+        ...(observer ? { observer } : {}),
+      });
+      expect(before).toHaveLength(2);
+      expect(Math.abs(Date.parse(before[0]!.timeUtc) - peakMs)).toBeLessThan(1000);
+      const after = svc.findEvents(event, {
+        start: new Date(peakMs + 1000),
+        count: 2,
+        ...(observer ? { observer } : {}),
+      });
+      expect(after).toHaveLength(2);
+      expect(after[0]!.timeUtc).toBe(before[1]!.timeUtc);
+      expect(Date.parse(after[1]!.timeUtc)).toBeGreaterThan(Date.parse(after[0]!.timeUtc));
+    },
+  );
 });
 
 describe('findEvents — solar eclipse (local circumstances)', () => {
@@ -901,6 +950,95 @@ describe('position', () => {
 });
 
 describe('riseSet', () => {
+  it('retains ordinary Moon crossings at observer elevation', () => {
+    const observer = { latitude: 47.6062, longitude: -122.3321, elevation: 2400 };
+    const start = new Date('2026-09-07T12:00:00Z');
+    const engineObserver = new Observer(observer.latitude, observer.longitude, observer.elevation);
+    const event = svc.riseSet('moon', observer, start, 1)[0]!;
+    expect(event.riseUtc).toBeNull();
+    expect(event.setUtc).toBe(SearchRiseSet(Body.Moon, engineObserver, -1, start, 2)!.toString());
+  });
+
+  it('keeps the short below-horizon interval between genuine Moon crossings', () => {
+    const events = svc.riseSet(
+      'moon',
+      { latitude: 68, longitude: 18.96, elevation: 0 },
+      new Date('2026-09-07T12:00:00Z'),
+      3,
+    );
+    expect(events[0]?.setUtc?.slice(0, 19)).toBe('2026-09-07T19:58:25');
+    expect(events[1]?.riseUtc?.slice(0, 19)).toBe('2026-09-07T20:09:30');
+  });
+
+  it('does not admit an ascending Mars root as a set', () => {
+    const events = svc.riseSet(
+      'mars',
+      { latitude: 70, longitude: 18.96, elevation: 0 },
+      new Date('2028-01-07T11:57:45.137Z'),
+      8,
+    );
+    expect(events[0]?.setUtc?.slice(0, 19)).toBe('2028-01-07T12:03:05');
+    expect(new Set(events.map((event) => event.setUtc?.slice(0, 10))).size).toBe(8);
+  });
+
+  it.each([
+    { body: 'moon', latitude: 68, root: '2026-09-07T19:58:25.249Z', kind: 'set' },
+    { body: 'moon', latitude: 68, root: '2026-09-07T20:09:30.990Z', kind: 'rise' },
+    { body: 'mars', latitude: 70, root: '2028-01-07T11:57:45.126Z', kind: 'rise' },
+    { body: 'mars', latitude: 70, root: '2028-01-07T12:03:05.839Z', kind: 'set' },
+    { body: 'mars', latitude: 70.00124875738454, root: '2028-01-07T12:00:25.029Z', kind: 'rise' },
+    { body: 'mars', latitude: 70.00124875738454, root: '2028-01-07T12:00:25.937Z', kind: 'set' },
+  ] as const)(
+    'certifies $body crossings immediately around a shallow $kind',
+    ({ body, latitude, root, kind }) => {
+      const observer = { latitude, longitude: 18.96, elevation: 0 };
+      const obs = new Observer(latitude, observer.longitude, 0);
+      const target = body === 'moon' ? Body.Moon : Body.Mars;
+      const residual = (ms: number) => {
+        const date = new Date(ms);
+        const eq = Equator(target, date, obs, true, true);
+        const radius =
+          body === 'moon'
+            ? (Math.asin(1738.1 / (149597870.69098932 * eq.dist)) * 180) / Math.PI
+            : 0;
+        return (
+          Horizon(date, obs, eq.ra, eq.dec).altitude +
+          radius +
+          (34 / 60) * Atmosphere(obs.height).density
+        );
+      };
+      for (const offset of [-200, 200]) {
+        const start = new Date(Date.parse(root) + offset);
+        const search = svc.riseSetSearch(body, observer, start, 3);
+        const first = search.events[0]!;
+        if (kind === 'rise' && offset < 0)
+          expect(Math.abs(Date.parse(first.riseUtc!) - Date.parse(root))).toBeLessThan(100);
+        if (kind === 'set' && offset < 0)
+          expect(Math.abs(Date.parse(first.setUtc!) - Date.parse(root))).toBeLessThan(100);
+        if ((kind === 'rise' && offset > 0) || (kind === 'set' && offset < 0))
+          expect(first.riseUtc).toBeNull();
+        for (const event of search.events) {
+          for (const [stamp, sign] of [
+            [event.riseUtc, 1],
+            [event.setUtc, -1],
+          ] as const) {
+            if (!stamp) continue;
+            const ms = Date.parse(stamp);
+            expect(ms).toBeGreaterThanOrEqual(start.getTime());
+            expect(sign * residual(ms - 100), stamp).toBeLessThan(0);
+            expect(sign * residual(ms + 100), stamp).toBeGreaterThan(0);
+          }
+          if (event.transitUtc && event.riseUtc)
+            expect(Date.parse(event.transitUtc)).toBeGreaterThan(Date.parse(event.riseUtc));
+          if (event.transitUtc && event.setUtc)
+            expect(Date.parse(event.transitUtc)).toBeLessThan(Date.parse(event.setUtc));
+        }
+        const continued = svc.riseSetSearch(body, observer, search.resumeAt, 2);
+        const whole = svc.riseSetSearch(body, observer, start, 5);
+        expect([...search.events, ...continued.events]).toEqual(whole.events);
+      }
+    },
+  );
   it('computes a sunrise before a sunset for Seattle on the summer solstice', () => {
     // 09:00Z is 02:00 local, while the Sun is still down, so this cycle is a complete
     // rise-then-set. The original 00:00Z start is 17:00 local with the Sun already up,
@@ -1137,6 +1275,29 @@ describe('riseSet', () => {
       expect(svc.riseSetSearch('sun', SEATTLE, SUN_UP_START, 1).nightInProgress).toBeUndefined();
     });
 
+    it('distinguishes a polar morning night from midnight sun without horizon crossings', () => {
+      const observer = { latitude: 89, longitude: 0, elevation: 0 };
+      const midnightSun = svc.riseSetSearch('sun', observer, new Date('2027-06-21T06:00:00Z'), 1);
+      expect(midnightSun.nightInProgress).toBeUndefined();
+      const dark = svc.riseSetSearch('sun', observer, new Date('2027-12-21T06:00:00Z'), 1);
+      expect(dark.nightInProgress).toEqual({
+        civil: { dawnUtc: null, duskUtc: null },
+        nautical: { dawnUtc: null, duskUtc: null },
+        astronomical: { dawnUtc: null, duskUtc: null },
+      });
+    });
+
+    it('bounds the preceding night by a first day with no sunrise', () => {
+      const observer = { latitude: 69.65, longitude: 18.96, elevation: 0 };
+      const search = svc.riseSetSearch('sun', observer, new Date('2026-12-10T06:00:00Z'), 1);
+      expect(search.events[0]?.riseUtc).toBeNull();
+      expect(search.nightInProgress?.civil).toEqual({
+        dawnUtc: '2026-12-10T08:14:44.187Z',
+        duskUtc: '2026-12-09T13:00:09.733Z',
+      });
+      expect(search.events[0]?.twilight?.civil.duskUtc).toBe('2026-12-10T12:58:42.578Z');
+    });
+
     it('nulls a depth that night never reaches', () => {
       const { nightInProgress } = svc.riseSetSearch(
         'sun',
@@ -1151,12 +1312,15 @@ describe('riseSet', () => {
       });
     });
 
-    it('is absent when no sunset falls in the two days before start', () => {
+    it('reports the preceding polar night without a sunset in the look-back window', () => {
       // Tromsø the morning the polar night ends: a sunrise lies ahead, but no sunset behind.
       const tromso = { latitude: 69.65, longitude: 18.96, elevation: 0 };
       const search = svc.riseSetSearch('sun', tromso, new Date('2027-01-15T06:00:00Z'), 1);
       expect(search.events[0]?.riseUtc).toBe('2027-01-15T10:34:40.655Z');
-      expect(search.nightInProgress).toBeUndefined();
+      expect(search.nightInProgress?.civil).toEqual({
+        duskUtc: '2027-01-14T13:46:24.184Z',
+        dawnUtc: '2027-01-15T07:57:48.572Z',
+      });
     });
 
     /**
@@ -1178,7 +1342,7 @@ describe('riseSet', () => {
       expect(north.events[0]?.twilight?.civil.duskUtc).toBe('2026-12-21T13:29:35.001Z');
     });
 
-    it('is absent before the first sunrise after a day the Sun never rose on', () => {
+    it('reports the preceding night before the first sunrise after a day the Sun never rose on', () => {
       // 67.39° S before dawn on 2027-06-22: the 21st had no sunrise, and the sunset of the
       // 20th began the night that ended on the 21st.
       const south = svc.riseSetSearch(
@@ -1187,7 +1351,11 @@ describe('riseSet', () => {
         new Date('2027-06-22T06:34:32.666Z'),
         3,
       );
-      expect(south.nightInProgress).toBeUndefined();
+      expect(south.nightInProgress).toEqual({
+        civil: { duskUtc: '2027-06-21T19:21:49.002Z', dawnUtc: '2027-06-22T13:47:00.278Z' },
+        nautical: { duskUtc: '2027-06-21T20:46:58.639Z', dawnUtc: '2027-06-22T12:21:51.870Z' },
+        astronomical: { duskUtc: '2027-06-21T21:56:23.615Z', dawnUtc: '2027-06-22T11:12:27.358Z' },
+      });
       expect(south.events[0]?.riseUtc).toBe('2027-06-22T16:30:26.788Z');
     });
 

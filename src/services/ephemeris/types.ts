@@ -167,9 +167,9 @@ export interface RiseSetEvent {
 export interface RiseSetSearch {
   events: RiseSetEvent[];
   /**
-   * Sun only, and only when `start` falls after a sunset in the preceding search window and
-   * before the next sunrise: that night's twilight pairs, each bounded by the sunset and
-   * sunrise. Not one of `events`.
+   * Sun only: the preceding night when the first cycle's day begins after `start`. Bounded
+   * by the preceding culmination (or a later sunset) and that day's sunrise or culmination.
+   * Absent when the first cycle already owns the night. Not one of `events`.
    */
   nightInProgress?: TwilightSet;
   /** The instant the cycle loop would resume from — a continuation searched from here repeats and skips nothing. */

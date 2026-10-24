@@ -16,6 +16,7 @@ import {
   type Apsis,
   ApsisKind,
   type AstroTime,
+  Atmosphere,
   Body,
   Constellation,
   DefineStar,
@@ -505,7 +506,7 @@ export class EphemerisService {
     const riseFrom = (cursor: Date): AstroTime | null => {
       const key = cursor.getTime();
       if (!rises.has(key)) {
-        rises.set(key, SearchRiseSet(target, obs, +1, cursor, RISE_SET_WINDOW_DAYS));
+        rises.set(key, this.horizonCrossing(target, obs, +1, cursor, RISE_SET_WINDOW_DAYS));
       }
       return rises.get(key) ?? null;
     };
@@ -513,9 +514,10 @@ export class EphemerisService {
       this.dayCycle(target, obs, cursor, crossings, isSun, riseFrom);
 
     const opening = this.crossingsFrom(target, obs, start, riseFrom);
-    const firstRise = opening.alreadyUp ? null : opening.rise;
     const sunsetBefore =
-      isSun && firstRise ? SearchRiseSet(Body.Sun, obs, -1, start, -RISE_SET_WINDOW_DAYS) : null;
+      isSun && !opening.alreadyUp
+        ? this.horizonCrossing(Body.Sun, obs, -1, start, -RISE_SET_WINDOW_DAYS)
+        : null;
 
     let cycle =
       (isSun ? this.restOfDarkDay(obs, start, opening, sunsetBefore) : undefined) ??
@@ -532,7 +534,7 @@ export class EphemerisService {
     /**
      * A Sun cycle's night runs from its own day to the start of the next cycle's: dusk after its
      * set (or, with no set, after its culmination) and dawn before the next cycle's rise or
-     * culmination. The search stops there, so a depth this night never reaches is null rather
+     * culmination. The search stops there, so a crossing absent from this night is null rather
      * than a later night's time. The last cycle's night ends where the cycle a continuation from
      * `resumeAt` opens with begins, so a series served across calls splits its cycles' nights
      * exactly as one search does. `nightInProgress` is the exception: a continuation that
@@ -562,24 +564,17 @@ export class EphemerisService {
 
     const search: RiseSetSearch = { events, resumeAt };
     /**
-     * A search that opens with a rise means the Sun was below the horizon at `start`, so the
-     * cycles begin at the next sunrise and their twilight is the night after it. The night under
-     * way is reported on its own, from the sunset that began it to where the first cycle's night
-     * begins — that sunrise, or the culmination of a day the Sun does not rise on; times in it
-     * before `start` have passed but stay, so null keeps meaning only "this night never reaches
-     * the depth". The sunset counts only when it follows the Sun's last culmination before
-     * `start`. A sunset before that culmination began an earlier night: a day the Sun did not
-     * rise on has come between, and the night under way began at its culmination, not at a
-     * sunset. That night is omitted, as is one with no sunset in the look-back window (the end of
-     * a polar night) or no sunrise in the forward window (its beginning); before that day's lower
-     * culmination the rest-of-day first cycle carries it instead.
+     * The opener owns the night after its day. If that day begins after `start`, the preceding
+     * night has no cycle in this result and is reported separately. A sunset after the previous
+     * culmination anchors an ordinary night; otherwise that culmination anchors a polar night.
+     * An opener beginning before `start` already owns the night, including a rest-of-dark-day
+     * opener, so it must not also appear here.
      */
-    if (
-      firstRise &&
-      sunsetBefore &&
-      sunsetBefore.date > SearchHourAngle(Body.Sun, obs, 0, start, -1).time.date
-    ) {
-      search.nightInProgress = this.twilight(obs, sunsetBefore.date, opener.nightFrom, timezone);
+    if (isSun && this.horizonResidual(Body.Sun, obs, start) < 0 && opener.nightFrom > start) {
+      const noonBefore = SearchHourAngle(Body.Sun, obs, 0, start, -1).time.date;
+      const anchor =
+        sunsetBefore && sunsetBefore.date > noonBefore ? sunsetBefore.date : noonBefore;
+      search.nightInProgress = this.twilight(obs, anchor, opener.nightFrom, timezone);
     }
     return search;
   }
@@ -592,7 +587,7 @@ export class EphemerisService {
     riseFrom: (cursor: Date) => AstroTime | null,
   ): Crossings {
     const rise = riseFrom(cursor);
-    const set = SearchRiseSet(target, obs, -1, cursor, RISE_SET_WINDOW_DAYS);
+    const set = this.horizonCrossing(target, obs, -1, cursor, RISE_SET_WINDOW_DAYS);
     return {
       rise,
       set,
@@ -608,6 +603,91 @@ export class EphemerisService {
       alreadyUp: set !== null && (rise === null || set.date < rise.date),
       culmination: SearchHourAngle(target, obs, 0, cursor, +1),
     };
+  }
+
+  /**
+   * Certify the engine's upper-limb crossing before it participates in a cycle. A shallow
+   * quadratic estimate can have the wrong direction; retain ordinary estimates unchanged,
+   * and recover an invalid estimate with directed bisection in the original search window.
+   */
+  private horizonCrossing(
+    target: Body,
+    obs: Observer,
+    direction: 1 | -1,
+    start: Date,
+    limitDays: number,
+  ): AstroTime | null {
+    const candidate = SearchRiseSet(target, obs, direction, start, limitDays);
+    if (!candidate) return null;
+    const residual = (ms: number): number =>
+      direction * this.horizonResidual(target, obs, new Date(ms));
+    const estimate = candidate.date.getTime();
+    const end = start.getTime() + limitDays * 86_400_000;
+    const low = Math.min(start.getTime(), end);
+    const high = Math.max(start.getTime(), end);
+    if (
+      estimate >= low &&
+      estimate <= high &&
+      residual(estimate - 100) < 0 &&
+      residual(estimate + 100) >= 0
+    )
+      return candidate;
+
+    /**
+     * Envelope of the engine's body-specific altitude slope bounds, in degrees/ms.
+     * It bounds the round trip from either same-sign endpoint to a hidden short interval.
+     */
+    const latitude = (obs.latitude * Math.PI) / 180;
+    const slope =
+      (370 * Math.abs(Math.cos(latitude)) + 9 * Math.abs(Math.sin(latitude))) / 86_400_000;
+    const backwards = limitDays < 0;
+    const bracket = (a: number, b: number, fa: number, fb: number): AstroTime | null => {
+      if (fa < 0 && fb >= 0) {
+        while (b - a > 10) {
+          const middle = Math.floor((a + b) / 2);
+          const fm = residual(middle);
+          if (fm < 0) a = middle;
+          else b = middle;
+        }
+        return MakeTime(new Date((a + b) / 2));
+      }
+      if (b - a <= 50 || Math.min(Math.abs(fa), Math.abs(fb)) > (slope * (b - a)) / 2) return null;
+      const middle = Math.floor((a + b) / 2);
+      const fm = residual(middle);
+      return backwards
+        ? (bracket(middle, b, fm, fb) ?? bracket(a, middle, fa, fm))
+        : (bracket(a, middle, fa, fm) ?? bracket(middle, b, fm, fb));
+    };
+    let cursor = start.getTime();
+    let value = residual(cursor);
+    while (backwards ? cursor > end : cursor < end) {
+      const next = backwards
+        ? Math.max(end, cursor - 0.42 * 86_400_000)
+        : Math.min(end, cursor + 0.42 * 86_400_000);
+      const nextValue = residual(next);
+      const found = backwards
+        ? bracket(next, cursor, nextValue, value)
+        : bracket(cursor, next, value, nextValue);
+      if (found) return found;
+      cursor = next;
+      value = nextValue;
+    }
+    return null;
+  }
+
+  /** Apparent upper-limb height using SearchRiseSet's ground-level horizon convention. */
+  private horizonResidual(target: Body, obs: Observer, date: Date): number {
+    /**
+     * metersAboveGround defaults to zero: no horizon dip, even at a high ground elevation.
+     * Only Sun and Moon have a radius in the engine's rise/set model (constants in km).
+     */
+    const radiusAu = (target === Body.Sun ? 695700 : target === Body.Moon ? 1738.1 : 0) / KM_PER_AU;
+    const equator = Equator(target, date, obs, true, true);
+    return (
+      Horizon(date, obs, equator.ra, equator.dec).altitude +
+      (180 / Math.PI) * Math.asin(radiusAu / equator.dist) +
+      (34 / 60) * Atmosphere(obs.height).density
+    );
   }
 
   /**
@@ -765,7 +845,7 @@ export class EphemerisService {
   /**
    * Civil/nautical/astronomical dawn+dusk pairs for the Sun, searched forward from `start` and
    * stopping at `until` — the sunrise, or the culmination of a day without one, that ends the
-   * night the pairs belong to — so a depth that night never reaches comes back null.
+   * night the pairs belong to — so a crossing absent from that night comes back null.
    */
   private twilight(obs: Observer, start: Date, until: Date, timezone?: string): TwilightSet {
     const limitDays = (until.getTime() - start.getTime()) / 86_400_000;
@@ -964,7 +1044,9 @@ export class EphemerisService {
   ): EventRecord[] {
     const obs = observer ? this.toObserver(observer) : undefined;
     const out: EventRecord[] = [];
-    let ecl: LunarEclipseInfo = SearchLunarEclipse(start);
+    // Eclipse searches seed from syzygy; the peak can fall on either side of it.
+    let ecl: LunarEclipseInfo = SearchLunarEclipse(new Date(start.getTime() - 86_400_000));
+    while (ecl.peak.date < start) ecl = NextLunarEclipse(ecl.peak);
     for (let i = 0; i < count && withinSpan(ecl.peak.date); i++) {
       const peak = ecl.peak;
       /**
@@ -1021,7 +1103,12 @@ export class EphemerisService {
     const out: EventRecord[] = [];
     if (observer) {
       const obs = this.toObserver(observer);
-      let ecl: LocalSolarEclipseInfo = SearchLocalSolarEclipse(start, obs);
+      // The engine searches for the local peak within 0.2 days of new moon.
+      let ecl: LocalSolarEclipseInfo = SearchLocalSolarEclipse(
+        new Date(start.getTime() - 86_400_000),
+        obs,
+      );
+      while (ecl.peak.time.date < start) ecl = NextLocalSolarEclipse(ecl.peak.time, obs);
       for (let i = 0; i < count && withinSpan(ecl.peak.time.date); i++) {
         const peakTime = ecl.peak.time;
         const contacts: EclipseContacts<EclipseEvent> = [
@@ -1044,7 +1131,8 @@ export class EphemerisService {
         ecl = NextLocalSolarEclipse(peakTime, obs);
       }
     } else {
-      let ecl = SearchGlobalSolarEclipse(start);
+      let ecl = SearchGlobalSolarEclipse(new Date(start.getTime() - 86_400_000));
+      while (ecl.peak.date < start) ecl = NextGlobalSolarEclipse(ecl.peak);
       for (let i = 0; i < count && withinSpan(ecl.peak.date); i++) {
         const rec: EventRecord = {
           event: 'solar_eclipse',

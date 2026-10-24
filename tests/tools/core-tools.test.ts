@@ -232,6 +232,49 @@ describe('astronomy_get_moon_phase', () => {
 });
 
 describe('astronomy_get_rise_set', () => {
+  it('renders a certified shallow Moon rise on both surfaces', async () => {
+    const result = await runToolContract(getRiseSetTool, {
+      body: 'moon',
+      latitude: 68,
+      longitude: 18.96,
+      start: '2026-09-07T12:00:00Z',
+      count: 3,
+    });
+    expect(result.isError).toBeFalsy();
+    const out = getRiseSetTool.output.parse(result.structuredContent);
+    expect(out.events[1]?.rise_utc?.slice(0, 19)).toBe('2026-09-07T20:09:30');
+    expect(
+      result.content.some(
+        (block) => block.type === 'text' && block.text.includes(out.events[1]!.rise_utc!),
+      ),
+    ).toBe(true);
+  });
+
+  it('renders preceding polar twilight and local times before the first cycle', async () => {
+    const result = await runToolContract(getRiseSetTool, {
+      body: 'sun',
+      latitude: -67.39,
+      longitude: -68.13,
+      start: '2027-06-22T06:34:32.666Z',
+      count: 3,
+      timezone: 'America/Punta_Arenas',
+    });
+    const out = getRiseSetTool.output.parse(result.structuredContent);
+    expect(out.events).toHaveLength(3);
+    expect(out.night_in_progress?.civil).toEqual({
+      dusk_utc: '2027-06-21T19:21:49.002Z',
+      dawn_utc: '2027-06-22T13:47:00.278Z',
+      dusk_local: '2027-06-21T16:21:49-03:00',
+      dawn_local: '2027-06-22T10:47:00-03:00',
+    });
+    const text = result.content
+      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+      .join('\n');
+    const nightText = text.slice(text.indexOf('Night in progress'), text.indexOf('1. Rise'));
+    for (const pair of Object.values(out.night_in_progress!))
+      for (const stamp of Object.values(pair)) expect(nightText).toContain(stamp!);
+  });
+
   it('returns rise/set with twilight for the sun and conforms to schema', async () => {
     const ctx = createMockContext({ errors: getRiseSetTool.errors });
     const input = getRiseSetTool.input.parse({
