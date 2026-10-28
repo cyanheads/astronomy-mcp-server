@@ -1,0 +1,30 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "astronomy-mcp-server",
+  "version": "0.4.3",
+  "description": "What's in the sky, computed offline — planet and moon positions, rise/set, phases, eclipses, and seasons for any place and time via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/astronomy-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/astronomy-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "astronomy",
+    "ephemeris",
+    "rise-set",
+    "moon-phase",
+    "eclipse",
+    "astronomy-engine",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "ai-agent"
+  ]
+}
