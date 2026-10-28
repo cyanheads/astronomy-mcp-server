@@ -298,7 +298,7 @@ type Body =
 min_altitude: number   // minimum altitude filter in degrees, default 0. z.number().min(-90).max(90).default(0)
                        // Use >0 to skip objects just grazing the horizon (e.g. 5 = require 5° clearance).
 include_stars: boolean // include catalog bright stars in the output, default false. z.boolean().default(false)
-                       // When true, iterates the bundled Yale BSC / Hipparcos subset and includes
+                       // When true, iterates the bundled 32-star catalog and includes
                        // above-horizon entries alongside planets. Allocates DefineStar slots per call.
 ```
 
@@ -308,7 +308,7 @@ include_stars: boolean // include catalog bright stars in the output, default fa
 {
   …SkyPosition,
   rank: number;               // 1-based, brightest-and-highest first
-  visibility_note: string;    // "Venus, mag -4.1, 12° above the WSW horizon — very bright"
+  visibility_note: string;    // "Venus, mag -4.1, 12° above the W horizon — very bright"
                               // "Mars, mag 1.2, 35° above the W horizon — daylight, not naked-eye visible"
 }
 // envelope adds:
@@ -567,11 +567,11 @@ service.
   stars into the body enum would be wrong.
 - **Magnitude + a one-line visibility note make the output agent-useful.** Raw RA/Dec is
   correct but inert; attaching apparent magnitude, above/below-horizon, and a human note
-  ("Venus, mag −4.1, 12° above the WSW horizon") is what lets an agent answer the real
+  ("Venus, mag −4.1, 12° above the W horizon") is what lets an agent answer the real
   question. The service computes these, not the agent.
-- **Bundle a bright-star subset (Yale BSC / Hipparcos, a few hundred KB) as a static asset.**
+- **Bundle a 32-star bright-star catalog as an in-source table (`star-catalog.ts`).**
   No upstream, fits the offline ethos, and lets `list_visible` / `get_sky_position` answer
-  for named stars via `DefineStar`. Loaded once at init.
+  for named stars via `DefineStar`.
 - **Both UTC and observer-local time in output; the server does not geocode and does not
   guess the timezone.** Caller supplies `timezone` (IANA), or derives it upstream via
   `reference-data` / `openstreetmap`. Keeps the server a pure compute surface and avoids
@@ -832,9 +832,9 @@ for twilight sky brightness is out of scope.
   resume `notice`. `astronomy_get_satellite_passes` emits `totalCount` and a resume `notice`
   when `days` passes its cap. `astronomy_get_ephemeris` (span/`step`) discloses when the inline
   row cap was hit via `ctx.enrich({ truncated, shown, cap })`. `astronomy_list_visible` returns the
-  full above-horizon set (bounded at ~12 bodies + optional stars), so no cap, but it carries
-  `sky_condition` + `sun_altitude_degrees` (plus `totalCount`) as `enrichment` so both client
-  surfaces see the gate.
+  full above-horizon set (at most 7 solar-system bodies + the 32 optional catalog stars), so no
+  cap; `sky_condition`, `sun_altitude_degrees`, and `total_count` are plain output fields, so
+  both client surfaces see the gate.
 - **Preserve uncertainty; never fabricate.** `magnitude`, `angular_diameter_arcsec`,
   `phase_angle_degrees`, and `illuminated_fraction` are `null` (not 0, not omitted) for
   bodies where `astronomy-engine` can't compute them. `format()` renders "magnitude:

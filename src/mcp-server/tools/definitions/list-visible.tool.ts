@@ -26,7 +26,7 @@ const VisibleBodySchema = SkyPositionOutput.omit({ body_metadata: true })
     visibility_note: z
       .string()
       .describe(
-        'Server-computed one-line headline from real values, e.g. "Venus, mag -4.1, 12° above the WSW horizon — very bright". It states when the conditions hide a body: "daylight, not naked-eye visible" when the Sun is up, "N° from the Sun, lost in glare" within 15° of the Sun, and "civil twilight, sky still bright" in civil twilight. The Moon and a negative-magnitude Venus take no daylight or twilight caveat, being visible in a blue sky; the Sun takes none.',
+        'Server-computed one-line headline from real values, e.g. "Venus, mag -4.1, 12° above the W horizon — very bright". It states when the conditions hide a body: "daylight, not naked-eye visible" when the Sun is up, "N° from the Sun, lost in glare" within 15° of the Sun, and "civil twilight, sky still bright" in civil twilight. The Moon and a negative-magnitude Venus take no daylight or twilight caveat, being visible in a blue sky; the Sun takes none.',
       ),
   })
   .describe(
