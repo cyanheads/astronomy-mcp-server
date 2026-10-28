@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/astronomy-mcp-server</h1>
   <p><b>What's in the sky, computed offline — planet and moon positions, rise/set, phases, eclipses, and seasons for any place and time via MCP. STDIO or Streamable HTTP.</b>
-  <div>7 Tools • 1 Resource • 1 Prompt</div>
+  <div>7 Tools • 1 Resource • 1 Prompt • 1 Skill</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/astronomy-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/astronomy-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/astronomy-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -56,6 +56,14 @@ Tool-only clients get the same type, radius, and naked-eye fields inline from `a
 | Prompt | Description |
 |:---|:---|
 | `astronomy_stargazing_plan` | Plan a night of stargazing from a place, chaining the astronomy tools with geocoding and weather steps |
+
+### Skills
+
+| Skill | Description |
+|:---|:---|
+| [`astronomy-guide`](./skills/astronomy-guide/SKILL.md) | Chaining the tools for observing questions: anchoring dates to the observer's local night, what "visible" means per tool, Moon interference, eclipses from a place, and the opt-in Horizons and satellite tools |
+
+Plugin installs load it from `skills/`; MCP clients that support the Skills extension read it as `skill://astronomy-guide/SKILL.md`.
 
 Design reference: [`docs/design.md`](./docs/design.md).
 
