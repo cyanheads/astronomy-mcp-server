@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-10-28
+
+Publishes the astronomy-guide skill over MCP and in every install surface, and moves to mcp-ts-core 0.13.18, which stops the HTTP transport retaining memory for every request (a leak 0.4.3 shipped with on Bun, the Docker runtime) and trims the .mcpb to the files the server runs.
+
 ## [0.4.3](changelog/0.4.x/0.4.3.md) — 2026-10-24
 
 Correct eclipse peak boundaries, shallow horizon crossings, and preceding polar-night twilight.
