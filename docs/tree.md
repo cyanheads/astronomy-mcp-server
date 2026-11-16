@@ -1,6 +1,6 @@
 # astronomy-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 18:03:24
+Generated on: 2026-11-16 14:30:28
 
 ```text
 astronomy-mcp-server/
@@ -168,6 +168,7 @@ astronomy-mcp-server/
 │   │   │   ├── body-data.ts
 │   │   │   ├── ephemeris-service.ts
 │   │   │   ├── iso-time.ts
+│   │   │   ├── meteor-showers.ts
 │   │   │   ├── star-catalog.ts
 │   │   │   └── types.ts
 │   │   ├── horizons/
@@ -188,7 +189,8 @@ astronomy-mcp-server/
 │   ├── scripts/
 │   │   └── packaging-regexes.test.ts
 │   ├── services/
-│   │   └── ephemeris-service.test.ts
+│   │   ├── ephemeris-service.test.ts
+│   │   └── meteor-showers.test.ts
 │   └── tools/
 │       ├── core-tools-errors.test.ts
 │       ├── core-tools.test.ts

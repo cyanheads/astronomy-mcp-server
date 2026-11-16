@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-11-16
+
+Adds meteor-shower maxima to astronomy_find_events, rise/set/transit for catalog stars on astronomy_get_rise_set, observer-local eclipse contact times, and constellation, Sun elongation, and visibility on astronomy_get_ephemeris rows, which now label their RA/Dec as J2000.
+
 ## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-10-28
 
 Publishes the astronomy-guide skill over MCP and in every install surface, and moves to mcp-ts-core 0.13.18, which stops the HTTP transport retaining memory for every request (a leak 0.4.3 shipped with on Bun, the Docker runtime) and trims the .mcpb to the files the server runs.
