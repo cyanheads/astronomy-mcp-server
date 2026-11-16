@@ -18,7 +18,7 @@ describe('extension formatter text fidelity', () => {
 
     expect(block).toEqual({
       type: 'text',
-      text: '## A\\*p\\* (Horizons target: \\[target\\](https://example.test)) — 0 points',
+      text: '## A\\*p\\* (Horizons target: \\[target\\](https://example.test)) — 0 points · RA/Dec astrometric ICRF (J2000)',
     });
     expect(result.designation).toBe('A*p*');
     expect(result.target_name).toBe('[target](https://example.test)');

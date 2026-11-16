@@ -37,6 +37,10 @@
  *   SGP4 would still have propagated, pinned against the propagator's own answer at that
  *   instant so it cannot decay into a re-test of the probe it replaced — observer alt/az
  *   inclusion, the TLE cache, and format() completeness including the empty-result branch.
+ *   For the ephemeris rows: the astrometric ICRF (J2000) frame named on every surface with
+ *   live Horizons values unchanged, and the per-row constellation, Sun elongation, and
+ *   morning/evening side read from live Horizons rows carrying each `/r` code (`/L`, `/T`,
+ *   `/?`) plus `n.a.` and absent S-O-T columns, geocentric and topocentric.
  * @module tests/tools/extension-tools.test
  */
 
@@ -64,6 +68,7 @@ import {
   getSatellitePassesTool,
   type SatellitePassesOutputType,
 } from '@/mcp-server/tools/definitions/get-satellite-passes.tool.js';
+import { SkyPositionOutput } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
 import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
 import { HorizonsService, initHorizonsService } from '@/services/horizons/horizons-service.js';
 import { initSatelliteService, SatelliteService } from '@/services/satellite/satellite-service.js';
@@ -168,14 +173,18 @@ function mergedEphemerisOutput(domain: EphemerisOutputType, ctx: Context) {
     .parse({ ...domain, ...getEnrichment(ctx) });
 }
 
-/** Build a Horizons OBSERVER CSV block. Geocentric layout: date,flag,flag,RA,Dec,APmag,S-brt,delta,deldot. */
+/**
+ * Build a Horizons OBSERVER CSV block. Geocentric layout:
+ * date,flag,flag,RA,Dec,APmag,S-brt,delta,deldot,S-O-T,/r. A row that stops at deldot is
+ * the layout without quantity 23, which still parses, with no Sun elongation.
+ */
 function horizonsGeocentric(rows: string[]): string {
   return ['Some header text', 'JPL Horizons response', '$$SOE', ...rows, '$$EOE', 'trailer'].join(
     '\n',
   );
 }
 
-/** Build a Horizons OBSERVER CSV with an observer (adds Az,El columns after Dec). */
+/** Build a Horizons OBSERVER CSV with an observer (adds Az,El columns after Dec; S-O-T,/r still last). */
 function horizonsTopocentric(rows: string[]): string {
   return ['header', '$$SOE', ...rows, '$$EOE'].join('\n');
 }
@@ -225,7 +234,7 @@ describe('astronomy_get_ephemeris — happy path', () => {
   });
 
   it('requests az/el (QUANTITIES 4) and returns a finite distance + alt/az for a topocentric observer', async () => {
-    // The #1 repro: an observer call must request QUANTITIES '1,4,9,20' so the response
+    // The #1 repro: an observer call must request QUANTITIES '1,4,9,20,23' so the response
     // carries the Az/El columns parseRow reads. Without '4' the columns shift left, delta
     // lands undefined → distance_au NaN → SerializationError. With observer the layout is
     // date,flag,flag,RA,Dec,Az,El,APmag,S-brt,delta,deldot.
@@ -248,7 +257,7 @@ describe('astronomy_get_ephemeris — happy path', () => {
     });
     const result = await getEphemerisTool.handler(input, ctx);
     expect(decodeURIComponent(String(fetchSpy.mock.calls[0]?.[0]))).toContain(
-      "QUANTITIES='1,4,9,20'",
+      "QUANTITIES='1,4,9,20,23'",
     );
     expect(Number.isFinite(result.points[0]?.distance_au)).toBe(true);
     expect(result.points[0]?.distance_au).toBeCloseTo(1.5, 5);
@@ -256,7 +265,7 @@ describe('astronomy_get_ephemeris — happy path', () => {
     expect(result.points[0]?.azimuth_degrees).toBeCloseTo(180, 5);
   });
 
-  it('omits the az/el quantity for a geocentric call (QUANTITIES 1,9,20)', async () => {
+  it('omits the az/el quantity for a geocentric call (QUANTITIES 1,9,20,23)', async () => {
     const fetchSpy = vi.fn(
       async (_url: string | URL) =>
         new Response(
@@ -274,8 +283,8 @@ describe('astronomy_get_ephemeris — happy path', () => {
     });
     await getEphemerisTool.handler(input, ctx);
     const url = decodeURIComponent(String(fetchSpy.mock.calls[0]?.[0]));
-    expect(url).toContain("QUANTITIES='1,9,20'");
-    expect(url).not.toContain("QUANTITIES='1,4,9,20'");
+    expect(url).toContain("QUANTITIES='1,9,20,23'");
+    expect(url).not.toContain("QUANTITIES='1,4,9,20,23'");
   });
 
   it('preserves a null magnitude when Horizons reports "n.a." (sparse payload)', async () => {
@@ -496,7 +505,7 @@ describe('astronomy_get_ephemeris — the Horizons request behind the advertised
       START_TIME: `'${SENT_START}'`,
       STOP_TIME: `'${SENT_STOP}'`,
       STEP_SIZE: `'${SPAN.step}'`,
-      QUANTITIES: "'1,4,9,20'",
+      QUANTITIES: "'1,4,9,20,23'",
       CSV_FORMAT: 'YES',
       ANG_FORMAT: 'DEG',
       EXTRA_PREC: 'YES',
@@ -521,7 +530,7 @@ describe('astronomy_get_ephemeris — the Horizons request behind the advertised
       START_TIME: `'${SENT_START}'`,
       STOP_TIME: `'${SENT_STOP}'`,
       STEP_SIZE: `'${SPAN.step}'`,
-      QUANTITIES: "'1,9,20'",
+      QUANTITIES: "'1,9,20,23'",
       CSV_FORMAT: 'YES',
       ANG_FORMAT: 'DEG',
       EXTRA_PREC: 'YES',
@@ -2507,7 +2516,9 @@ describe('astronomy_get_ephemeris — the target Horizons resolved', () => {
     expect(result.isError).toBeFalsy();
     const structured = result.structuredContent as Record<string, unknown>;
     expect('target_name' in structured).toBe(false);
-    expect(firstText(result).split('\n')[0]).toBe('## 433; — 1 points');
+    expect(firstText(result).split('\n')[0]).toBe(
+      '## 433; — 1 point · RA/Dec astrometric ICRF (J2000)',
+    );
     expect(firstText(result)).not.toContain('undefined');
   });
 
@@ -2517,6 +2528,330 @@ describe('astronomy_get_ephemeris — the target Horizons resolved', () => {
       expect(text).not.toMatch(/returns no match or an ambiguous record list and is rejected/);
       expect(text).toContain('target_name');
     }
+  });
+});
+
+/** 499 (Mars) from Seattle at 2026-11-05T12:00Z, as live Horizons returned it (no S-O-T pair). */
+const MARS_FROM_SEATTLE =
+  ' 2026-Nov-05 12:00, ,m, 143.437786166,  16.268412633,   118.472096214,      43.738360052,    0.822,  4.572,  1.39562438496124,-14.5100379,';
+
+/**
+ * Horizons quantity 1 is astrometric RA/Dec in the ICRF (J2000) frame, while
+ * astronomy_get_sky_position returns apparent RA/Dec of date, so the two tools disagree for
+ * one body, observer, and instant. The values stay Horizons' own; every surface names the
+ * frame they are in.
+ */
+describe('astronomy_get_ephemeris — the RA/Dec frame', () => {
+  const FRAME = 'astrometric ICRF (J2000)';
+
+  it('keeps the values of a live Horizons row exactly as Horizons wrote them', async () => {
+    stubFetch(horizonsTopocentric([MARS_FROM_SEATTLE]));
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '499',
+      ...SEATTLE,
+      start: '2026-11-05T12:00:00Z',
+      stop: '2026-11-05T12:00:00Z',
+    });
+    const [p] = (await getEphemerisTool.handler(input, ctx)).points;
+    expect(p?.time_utc).toBe('2026-11-05T12:00:00.000Z');
+    expect(p?.ra_hours).toBe(9.562519077733333);
+    expect(p?.dec_degrees).toBe(16.268412633);
+    expect(p?.distance_au).toBe(1.39562438496124);
+    expect(p?.magnitude).toBe(0.822);
+    expect(p?.altitude_degrees).toBe(43.738360052);
+    expect(p?.azimuth_degrees).toBe(118.472096214);
+  });
+
+  it('names the frame on ra_hours, dec_degrees, and the tool description', () => {
+    const point = getEphemerisTool.output.shape.points.element.shape;
+    for (const text of [
+      point.ra_hours.description,
+      point.dec_degrees.description,
+      getEphemerisTool.description,
+    ]) {
+      expect(text).toContain(FRAME);
+    }
+    // The tool description says why the values differ from the sky-position tool's.
+    expect(getEphemerisTool.description).toContain('astronomy_get_sky_position');
+  });
+
+  it('states astrometric ICRF (J2000) as the frame of ra_hours and dec_degrees, never apparent of date', () => {
+    const point = getEphemerisTool.output.shape.points.element.shape;
+    // The frame qualifies the quantity in its lead clause, so a sentence that names the frame
+    // only to deny it ("…, not astrometric ICRF (J2000)") does not pass.
+    expect(point.ra_hours.description).toMatch(
+      /^Right ascension in sidereal hours \[0,24\), astrometric ICRF \(J2000\) as JPL Horizons reports it /,
+    );
+    expect(point.dec_degrees.description).toMatch(
+      /^Declination in degrees \[-90,90\], astrometric ICRF \(J2000\), /,
+    );
+    // Apparent of date appears only as the frame these values are not.
+    for (const text of [point.ra_hours.description, point.dec_degrees.description]) {
+      expect(text).not.toMatch(/(?<!not the )apparent of[- ]date/);
+    }
+  });
+
+  it('states the frame once, on the content[] header line, and no row repeats it', async () => {
+    stubFetch(
+      horizonsTopocentric([MARS_FROM_SEATTLE, MARS_FROM_SEATTLE.replace('12:00', '13:00')]),
+    );
+    const result = await runToolContract(getEphemerisTool, {
+      designation: '499',
+      ...SEATTLE,
+      start: '2026-11-05T12:00:00Z',
+      stop: '2026-11-05T13:00:00Z',
+    });
+    expect(result.isError).toBeFalsy();
+    const [header, ...rows] = firstText(result).split('\n');
+    expect(header).toBe(`## 499 — 2 points · RA/Dec ${FRAME}`);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) expect(row).not.toContain('ICRF');
+  });
+});
+
+/**
+ * Horizons quantity 23 (S-O-T) appends the Sun–observer–target elongation and its `/r`
+ * lead/trail code after deldot; the constellation is computed in-process from the row's own
+ * ICRF (J2000) RA/Dec. Every row below is a live Horizons line for 2026-11-05T00:00Z with
+ * quantity 23 requested, geocentric or from Seattle.
+ */
+describe('astronomy_get_ephemeris — constellation and Sun elongation on each row', () => {
+  const COMET_2P_GEOCENTRIC =
+    ' 2026-Nov-05 00:00, , , 351.316752314,  13.644611587,   16.768,   n.a.,  0.93488558120166, -3.0487302,  133.1760,/T,';
+  const COMET_2P_SEATTLE =
+    ' 2026-Nov-05 00:00,*, , 351.318455468,  13.642891550,    95.483401948,      23.784861378,   16.767,   n.a.,  0.93486842870552, -3.3351947,  133.1790,/T,';
+  const CERES_GEOCENTRIC =
+    ' 2026-Nov-05 00:00, , , 114.866791906,  24.182451402,    8.171,  6.835,  2.14406732047666,-22.7858136,  109.5967,/L,';
+  const SUN_GEOCENTRIC =
+    ' 2026-Nov-05 00:00, , , 219.768582156, -15.498070506,  -26.760,-10.590,  0.99168878724404, -0.4247229,    0.0000,/?,';
+  const HUBBLE_GEOCENTRIC =
+    ' 2026-Nov-05 00:00, , ,  26.893041793,  -5.570656898,     n.a.,   n.a.,  0.00004576730922,  0.0017716,  155.3807,/T,';
+  const HUBBLE_SEATTLE =
+    ' 2026-Nov-05 00:00,*, ,  54.536900364, -30.824997217,    82.077885132,     -49.885255144,     n.a.,   n.a.,  0.00006979186976,  4.0510329,  131.5463,/L,';
+
+  /** The row as Horizons prints it without quantity 23: its last two cells removed. */
+  const withoutSunPair = (row: string) => row.replace(/[^,]*,[^,]*,$/, '');
+
+  /** The same row at another hour, so one response can carry several distinct instants. */
+  const atHour = (row: string, hh: string) => row.replace(' 00:00,', ` ${hh}:00,`);
+
+  /** Run the handler over a one-row response and return its only point. */
+  async function onlyPoint(row: string, observer: boolean) {
+    stubFetch(observer ? horizonsTopocentric([row]) : horizonsGeocentric([row]));
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      ...(observer ? SEATTLE : {}),
+      start: '2026-11-05T00:00:00Z',
+      stop: '2026-11-05T00:00:00Z',
+    });
+    const result = await getEphemerisTool.handler(input, ctx);
+    expect(result).toEqual(expect.schemaMatching(getEphemerisTool.output));
+    expect(result.points).toHaveLength(1);
+    return result.points[0]!;
+  }
+
+  const LIVE_ROWS = [
+    ['2P geocentric', COMET_2P_GEOCENTRIC, false, 'Peg', 'Pegasus', 133.176, 'evening'],
+    ['2P from Seattle', COMET_2P_SEATTLE, true, 'Peg', 'Pegasus', 133.179, 'evening'],
+    ['Ceres geocentric', CERES_GEOCENTRIC, false, 'Gem', 'Gemini', 109.5967, 'morning'],
+    ['the Sun geocentric', SUN_GEOCENTRIC, false, 'Lib', 'Libra', 0, null],
+    ['Hubble geocentric', HUBBLE_GEOCENTRIC, false, 'Cet', 'Cetus', 155.3807, 'evening'],
+    ['Hubble from Seattle', HUBBLE_SEATTLE, true, 'For', 'Fornax', 131.5463, 'morning'],
+  ] as const;
+
+  it.each(LIVE_ROWS)(
+    'reads %s: its constellation, the S-O-T angle, and the side of the Sun from /r',
+    async (_label, row, observer, abbreviation, name, elongation, visibility) => {
+      const point = await onlyPoint(row, observer);
+      expect(point.constellation).toEqual({ abbreviation, name });
+      expect(point.sun_elongation_degrees).toBe(elongation);
+      expect(point.visibility).toBe(visibility);
+    },
+  );
+
+  it("reads the constellation from the row's J2000 RA/Dec, whatever the row's date", async () => {
+    /**
+     * The same J2000 position redated to 1700: three centuries of precession put the of-date
+     * position across the Leo–Cancer boundary, so a constellation read in the frame of the
+     * row's date would move. The J2000 frame Constellation() takes does not.
+     */
+    const parse = async (row: string, iso: string) => {
+      stubFetch(horizonsTopocentric([row]));
+      const ctx = createMockContext({ errors: getEphemerisTool.errors });
+      const input = getEphemerisTool.input.parse({
+        designation: '499',
+        ...SEATTLE,
+        start: iso,
+        stop: iso,
+      });
+      const [point] = (await getEphemerisTool.handler(input, ctx)).points;
+      expect(point?.time_utc).toBe(iso);
+      return point!;
+    };
+    const in2026 = await parse(MARS_FROM_SEATTLE, '2026-11-05T12:00:00.000Z');
+    const in1700 = await parse(
+      MARS_FROM_SEATTLE.replace(' 2026-Nov-05 12:00', ' 1700-Nov-05 12:00'),
+      '1700-11-05T12:00:00.000Z',
+    );
+    expect(in2026.constellation).toEqual({ abbreviation: 'Leo', name: 'Leo' });
+    expect(in1700.constellation).toEqual({ abbreviation: 'Leo', name: 'Leo' });
+    const { time_utc: _late, ...late } = in2026;
+    const { time_utc: _early, ...early } = in1700;
+    expect(early).toEqual(late);
+  });
+
+  it('strips the S-O-T pair the way Horizons prints a row without quantity 23', () => {
+    // The live 2P geocentric row from the same request without 23.
+    expect(withoutSunPair(COMET_2P_GEOCENTRIC)).toBe(
+      ' 2026-Nov-05 00:00, , , 351.316752314,  13.644611587,   16.768,   n.a.,  0.93488558120166, -3.0487302,',
+    );
+  });
+
+  it.each(LIVE_ROWS)(
+    'parses every existing field of %s the same with or without the S-O-T pair',
+    async (_label, row, observer) => {
+      const withPair = await onlyPoint(row, observer);
+      const without = await onlyPoint(withoutSunPair(row), observer);
+      const { sun_elongation_degrees: _e, visibility: _v, ...existing } = withPair;
+      const { sun_elongation_degrees: absentElongation, visibility: absentSide, ...rest } = without;
+      expect(rest).toEqual(existing);
+      expect(absentElongation).toBeNull();
+      expect(absentSide).toBeNull();
+    },
+  );
+
+  it('keys the row-drop rule on time, position, and distance only, never on S-O-T', async () => {
+    stubFetch(
+      horizonsGeocentric([
+        COMET_2P_GEOCENTRIC,
+        // S-O-T and its code both "n.a.": the point stays, with neither.
+        atHour(COMET_2P_GEOCENTRIC, '01').replace('133.1760,/T,', '    n.a.,n.a.,'),
+        // A distance of "n.a.": dropped, though it carries an S-O-T pair.
+        atHour(COMET_2P_GEOCENTRIC, '02').replace('0.93488558120166', 'n.a.'),
+        // No S-O-T pair at all: the point stays, with neither.
+        withoutSunPair(atHour(CERES_GEOCENTRIC, '03')),
+        atHour(CERES_GEOCENTRIC, '04'),
+      ]),
+    );
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '433;',
+      start: '2026-11-05T00:00:00Z',
+      stop: '2026-11-05T04:00:00Z',
+    });
+    const result = await getEphemerisTool.handler(input, ctx);
+    expect(result).toEqual(expect.schemaMatching(getEphemerisTool.output));
+    expect(mergedEphemerisOutput(result, ctx)).toMatchObject({ shown: 4, dropped: 1 });
+    expect(
+      result.points.map((p) => [
+        p.time_utc.slice(11, 16),
+        p.constellation.abbreviation,
+        p.sun_elongation_degrees,
+        p.visibility,
+      ]),
+    ).toEqual([
+      ['00:00', 'Peg', 133.176, 'evening'],
+      ['01:00', 'Peg', null, null],
+      ['03:00', 'Gem', null, null],
+      ['04:00', 'Gem', 109.5967, 'morning'],
+    ]);
+  });
+
+  it('carries the fields on every row of a page capped at 200', async () => {
+    const rows = Array.from({ length: 201 }, (_, i) =>
+      COMET_2P_GEOCENTRIC.replace(
+        ' 2026-Nov-05 00:00',
+        ` ${horizonsDateColumn(new Date(Date.UTC(2026, 10, 5, 0, i)))}`,
+      ),
+    );
+    stubFetch(horizonsGeocentric(rows));
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: 'DES=2P;CAP',
+      start: '2026-11-05T00:00:00Z',
+      stop: '2026-11-06T00:00:00Z',
+      step: '1m',
+    });
+    const result = await getEphemerisTool.handler(input, ctx);
+    expect(mergedEphemerisOutput(result, ctx)).toMatchObject({ truncated: true, shown: 200 });
+    for (const p of result.points) {
+      expect(p.constellation.abbreviation).toBe('Peg');
+      expect(p.sun_elongation_degrees).toBe(133.176);
+      expect(p.visibility).toBe('evening');
+    }
+  });
+
+  it('renders the constellation and the elongation with its side on both surfaces', async () => {
+    stubFetch(
+      horizonsGeocentric([
+        COMET_2P_GEOCENTRIC,
+        atHour(SUN_GEOCENTRIC, '01'),
+        atHour(COMET_2P_GEOCENTRIC, '02').replace('133.1760,/T,', '    n.a.,n.a.,'),
+      ]),
+    );
+    const result = await runToolContract(getEphemerisTool, {
+      designation: 'DES=2P;CAP',
+      start: '2026-11-05T00:00:00Z',
+      stop: '2026-11-05T02:00:00Z',
+    });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as EphemerisOutputType;
+    expect(
+      structured.points.map((p) => [p.constellation, p.sun_elongation_degrees, p.visibility]),
+    ).toEqual([
+      [{ abbreviation: 'Peg', name: 'Pegasus' }, 133.176, 'evening'],
+      [{ abbreviation: 'Lib', name: 'Libra' }, 0, null],
+      [{ abbreviation: 'Peg', name: 'Pegasus' }, null, null],
+    ]);
+    const [, ...lines] = firstText(result).split('\n');
+    expect(lines[0]).toBe(
+      '- 2026-11-05T00:00:00.000Z: RA 23.4211 h [23.42111682093333], Dec 13.6446° [13.644611587], 0.934886 AU [0.93488558120166], mag 16.8 [16.768], Pegasus (Peg), elong 133.2° [133.176] evening',
+    );
+    // The Sun is aligned with its own center (/?), so the row names no side.
+    expect(lines[1]).toMatch(/, Libra \(Lib\), elong 0\.0°$/);
+    // No S-O-T value: the gap renders as n/a, never as a number.
+    expect(lines[2]).toMatch(/, Pegasus \(Peg\), elong n\/a$/);
+  });
+
+  it('renders a topocentric row with the side before the alt/az, every exact value carried', async () => {
+    stubFetch(horizonsTopocentric([HUBBLE_SEATTLE]));
+    const ctx = createMockContext({ errors: getEphemerisTool.errors });
+    const input = getEphemerisTool.input.parse({
+      designation: '-48',
+      ...SEATTLE,
+      start: '2026-11-05T00:00:00Z',
+      stop: '2026-11-05T00:00:00Z',
+    });
+    const result = await getEphemerisTool.handler(input, ctx);
+    const block = getEphemerisTool.format!(result)[0];
+    const text = block && block.type === 'text' ? block.text : '';
+    expect(text).toContain(
+      ', Fornax (For), elong 131.5° [131.5463] morning, alt -49.9° [-49.885255144], az 82.1° [82.077885132]',
+    );
+    expectRoundedDisplay(text);
+    expectExactCarried(text, result.points[0]!.sun_elongation_degrees!);
+  });
+
+  it('describes the S-O-T vantage and what the /L and /T codes mean', () => {
+    const point = getEphemerisTool.output.shape.points.element.shape;
+    const elongation = point.sun_elongation_degrees.description ?? '';
+    expect(elongation).toMatch(/observer when latitude and longitude are supplied/);
+    expect(elongation).toContain("Earth's center");
+    const side = point.visibility.description ?? '';
+    expect(side).toMatch(/morning when the body leads the Sun \(\/L/);
+    expect(side).toMatch(/evening when it trails \(\/T/);
+    expect(point.visibility.safeParse('morning').success).toBe(true);
+    expect(point.visibility.safeParse(null).success).toBe(true);
+    expect(point.visibility.safeParse('east').success).toBe(false);
+  });
+
+  it('shapes constellation exactly as astronomy_get_sky_position does', () => {
+    const point = getEphemerisTool.output.shape.points.element.shape;
+    const { description: _row, ...onRow } = toJSONSchema(point.constellation);
+    const { description: _sky, ...onSky } = toJSONSchema(SkyPositionOutput.shape.constellation);
+    expect(onRow).toEqual(onSky);
   });
 });
 

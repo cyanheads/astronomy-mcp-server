@@ -3,20 +3,34 @@
  * @module services/horizons/types
  */
 
+import type { ConstellationRef } from '../ephemeris/types.js';
+
 /**
  * One step of a Horizons OBSERVER ephemeris, normalized to the wire units. Every
  * numeric value present is finite — a row that cannot supply a required one is
  * discarded during the parse rather than carried with a sentinel the output schema
- * would reject.
+ * would reject. RA/Dec are astrometric ICRF (J2000), Horizons quantity 1.
  */
 export interface EphemerisPoint {
   altitudeDegrees?: number;
   azimuthDegrees?: number;
+  /** The constellation of the row's own J2000 RA/Dec, the frame `Constellation()` reads. */
+  constellation: ConstellationRef;
   decDegrees: number;
   distanceAu: number;
   magnitude: number | null;
   raHours: number;
+  /**
+   * Horizons quantity 23 (S-O-T), in degrees, from the request's vantage: the observer when
+   * one was supplied, Earth's center otherwise. Null when the column carries no number.
+   */
+  sunElongationDegrees: number | null;
   timeUtc: string;
+  /**
+   * The side of the Sun from the S-O-T `/r` code: `/L` (leads) is morning, `/T` (trails)
+   * evening. Null for `/?` (aligned with the Sun's center) or no code.
+   */
+  visibility: 'morning' | 'evening' | null;
 }
 
 export interface EphemerisResult {

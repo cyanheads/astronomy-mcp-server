@@ -8,6 +8,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { SkyPositionOutput } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
 import { num, sig } from '@/mcp-server/tools/format-numbers.js';
 import { parseIsoInstant } from '@/services/ephemeris/iso-time.js';
 import { getHorizonsService } from '@/services/horizons/horizons-service.js';
@@ -155,13 +156,36 @@ export const EphemerisOutput = z.object({
       z
         .object({
           time_utc: z.string().describe('Step instant in ISO 8601 UTC.'),
-          ra_hours: z.number().describe('Right ascension in sidereal hours [0,24).'),
-          dec_degrees: z.number().describe('Declination in degrees [-90,90].'),
+          ra_hours: z
+            .number()
+            .describe(
+              'Right ascension in sidereal hours [0,24), astrometric ICRF (J2000) as JPL Horizons reports it — the frame of modern star charts, not the apparent of-date right ascension astronomy_get_sky_position returns. The two differ by precession, nutation, and aberration, a gap that grows with distance from the year 2000.',
+            ),
+          dec_degrees: z
+            .number()
+            .describe(
+              'Declination in degrees [-90,90], astrometric ICRF (J2000), the same frame as ra_hours.',
+            ),
           distance_au: z.number().describe('Observer-to-body distance in astronomical units.'),
           magnitude: z
             .number()
             .nullable()
             .describe('Apparent magnitude, or null when Horizons omits it for this body.'),
+          constellation: SkyPositionOutput.shape.constellation.describe(
+            "The constellation the body falls within at this step, found from the row's own ra_hours and dec_degrees.",
+          ),
+          sun_elongation_degrees: z
+            .number()
+            .nullable()
+            .describe(
+              "Angular distance from the Sun in degrees [0,180], the Sun-observer-target (S-O-T) angle JPL Horizons reports, seen from the observer when latitude and longitude are supplied and from Earth's center otherwise. 0 for the Sun itself. Null when Horizons supplies no value for the row.",
+            ),
+          visibility: z
+            .enum(['morning', 'evening'])
+            .nullable()
+            .describe(
+              "Whether the body sits in the morning or evening sky, from the /r code Horizons prints beside S-O-T: morning when the body leads the Sun (/L — it rises and sets before the Sun), evening when it trails (/T — it rises and sets after). Null when Horizons reports it aligned with the Sun's center (/?), as for the Sun itself, or prints no code. Horizons judges lead and trail by Earth's daily rotation, so for a body nearly opposite the Sun this can differ from the ecliptic-longitude rule astronomy_find_events uses for max_elongation.",
+            ),
           altitude_degrees: z
             .number()
             .optional()
@@ -175,7 +199,9 @@ export const EphemerisOutput = z.object({
               'Azimuth in degrees (0=N, 90=E, 180=S, 270=W). Present only when an observer was supplied.',
             ),
         })
-        .describe('One ephemeris step: position and, with an observer, alt/az.'),
+        .describe(
+          'One ephemeris step: position, constellation, angle from the Sun, and, with an observer, alt/az.',
+        ),
     )
     .describe('Time-series of positions, one per step, in chronological order.'),
 });
@@ -185,7 +211,7 @@ export type EphemerisOutputType = z.infer<typeof EphemerisOutput>;
 export const getEphemerisTool = tool('astronomy_get_ephemeris', {
   title: 'astronomy-mcp-server: get small-body ephemeris',
   description:
-    'Fetch a time-series ephemeris for a small body (asteroid or comet) or spacecraft from JPL Horizons — RA/Dec, distance, and apparent magnitude over a span, optionally with observer-relative altitude/azimuth. This covers objects the in-process major-body set cannot. The designation is passed to Horizons verbatim, so it must be in a form Horizons resolves to a single record: a numbered asteroid takes a trailing-semicolon record lookup (e.g. "433;" for Eros, "1;" for Ceres), and a periodic comet takes the DES + closest-apparition form (e.g. "DES=1P;CAP" for Halley). Spacecraft take their negative SPK-ID. Anything else goes through the Horizons name search: a bare name matching nothing (e.g. "433 Eros") or several records (e.g. "1P/Halley") is rejected, but one matching a single object succeeds even when that object is not the one meant — "Eros" resolves to Kerberos, a moon of Pluto — so compare `target_name`, the object Horizons resolved, with the one intended. A major-body name matching several bodies (e.g. "Mars") is rejected with the ID number of each body it matched — pass one, such as "499" for the planet. `start` and `stop` are ISO 8601 UTC dates in the Gregorian calendar, extended before 1582, in years 0100 through 9999; `stop` must not be before `start`, and a `stop` equal to `start` returns the single row at that instant. `step` is a count plus a unit of m, h, d, mo, or y, such as "1d", "1h", or "10m". Supplying observer latitude/longitude yields topocentric coordinates and adds alt/az — supply both or neither. This is a gated, network-backed extension (JPL Horizons is keyless but rate-limited and best-effort); large spans truncate inline at 200 rows, and the truncation notice names the exact `start` to resume from — one step past the last row returned, because Horizons includes the start instant in its output — so re-calling from there continues the series without repeating a sample. Splitting the range into smaller adjacent spans works too; keep the same step either way so no sample is lost.',
+    'Fetch a time-series ephemeris for a small body (asteroid or comet) or spacecraft from JPL Horizons — RA/Dec, distance, apparent magnitude, the constellation, and the angle from the Sun with its morning or evening side over a span, optionally with observer-relative altitude/azimuth. RA/Dec are astrometric ICRF (J2000), the frame of modern star charts, so they differ from the apparent of-date values astronomy_get_sky_position returns by precession, nutation, and aberration — a gap that grows with distance from the year 2000. This covers objects the in-process major-body set cannot. The designation is passed to Horizons verbatim, so it must be in a form Horizons resolves to a single record: a numbered asteroid takes a trailing-semicolon record lookup (e.g. "433;" for Eros, "1;" for Ceres), and a periodic comet takes the DES + closest-apparition form (e.g. "DES=1P;CAP" for Halley). Spacecraft take their negative SPK-ID. Anything else goes through the Horizons name search: a bare name matching nothing (e.g. "433 Eros") or several records (e.g. "1P/Halley") is rejected, but one matching a single object succeeds even when that object is not the one meant — "Eros" resolves to Kerberos, a moon of Pluto — so compare `target_name`, the object Horizons resolved, with the one intended. A major-body name matching several bodies (e.g. "Mars") is rejected with the ID number of each body it matched — pass one, such as "499" for the planet. `start` and `stop` are ISO 8601 UTC dates in the Gregorian calendar, extended before 1582, in years 0100 through 9999; `stop` must not be before `start`, and a `stop` equal to `start` returns the single row at that instant. `step` is a count plus a unit of m, h, d, mo, or y, such as "1d", "1h", or "10m". Supplying observer latitude/longitude yields topocentric coordinates and adds alt/az — supply both or neither. This is a gated, network-backed extension (JPL Horizons is keyless but rate-limited and best-effort); large spans truncate inline at 200 rows, and the truncation notice names the exact `start` to resume from — one step past the last row returned, because Horizons includes the start instant in its output — so re-calling from there continues the series without repeating a sample. Splitting the range into smaller adjacent spans works too; keep the same step either way so no sample is lost.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
     designation: z
@@ -585,6 +611,9 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
         dec_degrees: p.decDegrees,
         distance_au: p.distanceAu,
         magnitude: p.magnitude,
+        constellation: p.constellation,
+        sun_elongation_degrees: p.sunElongationDegrees,
+        visibility: p.visibility,
         ...(p.altitudeDegrees !== undefined ? { altitude_degrees: p.altitudeDegrees } : {}),
         ...(p.azimuthDegrees !== undefined ? { azimuth_degrees: p.azimuthDegrees } : {}),
       })),
@@ -597,14 +626,21 @@ export const getEphemerisTool = tool('astronomy_get_ephemeris', {
     const target = r.target_name
       ? ` (Horizons target: ${escapeMarkdownInline(r.target_name)})`
       : '';
-    lines.push(`## ${escapeMarkdownInline(r.designation)}${target} — ${r.points.length} points`);
+    const count = r.points.length === 1 ? '1 point' : `${r.points.length} points`;
+    // The frame applies to every row, so the header states it once.
+    lines.push(
+      `## ${escapeMarkdownInline(r.designation)}${target} — ${count} · RA/Dec astrometric ICRF (J2000)`,
+    );
     for (const p of r.points) {
       const altAz =
         p.altitude_degrees === undefined
           ? ''
           : `, alt ${num(p.altitude_degrees, 1, '°')}, az ${p.azimuth_degrees === undefined ? 'n/a' : num(p.azimuth_degrees, 1, '°')}`;
+      const elongation =
+        p.sun_elongation_degrees === null ? 'n/a' : num(p.sun_elongation_degrees, 1, '°');
+      const side = p.visibility === null ? '' : ` ${p.visibility}`;
       lines.push(
-        `- ${p.time_utc}: RA ${num(p.ra_hours, 4, ' h')}, Dec ${num(p.dec_degrees, 4, '°')}, ${sig(p.distance_au, 6, ' AU')}, mag ${p.magnitude === null ? 'n/a' : num(p.magnitude, 1)}${altAz}`,
+        `- ${p.time_utc}: RA ${num(p.ra_hours, 4, ' h')}, Dec ${num(p.dec_degrees, 4, '°')}, ${sig(p.distance_au, 6, ' AU')}, mag ${p.magnitude === null ? 'n/a' : num(p.magnitude, 1)}, ${p.constellation.name} (${p.constellation.abbreviation}), elong ${elongation}${side}${altAz}`,
       );
     }
     return [{ type: 'text', text: lines.join('\n') }];

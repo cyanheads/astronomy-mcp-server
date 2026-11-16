@@ -16,6 +16,7 @@ import {
   serviceUnavailable,
 } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { Constellation } from 'astronomy-engine';
 import type { ObserverInput } from '../ephemeris/types.js';
 import type { EphemerisPoint, EphemerisResult } from './types.js';
 
@@ -148,6 +149,19 @@ const REQUEST_REJECTED_RECOVERY =
  */
 const TARGET_BODY_NAME = /^Target body name:[ \t]*(.*?)[ \t]*(?:\{source:[^}]*\})?[ \t]*$/m;
 
+/**
+ * Read Horizons' S-O-T `/r` code as the morning/evening vocabulary `max_elongation` events
+ * use. Per the Horizons column definitions, `/L` means the target leads the Sun, rising and
+ * setting before it (morning sky), and `/T` that it trails, rising and setting after it
+ * (evening sky). `/?` — aligned with the Sun's center, as the Sun itself always is — names
+ * no side, and neither does a missing or unreadable code.
+ */
+function sunSideVisibility(code: string | undefined): EphemerisPoint['visibility'] {
+  if (code === '/L') return 'morning';
+  if (code === '/T') return 'evening';
+  return null;
+}
+
 export class HorizonsService {
   constructor(
     private readonly baseUrl: string,
@@ -228,10 +242,12 @@ export class HorizonsService {
       START_TIME: `'${start}'`,
       STOP_TIME: `'${stop}'`,
       STEP_SIZE: `'${step}'`,
-      // QUANTITIES 1=RA/Dec, 9=APmag/S-brt, 20=delta/deldot. Add 4=azimuth/elevation
+      // QUANTITIES 1=astrometric ICRF RA/Dec, 9=APmag/S-brt, 20=delta/deldot, 23=S-O-T
+      // (Sun-observer-target elongation) with its /r lead/trail code. Add 4=azimuth/elevation
       // for a topocentric observer so the response carries the alt/az columns parseRow
       // reads when hasObserver — without it the columns shift and delta lands undefined.
-      QUANTITIES: observer ? "'1,4,9,20'" : "'1,9,20'",
+      // 23 appends its two columns after deldot and moves none of the columns before them.
+      QUANTITIES: observer ? "'1,4,9,20,23'" : "'1,9,20,23'",
       CSV_FORMAT: 'YES',
       ANG_FORMAT: 'DEG',
       EXTRA_PREC: 'YES',
@@ -396,11 +412,15 @@ export class HorizonsService {
    * Parse one CSV row (CSV_FORMAT YES). The column layout depends on whether an
    * observer was supplied, because buildUrl requests azimuth/elevation (QUANTITIES
    * '4') only for a topocentric observer:
-   *   geocentric  ('1,9,20'):   date, flag, flag, RA(deg), DEC(deg), APmag, S-brt, delta(AU), deldot
-   *   topocentric ('1,4,9,20'): date, flag, flag, RA(deg), DEC(deg), Azimuth(deg), Elevation(deg), APmag, S-brt, delta(AU), deldot
-   * Columns 1-2 are solar-presence / lunar-illumination flags, often blank.
+   *   geocentric  ('1,9,20,23'):   date, flag, flag, RA(deg), DEC(deg), APmag, S-brt, delta(AU), deldot, S-O-T(deg), /r
+   *   topocentric ('1,4,9,20,23'): date, flag, flag, RA(deg), DEC(deg), Azimuth(deg), Elevation(deg), APmag, S-brt, delta(AU), deldot, S-O-T(deg), /r
+   * A comet's APmag and S-brt columns are its T-mag and N-mag. Columns 1-2 are the
+   * solar-presence and lunar-presence flags (`*` daylight at the site; `m` the Moon's upper
+   * limb at or above the horizon), blank at night and for a geocentric request. `/r` is a
+   * code, not a number — `/L`, `/T`, or `/?`.
    * Returns null for any row that does not carry a time, a position, and a distance —
-   * such a row is not an ephemeris point, and the caller counts the discards.
+   * such a row is not an ephemeris point, and the caller counts the discards. S-O-T and
+   * `/r` take no part in that: a row without them is a point with both null.
    */
   private parseRow(row: string, hasObserver: boolean): EphemerisPoint | null {
     const cols = row.split(',').map((c) => c.trim());
@@ -436,16 +456,26 @@ export class HorizonsService {
     // s-brt is skipped; delta (distance AU) follows.
     idx++; // s-brt column
     const delta = numeric[idx++];
+    idx++; // deldot column
+    const sunElongation = numeric[idx] ?? null;
+    // The /r code beside S-O-T is text, so it is read from the raw column.
+    const sunSide = cols[3 + idx + 1];
 
     // Distance is as load-bearing as the position: without it the row is not a point.
     if (ra == null || dec == null || delta == null) return null;
 
+    const raHours = ra / 15; // Horizons RA is in degrees; convert to sidereal hours.
+    // Constellation() takes J2000 (EQJ) coordinates, which quantity 1's astrometric ICRF RA/Dec are.
+    const constellation = Constellation(raHours, dec);
     const point: EphemerisPoint = {
       timeUtc: time,
-      raHours: ra / 15, // Horizons RA is in degrees; convert to sidereal hours.
+      raHours,
       decDegrees: dec,
       distanceAu: delta,
       magnitude: apMag ?? null,
+      constellation: { abbreviation: constellation.symbol, name: constellation.name },
+      sunElongationDegrees: sunElongation,
+      visibility: sunSideVisibility(sunSide),
     };
     if (hasObserver && altitude !== null && azimuth !== null) {
       point.altitudeDegrees = altitude;
