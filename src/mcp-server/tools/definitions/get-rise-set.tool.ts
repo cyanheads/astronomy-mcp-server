@@ -1,10 +1,10 @@
 /**
- * @fileoverview astronomy_get_rise_set — rise, set, and culmination times for a body
- *   at a location, plus the Sun's three twilight pairs per cycle and for the night under
- *   way at the start. Handles circumpolar / never-rises cases as null fields with an
- *   explanatory note. Serves at most `RISE_SET_PER_CALL` cycles per call and names the
- *   exact `start` and `count` that continue a longer request, while that start lies
- *   inside the supported span.
+ * @fileoverview astronomy_get_rise_set — rise, set, and culmination times for a
+ *   solar-system body or a bundled catalog star at a location, plus the Sun's three
+ *   twilight pairs per cycle and for the night under way at the start. Handles
+ *   circumpolar / never-rises cases as null fields with an explanatory note. Serves at
+ *   most `RISE_SET_PER_CALL` cycles per call and names the exact `start` and `count` that
+ *   continue a longer request, while that start lies inside the supported span.
  * @module mcp-server/tools/definitions/get-rise-set.tool
  */
 
@@ -13,6 +13,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { num } from '@/mcp-server/tools/format-numbers.js';
 import { getEphemerisService, SUPPORTED_SPAN } from '@/services/ephemeris/ephemeris-service.js';
+import { STAR_CATALOG } from '@/services/ephemeris/star-catalog.js';
 import { BODY_NAMES, type TwilightPair, type TwilightSet } from '@/services/ephemeris/types.js';
 
 /** Cycles computed per call; a larger `count` is served this many with a resume notice. */
@@ -80,7 +81,11 @@ const TwilightSetSchema = z.object({
 });
 
 export const RiseSetOutput = z.object({
-  body: z.string().describe('The body these rise/set cycles are for, echoed from the request.'),
+  body: z
+    .string()
+    .describe(
+      'The body these rise/set cycles are for: the requested `body`, or the catalog name a `star` resolved to (e.g. "Sirius" for "α CMa").',
+    ),
   events: z
     .array(
       z
@@ -148,12 +153,21 @@ export type RiseSetOutputType = z.infer<typeof RiseSetOutput>;
 export const getRiseSetTool = tool('astronomy_get_rise_set', {
   title: 'astronomy-mcp-server: get rise/set times',
   description:
-    "Compute rise, set, and culmination (transit) times and maximum transit altitude for a body at an observer location. Searches forward from `start` (default now) for `count` daily cycles (default 1), including days without crossings. For the Sun, each cycle carries civil −6°, nautical −12°, and astronomical −18° twilight: dusk after its set or culmination, then dawn before the next day begins. A crossing absent from that night is null. When the Sun is down and the first cycle's day begins after `start`, `night_in_progress` carries the preceding night, including polar nights without a sunset and times before `start` that have passed. A first cycle beginning after the culmination of a dark day instead carries that night itself, with rise, set, and transit null. When a body is already up, the partial first cycle has null rise and the imminent set; no set precedes its own rise. Circumpolar and never-rises cycles have null crossings and explanatory notes. At most 31 cycles are served per call; a count up to 366 returns the first 31 with a notice naming the exact `start` and `count` for the rest, or saying no continuation exists past 2100. A continuation may repeat the preceding night in `night_in_progress`, while cycles continue without overlap. Default elevation is 0 m; pass an IANA `timezone` for local output. Resolve coordinates upstream; this server does not geocode.",
+    "Compute rise, set, and culmination (transit) times and maximum transit altitude for a solar-system body or a named bright star at an observer location. Searches forward from `start` (default now) for `count` daily cycles (default 1), including days without crossings. For the Sun, each cycle carries civil −6°, nautical −12°, and astronomical −18° twilight: dusk after its set or culmination, then dawn before the next day begins. A crossing absent from that night is null. When the Sun is down and the first cycle's day begins after `start`, `night_in_progress` carries the preceding night, including polar nights without a sunset and times before `start` that have passed. A first cycle beginning after the culmination of a dark day instead carries that night itself, with rise, set, and transit null. When a body is already up, the partial first cycle has null rise and the imminent set; no set precedes its own rise. Circumpolar and never-rises cycles have null crossings and explanatory notes. At most 31 cycles are served per call; a count up to 366 returns the first 31 with a notice naming the exact `start` and `count` for the rest, or saying no continuation exists past 2100. A continuation may repeat the preceding night in `night_in_progress`, while cycles continue without overlap. Supply `star` (e.g. Sirius, Polaris) instead of `body` to target a catalog star; `body` is ignored when `star` is set. Default elevation is 0 m; pass an IANA `timezone` for local output. Resolve coordinates upstream; this server does not geocode.",
   annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
     body: z
       .enum(BODY_NAMES)
-      .describe('The body to compute rise/set for. Twilight is included only when this is "sun".'),
+      .optional()
+      .describe(
+        'Solar-system body to compute rise/set for. Omit when targeting a named star via `star`. Twilight is included only for "sun".',
+      ),
+    star: z
+      .string()
+      .optional()
+      .describe(
+        `Named star to compute rise/set for, from a bundled catalog of ${STAR_CATALOG.length} stars — about 30 of the brightest naked-eye stars plus Polaris, not an arbitrary star. Accepts a common name or Bayer designation, with the Greek letter spelled out or as a symbol and the constellation as its genitive or IAU abbreviation (e.g. "Sirius", "Alpha Centauri", "α CMa"). A name outside the catalog fails with the full list of catalog stars. Takes precedence over \`body\`; a star's cycles carry no twilight.`,
+      ),
     latitude: z
       .number()
       .min(-90)
@@ -233,6 +247,21 @@ export const getRiseSetTool = tool('astronomy_get_rise_set', {
       recovery: 'Pass a valid IANA timezone like America/Los_Angeles or UTC.',
       thrownBy: 'service',
     },
+    {
+      reason: 'star_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The `star` name is not present in the bundled bright-star catalog. The error lists every catalog star, in the message and as `catalog_stars`.',
+      // Verbatim the hint EphemerisService.lookupStar() throws with.
+      recovery:
+        'Pick a star from the catalog this error lists, by common name or Bayer designation (e.g. "Sirius", "Alpha CMa", "α Canis Majoris"). A star outside the catalog cannot be located.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'body_required',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Neither a `body` nor a `star` was supplied.',
+      recovery: 'Provide a solar-system body via `body` or a star name via `star`.',
+    },
   ],
 
   handler(input, ctx) {
@@ -245,15 +274,29 @@ export const getRiseSetTool = tool('astronomy_get_rise_set', {
       elevation: input.elevation,
     };
 
+    /**
+     * A non-blank `star` wins over `body`, as on astronomy_get_sky_position. Its DefineStar slot
+     * is loaded here, in the synchronous call that searches it: the slots are shared module
+     * state, so a star resolved ahead of this call could have been overwritten since.
+     */
+    let target: Parameters<typeof svc.riseSetSearch>[0];
+    if (input.star && input.star.trim().length > 0) {
+      target = { kind: 'star', star: svc.resolveStarTarget(input.star) };
+    } else if (input.body) {
+      target = { kind: 'body', body: input.body };
+    } else {
+      throw ctx.fail('body_required');
+    }
+
     const served = Math.min(input.count, RISE_SET_PER_CALL);
-    const { events, nightInProgress, resumeAt } = svc.riseSetSearch(
-      input.body,
+    const { body, events, nightInProgress, resumeAt } = svc.riseSetSearch(
+      target,
       observer,
       start,
       served,
       timezone,
     );
-    ctx.log.info('Computed rise/set', { body: input.body, cycles: events.length });
+    ctx.log.info('Computed rise/set', { body, cycles: events.length });
     ctx.enrich.total(events.length);
     if (input.count > served) {
       /**
@@ -274,7 +317,7 @@ export const getRiseSetTool = tool('astronomy_get_rise_set', {
     }
 
     const out: RiseSetOutputType = {
-      body: input.body,
+      body,
       events: events.map((e) => ({
         rise_utc: e.riseUtc,
         set_utc: e.setUtc,

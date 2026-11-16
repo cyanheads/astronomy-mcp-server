@@ -1,14 +1,16 @@
 /**
- * @fileoverview astronomy_find_events — consolidated forward search for nine event
+ * @fileoverview astronomy_find_events — consolidated forward search for ten event
  *   classes under one `event` enum. Both eclipse classes take an optional observer:
  *   solar eclipses are global without one and local with one, and lunar eclipses gain
- *   the Moon's altitude at each contact. Every other class is geocentric; `body2` turns a
- *   conjunction with the Sun into one of two bodies. Every search stops at the end of the
- *   supported span, with a notice when that cuts a list short, and serves at most
- *   `EVENTS_PER_CALL` events per call with a notice naming the `start` and `count` that
- *   continue.
+ *   the Moon's altitude at each contact. meteor_shower returns the maxima of the nine
+ *   major showers in the bundled IMO table, and an observer adds the radiant's and the
+ *   Sun's altitude at each. Every other class is geocentric; `body2` turns a conjunction
+ *   with the Sun into one of two bodies. Every search stops at the end of the supported
+ *   span, with a notice when that cuts a list short, and serves at most `EVENTS_PER_CALL`
+ *   events per call with a notice naming the `start` and `count` that continue.
  *   Validation gates fail fast when an event needs a body that was not supplied, when an
- *   eclipse observer is half-specified, or when the body has no such event.
+ *   observer is half-specified on a class that takes one, or when the body has no such
+ *   event.
  * @module mcp-server/tools/definitions/find-events.tool
  */
 
@@ -53,8 +55,15 @@ const BODY_EVENTS = new Set<EventName>([
   'perigee_apogee',
 ]);
 
-/** The event classes whose records an observer changes, and that resume ten days on. */
+/** The eclipse classes, which resume ten days on. */
 const ECLIPSE_EVENTS = new Set<EventName>(['solar_eclipse', 'lunar_eclipse']);
+
+/**
+ * The event classes whose records an observer changes, where a lone coordinate fails
+ * `incomplete_observer`. Kept apart from `ECLIPSE_EVENTS`: meteor showers resume an hour
+ * on, since the Geminids and Ursids peak eight days apart and a ten-day step skips one.
+ */
+const OBSERVER_EVENTS = new Set<EventName>([...ECLIPSE_EVENTS, 'meteor_shower']);
 
 export const FindEventsOutput = z.object({
   events: z
@@ -62,7 +71,11 @@ export const FindEventsOutput = z.object({
       z
         .object({
           event: z.enum(EVENT_NAMES).describe('The event class this record belongs to.'),
-          time_utc: z.string().describe('Time of the event (peak, for eclipses) in ISO 8601 UTC.'),
+          time_utc: z
+            .string()
+            .describe(
+              'Time of the event in ISO 8601 UTC: the peak for an eclipse, the maximum for a meteor shower.',
+            ),
           time_local: z
             .string()
             .optional()
@@ -99,6 +112,12 @@ export const FindEventsOutput = z.object({
             .optional()
             .describe(
               'Eclipse contact times in ISO 8601 UTC keyed by phase (e.g. partial_begin_utc, peak_utc); a phase that does not occur is null. A global solar eclipse carries peak_utc only.',
+            ),
+          contacts_local: z
+            .record(z.string(), z.string().nullable())
+            .optional()
+            .describe(
+              "The contacts in observer-local time, keyed as in contacts with _local for _utc (e.g. partial_begin_local, peak_local) and null where contacts is null. Each carries whole seconds and the zone's offset at that contact's own instant, so contacts either side of a daylight-saving change carry different offsets. Present only when a timezone was supplied, exactly when time_local is.",
             ),
           peak_latitude_degrees: z
             .number()
@@ -172,6 +191,64 @@ export const FindEventsOutput = z.object({
             .describe(
               'Center-to-center distance at the apsis in astronomical units. Present for perigee_apogee.',
             ),
+          shower: z
+            .string()
+            .optional()
+            .describe('The meteor shower\'s IMO name, e.g. "Geminids". Present for meteor_shower.'),
+          shower_code: z
+            .string()
+            .optional()
+            .describe(
+              'The meteor shower\'s IMO three-letter code, e.g. "GEM" — the form the `shower` input takes. Present for meteor_shower.',
+            ),
+          zhr: z
+            .number()
+            .optional()
+            .describe(
+              'Zenithal hourly rate at the maximum, as the calendar lists it: the meteors one observer would see in an hour under a dark, clear sky with the radiant overhead. An observed rate is usually lower. Present for meteor_shower.',
+            ),
+          radiant_ra_hours: z
+            .number()
+            .optional()
+            .describe(
+              'Right ascension of the radiant at the maximum in sidereal hours, J2000. Present for meteor_shower.',
+            ),
+          radiant_dec_degrees: z
+            .number()
+            .optional()
+            .describe(
+              'Declination of the radiant at the maximum in degrees, J2000. Present for meteor_shower.',
+            ),
+          activity_start_date: z
+            .string()
+            .optional()
+            .describe(
+              'UTC date (YYYY-MM-DD) the shower becomes active before this maximum; it can fall in the previous year, as for the Quadrantids. Present for meteor_shower.',
+            ),
+          activity_end_date: z
+            .string()
+            .optional()
+            .describe(
+              'UTC date (YYYY-MM-DD) the shower stops being active after this maximum. Present for meteor_shower.',
+            ),
+          moon_illuminated_fraction: z
+            .number()
+            .optional()
+            .describe(
+              "The Moon's illuminated fraction at the maximum, 0 to 1. Geocentric: it does not say whether the Moon is above the horizon, which astronomy_get_rise_set for the moon answers across the night. Present for meteor_shower.",
+            ),
+          radiant_altitude_degrees: z
+            .number()
+            .optional()
+            .describe(
+              "Apparent altitude in degrees of the radiant, precessed to the date, above the observer's horizon at the maximum. Negative means below it. Present for meteor_shower when latitude/longitude are supplied.",
+            ),
+          sun_altitude_degrees: z
+            .number()
+            .optional()
+            .describe(
+              "Apparent altitude in degrees of the Sun above the observer's horizon at the maximum; a maximum can fall in daylight. Present for meteor_shower when latitude/longitude are supplied.",
+            ),
         })
         .describe(
           'One event occurrence; which detail fields are present depends on the event class.',
@@ -185,7 +262,7 @@ export type FindEventsOutputType = z.infer<typeof FindEventsOutput>;
 export const findEventsTool = tool('astronomy_find_events', {
   title: 'astronomy-mcp-server: find sky events',
   description:
-    "Search forward from a start time for the next occurrences of one sky-event class, selected by the `event` enum: solar_eclipse, lunar_eclipse, equinox, solstice, moon_quarter, opposition, conjunction, max_elongation, or perigee_apogee. Both eclipse classes take an optional observer (latitude and longitude together). solar_eclipse without one returns global eclipses — kind, peak time, obscuration, and for a total or annular eclipse the latitude/longitude where it is greatest; with one it returns only eclipses visible from that point, with local contact times, `local_visible`, and the Sun's altitude at each contact. lunar_eclipse returns geocentric contact times, the same instants everywhere on Earth; an observer adds `local_visible` and the Moon's altitude at each contact. Every other class is geocentric and ignores a location. The body-relative events (opposition, conjunction, max_elongation, perigee_apogee) require a `body`: opposition applies to the superior planets (mars through pluto), conjunction to any planet, max_elongation to mercury and venus, and perigee_apogee to the moon (perigee/apogee), earth, or a planet (perihelion/aphelion). conjunction with `body` alone is that planet's conjunction with the Sun. Add `body2` for a conjunction of two bodies — the Moon or a planet with another: the instant they share one ecliptic longitude seen from Earth's center, with their `separation_degrees` at that instant. That separation is not always their closest approach, since two planets can pass closer days or weeks away, and listings that time conjunctions by right ascension differ by hours, or by days for slow pairs. Returns the next `count` occurrences (default 1), up to 20 per call: a larger `count`, up to 200, returns the first 20 and a notice naming the exact `start` and `count` that continue the series. Searches stop at the end of 2100, the close of the supported span; when that leaves fewer than `count`, a notice says so. Start defaults to now; pass an IANA `timezone` for observer-local timestamps.",
+    "Search forward from a start time for the next occurrences of one sky-event class, selected by the `event` enum: solar_eclipse, lunar_eclipse, equinox, solstice, moon_quarter, opposition, conjunction, max_elongation, perigee_apogee, or meteor_shower. Both eclipse classes and meteor_shower take an optional observer (latitude and longitude together). solar_eclipse without one returns global eclipses — kind, peak time, obscuration, and for a total or annular eclipse the latitude/longitude where it is greatest; with one it returns only eclipses visible from that point, with local contact times, `local_visible`, and the Sun's altitude at each contact. lunar_eclipse returns geocentric contact times, the same instants everywhere on Earth; an observer adds `local_visible` and the Moon's altitude at each contact. meteor_shower returns the maxima of nine major annual showers from a table bundled from the IMO Meteor Shower Calendar — ZHR, J2000 radiant, activity dates, and the Moon's geocentric illuminated fraction at each; an observer adds the radiant's and the Sun's altitude at the maximum, which can fall in daylight. The maxima are the calendar's nominal ones, with no outburst predictions. `shower` narrows the search to one shower by IMO code or name. A shower counts when its maximum is at or after start, so one past its maximum but still active needs an earlier start. Every other class is geocentric and ignores a location. The body-relative events (opposition, conjunction, max_elongation, perigee_apogee) require a `body`: opposition applies to the superior planets (mars through pluto), conjunction to any planet, max_elongation to mercury and venus, and perigee_apogee to the moon (perigee/apogee), earth, or a planet (perihelion/aphelion). conjunction with `body` alone is that planet's conjunction with the Sun. Add `body2` for a conjunction of two bodies — the Moon or a planet with another: the instant they share one ecliptic longitude seen from Earth's center, with their `separation_degrees` at that instant. That separation is not always their closest approach, since two planets can pass closer days or weeks away, and listings that time conjunctions by right ascension differ by hours, or by days for slow pairs. Returns the next `count` occurrences (default 1), up to 20 per call: a larger `count`, up to 200, returns the first 20 and a notice naming the exact `start` and `count` that continue the series. Searches stop at the end of 2100, the close of the supported span; when that leaves fewer than `count`, a notice says so. Start defaults to now; pass an IANA `timezone` for observer-local timestamps, eclipse contacts included.",
   annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true },
   input: z.object({
     event: z.enum(EVENT_NAMES).describe('Which class of event to search for.'),
@@ -193,7 +270,7 @@ export const findEventsTool = tool('astronomy_find_events', {
       .string()
       .optional()
       .describe(
-        'Search start as an ISO 8601 UTC string, e.g. "2024-01-01T00:00:00Z". Eclipses are included when their peak is at or after start; earlier contacts may still be returned. Defaults to now. A value with no zone designator is read as UTC, not the local zone of the server process.',
+        'Search start as an ISO 8601 UTC string, e.g. "2024-01-01T00:00:00Z". Eclipses and meteor showers are included when their peak is at or after start; earlier eclipse contacts and activity dates may still be returned. Defaults to now. A value with no zone designator is read as UTC, not the local zone of the server process.',
       ),
     count: z
       .number()
@@ -216,13 +293,19 @@ export const findEventsTool = tool('astronomy_find_events', {
       .describe(
         'Second body for a conjunction of two bodies: the Moon or a planet, different from `body`. Accepted only with event "conjunction", where it replaces the conjunction of `body` with the Sun by the conjunction of `body` and `body2` in ecliptic longitude seen from Earth\'s center. For the Moon meeting the Sun, search moon_quarter for the new moon.',
       ),
+    shower: z
+      .string()
+      .optional()
+      .describe(
+        'One meteor shower for event "meteor_shower", by IMO code or name, case-insensitive, with a Greek letter spelled out or written as a symbol: "GEM", "Geminids", "eta Aquariids", or "η-Aquariids". Omit it for all nine showers. Ignored by every other event.',
+      ),
     latitude: z
       .number()
       .min(-90)
       .max(90)
       .optional()
       .describe(
-        'Observer latitude in decimal degrees, supplied together with longitude. Optional for solar_eclipse and lunar_eclipse, where it adds local circumstances; omit both for a global solar search. Ignored by every other event.',
+        'Observer latitude in decimal degrees, supplied together with longitude. Optional for solar_eclipse, lunar_eclipse, and meteor_shower, where it adds local circumstances; omit both for a global solar search. Ignored by every other event.',
       ),
     longitude: z
       .number()
@@ -230,7 +313,7 @@ export const findEventsTool = tool('astronomy_find_events', {
       .max(180)
       .optional()
       .describe(
-        'Observer longitude in decimal degrees, supplied together with latitude. Optional for solar_eclipse and lunar_eclipse; ignored by every other event.',
+        'Observer longitude in decimal degrees, supplied together with latitude. Optional for solar_eclipse, lunar_eclipse, and meteor_shower; ignored by every other event.',
       ),
     elevation: z
       .number()
@@ -263,9 +346,18 @@ export const findEventsTool = tool('astronomy_find_events', {
     {
       reason: 'incomplete_observer',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'A solar_eclipse or lunar_eclipse was requested with only one of latitude and longitude.',
+      when: 'A solar_eclipse, lunar_eclipse, or meteor_shower was requested with only one of latitude and longitude.',
       recovery:
-        'Supply latitude and longitude together for local eclipse circumstances, or omit both for global ones.',
+        'Supply latitude and longitude together for local circumstances, or omit both to search without an observer.',
+    },
+    {
+      reason: 'shower_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The `shower` value names none of the nine showers in the bundled table.',
+      // Verbatim the hint EphemerisService throws with where the shower lookup misses.
+      recovery:
+        'Pick a shower from the table this error lists, by its IMO code or name (e.g. "GEM", "Geminids", "eta Aquariids"). A shower outside the table cannot be searched.',
+      thrownBy: 'service',
     },
     {
       reason: 'body_required',
@@ -328,11 +420,11 @@ export const findEventsTool = tool('astronomy_find_events', {
     const hasLongitude = typeof input.longitude === 'number';
     const hasObserver = hasLatitude && hasLongitude;
     /**
-     * An eclipse with half an observer would silently answer a different question — the
-     * global search — than the local one the caller reached for. Other classes ignore a
-     * location entirely, so a lone coordinate there changes nothing and passes.
+     * A class an observer changes, given half an observer, would silently answer a different
+     * question — the search without one — than the local one the caller reached for. Other
+     * classes ignore a location entirely, so a lone coordinate there changes nothing and passes.
      */
-    if (ECLIPSE_EVENTS.has(input.event) && hasLatitude !== hasLongitude) {
+    if (OBSERVER_EVENTS.has(input.event) && hasLatitude !== hasLongitude) {
       throw ctx.fail(
         'incomplete_observer',
         `Observer ${hasLatitude ? 'latitude' : 'longitude'} was supplied without ${hasLatitude ? 'longitude' : 'latitude'}.`,
@@ -356,6 +448,7 @@ export const findEventsTool = tool('astronomy_find_events', {
       count: served,
       ...(input.body ? { body: input.body } : {}),
       ...(input.body2 ? { body2: input.body2 } : {}),
+      ...(input.shower?.trim() ? { shower: input.shower } : {}),
       ...(observer ? { observer } : {}),
       ...(timezone ? { timezone } : {}),
     });
@@ -403,6 +496,7 @@ export const findEventsTool = tool('astronomy_find_events', {
           ? { contact_altitudes_degrees: r.contactAltitudesDegrees }
           : {}),
         ...(r.contacts ? { contacts: r.contacts } : {}),
+        ...(r.contactsLocal ? { contacts_local: r.contactsLocal } : {}),
         ...(r.peakLatitudeDegrees !== undefined
           ? { peak_latitude_degrees: r.peakLatitudeDegrees }
           : {}),
@@ -420,6 +514,22 @@ export const findEventsTool = tool('astronomy_find_events', {
         ...(r.apsisKind ? { apsis_kind: r.apsisKind } : {}),
         ...(r.distanceKm !== undefined ? { distance_km: r.distanceKm } : {}),
         ...(r.distanceAu !== undefined ? { distance_au: r.distanceAu } : {}),
+        ...(r.shower ? { shower: r.shower } : {}),
+        ...(r.showerCode ? { shower_code: r.showerCode } : {}),
+        ...(r.zhr !== undefined ? { zhr: r.zhr } : {}),
+        ...(r.radiantRaHours !== undefined ? { radiant_ra_hours: r.radiantRaHours } : {}),
+        ...(r.radiantDecDegrees !== undefined ? { radiant_dec_degrees: r.radiantDecDegrees } : {}),
+        ...(r.activityStartDate ? { activity_start_date: r.activityStartDate } : {}),
+        ...(r.activityEndDate ? { activity_end_date: r.activityEndDate } : {}),
+        ...(r.moonIlluminatedFraction !== undefined
+          ? { moon_illuminated_fraction: r.moonIlluminatedFraction }
+          : {}),
+        ...(r.radiantAltitudeDegrees !== undefined
+          ? { radiant_altitude_degrees: r.radiantAltitudeDegrees }
+          : {}),
+        ...(r.sunAltitudeDegrees !== undefined
+          ? { sun_altitude_degrees: r.sunAltitudeDegrees }
+          : {}),
       })),
     };
     return out;
@@ -433,6 +543,8 @@ export const findEventsTool = tool('astronomy_find_events', {
       if (e.which) headline += ` (${e.which})`;
       if (e.quarter) headline += ` (${e.quarter})`;
       if (e.body) headline += ` — ${e.body}${e.body2 ? ` and ${e.body2}` : ''}`;
+      if (e.shower) headline += ` — ${e.shower}`;
+      if (e.shower_code) headline += ` (${e.shower_code})`;
       lines.push(headline);
       lines.push(`time_utc: ${e.time_utc}${e.time_local ? ` | time_local: ${e.time_local}` : ''}`);
       if (e.kind) lines.push(`**Kind:** ${e.kind}`);
@@ -455,15 +567,38 @@ export const findEventsTool = tool('astronomy_find_events', {
       if (e.apsis_kind) lines.push(`**Apsis:** ${e.apsis_kind}`);
       if (e.distance_km !== undefined) lines.push(`**Distance:** ${num(e.distance_km, 0, ' km')}`);
       if (e.distance_au !== undefined) lines.push(`**Distance:** ${sig(e.distance_au, 6, ' AU')}`);
+      if (e.zhr !== undefined) lines.push(`**ZHR:** ${e.zhr}`);
+      const radiant = [
+        e.radiant_ra_hours !== undefined ? `RA ${num(e.radiant_ra_hours, 2, 'h')}` : '',
+        e.radiant_dec_degrees !== undefined ? `Dec ${num(e.radiant_dec_degrees, 1, '°')}` : '',
+      ].filter(Boolean);
+      if (radiant.length > 0) lines.push(`**Radiant (J2000):** ${radiant.join(', ')}`);
+      if (e.activity_start_date && e.activity_end_date)
+        lines.push(`**Activity:** ${e.activity_start_date} to ${e.activity_end_date}`);
+      if (e.moon_illuminated_fraction !== undefined)
+        lines.push(`**Moon illuminated:** ${pct(e.moon_illuminated_fraction, 1)}`);
+      if (e.radiant_altitude_degrees !== undefined)
+        lines.push(`**Radiant altitude:** ${num(e.radiant_altitude_degrees, 1, '°')}`);
+      if (e.sun_altitude_degrees !== undefined)
+        lines.push(`**Sun altitude:** ${num(e.sun_altitude_degrees, 1, '°')}`);
+      /**
+       * A phase the eclipse never reaches renders as `none`, the null both records carry.
+       * Each local time is paired with its UTC contact by phase name.
+       */
       if (e.contacts) {
-        const parts = Object.entries(e.contacts)
-          .filter(([, v]) => v !== null)
-          .map(([k, v]) => `${k.replace(/_utc$/, '')} ${v}`);
+        const local = new Map(
+          Object.entries(e.contacts_local ?? {}).map(([k, v]) => [k.replace(/_local$/, ''), v]),
+        );
+        const parts = Object.entries(e.contacts).map(([k, utc]) => {
+          const phase = k.replace(/_utc$/, '');
+          const at = local.get(phase);
+          return `${phase} ${utc ?? 'none'}${at ? ` (local ${at})` : ''}`;
+        });
         if (parts.length > 0) lines.push(`**Contacts:** ${parts.join(', ')}`);
       }
       if (e.contact_altitudes_degrees) {
-        const parts = Object.entries(e.contact_altitudes_degrees).flatMap(([phase, altitude]) =>
-          altitude === null ? [] : [`${phase} ${num(altitude, 1, '°')}`],
+        const parts = Object.entries(e.contact_altitudes_degrees).map(
+          ([phase, altitude]) => `${phase} ${altitude === null ? 'none' : num(altitude, 1, '°')}`,
         );
         if (parts.length > 0) lines.push(`**Contact altitudes:** ${parts.join(', ')}`);
       }

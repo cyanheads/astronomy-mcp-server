@@ -12,11 +12,16 @@ import {
   AngleBetween,
   Atmosphere,
   Body,
+  DefineStar,
   Equator,
   GeoVector,
   Horizon,
+  Illumination,
+  MakeTime,
   Observer,
   PairLongitude,
+  RotateVector,
+  Rotation_EQJ_ECL,
   SearchAltitude,
   SearchHourAngle,
   SearchRiseSet,
@@ -481,6 +486,14 @@ describe('findEvents — stops at the end of the supported span', () => {
       count: 2,
       expected: 1,
     },
+    // The 2100 Geminids and Ursids; the 2101 Quadrantids fall past the span.
+    {
+      name: 'meteor showers',
+      event: 'meteor_shower',
+      start: '2100-12-01T00:00:00Z',
+      count: 5,
+      expected: 2,
+    },
   ];
 
   it.each(cases)('$name: returns $expected of $count', (c) => {
@@ -870,6 +883,532 @@ describe('findEvents — two-body conjunctions', () => {
   });
 });
 
+/** Luxor — inside the path of the 2027-08-02 total solar eclipse. */
+const LUXOR = { latitude: 25.6872, longitude: 32.6396, elevation: 0 };
+
+/**
+ * Eclipse contact times on the observer's clock. `contactsLocal` mirrors `contacts` key for
+ * key — `<phase>_local` for `<phase>_utc`, null wherever `contacts` is null — and exists
+ * exactly when a timezone gives the record its `timeLocal`. Each contact takes the zone's
+ * offset at its own instant, not the peak's.
+ */
+describe('findEvents — eclipse contacts on the local clock', () => {
+  const luxor = () =>
+    svc.findEvents('solar_eclipse', {
+      start: new Date('2026-11-04T00:00:00Z'),
+      count: 1,
+      observer: LUXOR,
+      timezone: 'Africa/Cairo',
+    })[0]!;
+
+  it('keeps the Luxor contacts in UTC and localizes the peak in timeLocal', () => {
+    const e = luxor();
+    expect(e.contacts).toEqual({
+      partial_begin_utc: '2027-08-02T08:40:09.243Z',
+      total_begin_utc: '2027-08-02T10:01:55.537Z',
+      peak_utc: '2027-08-02T10:05:08.056Z',
+      total_end_utc: '2027-08-02T10:08:20.595Z',
+      partial_end_utc: '2027-08-02T11:26:23.600Z',
+    });
+    expect(e.timeLocal).toBe('2027-08-02T13:05:08+03:00');
+  });
+
+  it('carries every Luxor contact on the Cairo clock, the peak equal to timeLocal', () => {
+    const e = luxor();
+    expect(e.contactsLocal).toEqual({
+      partial_begin_local: '2027-08-02T11:40:09+03:00',
+      total_begin_local: '2027-08-02T13:01:55+03:00',
+      peak_local: '2027-08-02T13:05:08+03:00',
+      total_end_local: '2027-08-02T13:08:20+03:00',
+      partial_end_local: '2027-08-02T14:26:23+03:00',
+    });
+    expect(e.contactsLocal?.peak_local).toBe(e.timeLocal);
+  });
+
+  it('gives each contact the offset in force at its own instant across a DST change', () => {
+    // New Zealand daylight time ended 2015-04-05 03:00 NZDT (14:00Z), between the last
+    // umbral contact and the last penumbral one. The peak's +13:00 applied throughout
+    // would print the final contact an hour late, as 03:59:21+13:00.
+    const [e] = svc.findEvents('lunar_eclipse', {
+      start: new Date('2015-04-01T00:00:00Z'),
+      count: 1,
+      timezone: 'Pacific/Auckland',
+    });
+    expect(e!.contactsLocal).toEqual({
+      penumbral_begin_local: '2015-04-04T22:01:07+13:00',
+      partial_begin_local: '2015-04-04T23:15:21+13:00',
+      total_begin_local: '2015-04-05T00:53:49+13:00',
+      peak_local: '2015-04-05T01:00:14+13:00',
+      total_end_local: '2015-04-05T01:06:38+13:00',
+      partial_end_local: '2015-04-05T02:45:06+13:00',
+      penumbral_end_local: '2015-04-05T02:59:21+12:00',
+    });
+  });
+
+  const LUNAR_PHASES = [
+    'penumbral_begin',
+    'partial_begin',
+    'total_begin',
+    'peak',
+    'total_end',
+    'partial_end',
+    'penumbral_end',
+  ];
+  const shapes: Array<{
+    name: string;
+    event: 'solar_eclipse' | 'lunar_eclipse';
+    start: string;
+    observer?: typeof SEATTLE;
+    phases: string[];
+    nullPhases: string[];
+  }> = [
+    {
+      name: 'partial lunar eclipse without an observer',
+      event: 'lunar_eclipse',
+      start: '2026-08-01T00:00:00Z',
+      phases: LUNAR_PHASES,
+      nullPhases: ['total_begin', 'total_end'],
+    },
+    {
+      name: 'partial lunar eclipse from Seattle',
+      event: 'lunar_eclipse',
+      start: '2026-08-01T00:00:00Z',
+      observer: SEATTLE,
+      phases: LUNAR_PHASES,
+      nullPhases: ['total_begin', 'total_end'],
+    },
+    {
+      name: 'local partial solar eclipse from Rome',
+      event: 'solar_eclipse',
+      start: '2026-01-01T00:00:00Z',
+      observer: ROME,
+      phases: ['partial_begin', 'total_begin', 'peak', 'total_end', 'partial_end'],
+      nullPhases: ['total_begin', 'total_end'],
+    },
+    {
+      name: 'global solar eclipse',
+      event: 'solar_eclipse',
+      start: '2026-08-01T00:00:00Z',
+      phases: ['peak'],
+      nullPhases: [],
+    },
+  ];
+
+  it.each(shapes)(
+    'mirrors the keys and nulls of contacts: $name',
+    ({ event, start, observer, phases, nullPhases }) => {
+      const [e] = svc.findEvents(event, {
+        start: new Date(start),
+        count: 1,
+        timezone: 'America/Los_Angeles',
+        ...(observer ? { observer } : {}),
+      });
+      expect(Object.keys(e!.contacts!)).toEqual(phases.map((phase) => `${phase}_utc`));
+      expect(Object.keys(e!.contactsLocal!)).toEqual(phases.map((phase) => `${phase}_local`));
+      for (const phase of phases) {
+        const utc = e!.contacts![`${phase}_utc`];
+        const local = e!.contactsLocal![`${phase}_local`];
+        if (nullPhases.includes(phase)) {
+          expect(utc, `${phase}_utc`).toBeNull();
+          expect(local, `${phase}_local`).toBeNull();
+          continue;
+        }
+        // The same instant, cut to the whole second, with the zone's offset at that instant.
+        expect(local, `${phase}_local`).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}-0[78]:00$/);
+        expect(Date.parse(local!), `${phase}_local`).toBe(
+          Math.floor(Date.parse(utc!) / 1000) * 1000,
+        );
+      }
+    },
+  );
+
+  it.each(shapes)(
+    'carries no local times without a timezone: $name',
+    ({ event, start, observer }) => {
+      const [e] = svc.findEvents(event, {
+        start: new Date(start),
+        count: 1,
+        ...(observer ? { observer } : {}),
+      });
+      expect(e!.contacts).toBeDefined();
+      expect(e!.timeLocal).toBeUndefined();
+      expect(e!.contactsLocal).toBeUndefined();
+    },
+  );
+});
+
+/**
+ * The nine major showers of the IMO 2026 Meteor Shower Calendar (Table 5): each maximum's
+ * UTC date, its activity window, ZHR, and J2000 radiant. The oracle for the 2026 records.
+ */
+const IMO_2026 = (
+  [
+    // code, name, maximum, activity from, activity to, ZHR, radiant α°, radiant δ°
+    ['QUA', 'Quadrantids', '2026-01-03', '2025-12-28', '2026-01-12', 80, 230, 49],
+    ['LYR', 'April Lyrids', '2026-04-22', '2026-04-14', '2026-04-30', 18, 271, 34],
+    ['ETA', 'η-Aquariids', '2026-05-06', '2026-04-19', '2026-05-28', 50, 338, -1],
+    ['SDA', 'Southern δ-Aquariids', '2026-07-31', '2026-07-12', '2026-08-23', 25, 340, -16],
+    ['PER', 'Perseids', '2026-08-13', '2026-07-17', '2026-08-24', 100, 48, 58],
+    ['ORI', 'Orionids', '2026-10-21', '2026-10-02', '2026-11-07', 20, 95, 16],
+    ['LEO', 'Leonids', '2026-11-17', '2026-11-06', '2026-11-30', 15, 152, 22],
+    ['GEM', 'Geminids', '2026-12-14', '2026-12-04', '2026-12-20', 150, 112, 33],
+    ['URS', 'Ursids', '2026-12-22', '2026-12-17', '2026-12-26', 10, 217, 76],
+  ] as const
+).map(([code, name, max, from, to, zhr, ra, dec]) => ({ code, name, max, from, to, zhr, ra, dec }));
+
+/** The table's λ⊙ of each maximum, in degrees (J2000, no aberration). */
+const PEAK_SOLAR_LONGITUDE: Record<string, number> = {
+  QUA: 283.15,
+  LYR: 32.32,
+  ETA: 45.5,
+  SDA: 128,
+  PER: 140.0,
+  ORI: 208,
+  LEO: 235.27,
+  GEM: 262.2,
+  URS: 270.7,
+};
+
+/**
+ * IMO's λ⊙ computed independently of the service: the geometric geocentric Sun, no
+ * aberration, in the J2000 mean ecliptic — the same longitude as the Earth's heliocentric
+ * one plus 180°, reached through a different astronomy-engine call.
+ */
+const EQJ_TO_ECL = Rotation_EQJ_ECL();
+function imoSolarLongitude(at: Date): number {
+  const v = RotateVector(EQJ_TO_ECL, GeoVector(Body.Sun, MakeTime(at), false));
+  return ((((Math.atan2(v.y, v.x) * 180) / Math.PI) % 360) + 360) % 360;
+}
+
+/** `a − b` in degrees, folded into (−180, 180]. */
+const signedDegrees = (a: number, b: number) => ((((a - b) % 360) + 540) % 360) - 180;
+
+/** The UTC hour of day, fractional. */
+const utcHours = (iso: string) => {
+  const d = new Date(iso);
+  return d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600;
+};
+
+/**
+ * Meteor shower maxima from the bundled IMO table. Expected values are the 2026 calendar's
+ * dates and times, physical facts (a fixed-frame longitude recurs every sidereal year), and
+ * astronomy-engine computations reached through calls the service does not make.
+ */
+describe('findEvents — meteor showers', () => {
+  const LONDON = { latitude: 51.5074, longitude: -0.1278, elevation: 0 };
+  const showers2026 = () =>
+    svc.findEvents('meteor_shower', { start: new Date('2026-01-01T00:00:00Z'), count: 9 });
+  const geminids2026 = (observer?: typeof LONDON) =>
+    svc.findEvents('meteor_shower', {
+      start: new Date('2026-12-01T00:00:00Z'),
+      count: 1,
+      shower: 'GEM',
+      ...(observer ? { observer } : {}),
+    })[0]!;
+
+  it("returns the nine 2026 maxima in calendar order, each on the calendar's date", () => {
+    const events = showers2026();
+    expect(events.map((e) => e.showerCode)).toEqual(IMO_2026.map((s) => s.code));
+    events.forEach((e, i) => {
+      const row = IMO_2026[i]!;
+      expect(e.event).toBe('meteor_shower');
+      expect(e.timeUtc.slice(0, 10), row.code).toBe(row.max);
+      expect(e.shower, row.code).toBe(row.name);
+      expect(e.zhr, row.code).toBe(row.zhr);
+      // The calendar gives the radiant's RA in degrees; the record carries sidereal hours.
+      expect(e.radiantRaHours, row.code).toBeCloseTo(row.ra / 15, 12);
+      expect(e.radiantDecDegrees, row.code).toBe(row.dec);
+    });
+  });
+
+  /**
+   * The calendar's times. SearchSunLongitude on the table value (the Sun's apparent
+   * longitude of date) puts the Lyrids at 10:41, the Geminids at 04:52, and the Perseids on
+   * Aug 12 at 16:47; an aberration-corrected J2000 longitude puts the Lyrids at 19:46 and
+   * the Leonids at 23:52. Each fails one of these.
+   */
+  it.each([
+    ['LYR', '2026-04-22T19:40:00Z'],
+    ['LEO', '2026-11-17T23:45:00Z'],
+  ])('puts the %s maximum within 5 minutes of the calendar minute %s', (code, calendar) => {
+    const e = showers2026().find((s) => s.showerCode === code)!;
+    expect(Math.abs(Date.parse(e.timeUtc) - Date.parse(calendar))).toBeLessThanOrEqual(300_000);
+  });
+
+  it.each([
+    ['QUA', '2026-01-03', 21],
+    ['GEM', '2026-12-14', 14],
+    ['URS', '2026-12-22', 22],
+  ])('puts the %s maximum on %s at the calendar hour %ih UT, rounded', (code, date, hour) => {
+    const e = showers2026().find((s) => s.showerCode === code)!;
+    expect(e.timeUtc.slice(0, 10)).toBe(date);
+    expect(Math.round(utcHours(e.timeUtc))).toBe(hour);
+  });
+
+  it('puts the Perseids (λ⊙ 140.0°) between 02h and 04h UT on Aug 13', () => {
+    const e = showers2026().find((s) => s.showerCode === 'PER')!;
+    expect(e.timeUtc.slice(0, 10)).toBe('2026-08-13');
+    expect(utcHours(e.timeUtc)).toBeGreaterThanOrEqual(2);
+    expect(utcHours(e.timeUtc)).toBeLessThan(4);
+  });
+
+  it.each(IMO_2026)("opens and closes the 2026 $name window on the calendar's dates", (row) => {
+    const e = showers2026().find((s) => s.showerCode === row.code)!;
+    expect([e.activityStartDate, e.activityEndDate]).toEqual([row.from, row.to]);
+  });
+
+  it("gives the Moon's geocentric illuminated fraction at each maximum", () => {
+    const events = showers2026();
+    // The calendar's New Moon on Aug 12 and Full Moon at the Quadrantid peak.
+    expect(events.find((e) => e.showerCode === 'PER')!.moonIlluminatedFraction).toBeLessThan(0.01);
+    expect(events.find((e) => e.showerCode === 'QUA')!.moonIlluminatedFraction).toBeGreaterThan(
+      0.99,
+    );
+    // At the maximum's own instant, as a 0-to-1 fraction — not the date's midnight, nor a percentage.
+    for (const e of events) {
+      expect(e.moonIlluminatedFraction, e.showerCode).toBeCloseTo(
+        Illumination(Body.Moon, new Date(e.timeUtc)).phase_fraction,
+        6,
+      );
+    }
+  });
+
+  /**
+   * The radiant oracle loads the J2000 radiant into a DefineStar slot and reads its
+   * apparent place of date through Equator(), a path the service's precession of a bare
+   * vector does not take. The J2000 radiant without precession reads −4.82° from London and
+   * 47.15° from Seattle; without refraction, −5.47° from London.
+   */
+  const radiantOracle = (observer: typeof LONDON, timeUtc: string) => {
+    const time = MakeTime(new Date(timeUtc));
+    const obs = new Observer(observer.latitude, observer.longitude, observer.elevation);
+    DefineStar(Body.Star8, 112 / 15, 33, 1000);
+    const eq = Equator(Body.Star8, time, obs, true, true);
+    return Horizon(time, obs, eq.ra, eq.dec, 'normal').altitude;
+  };
+
+  it('puts the 2026 Geminid maximum in London daylight, its radiant just below the horizon', () => {
+    const e = geminids2026(LONDON);
+    expect(e.sunAltitudeDegrees).toBeGreaterThan(0);
+    expect(e.sunAltitudeDegrees).toBeCloseTo(11.8, 1);
+    expect(e.radiantAltitudeDegrees).toBeCloseTo(-4.86, 2);
+    expect(Math.abs(e.radiantAltitudeDegrees! - radiantOracle(LONDON, e.timeUtc))).toBeLessThan(
+      0.01,
+    );
+  });
+
+  it('puts the 2026 Geminid maximum in Seattle astronomical night, its radiant high', () => {
+    const e = geminids2026(SEATTLE);
+    expect(e.sunAltitudeDegrees).toBeLessThan(-18);
+    expect(e.sunAltitudeDegrees).toBeCloseTo(-20.16, 2);
+    expect(e.radiantAltitudeDegrees).toBeCloseTo(47.41, 2);
+    expect(Math.abs(e.radiantAltitudeDegrees! - radiantOracle(SEATTLE, e.timeUtc))).toBeLessThan(
+      0.01,
+    );
+  });
+
+  it('carries neither altitude without an observer, and the same maximum either way', () => {
+    for (const e of showers2026()) {
+      expect('radiantAltitudeDegrees' in e, e.showerCode).toBe(false);
+      expect('sunAltitudeDegrees' in e, e.showerCode).toBe(false);
+    }
+    expect(geminids2026(LONDON).timeUtc).toBe(geminids2026().timeUtc);
+  });
+
+  it('narrows the search to one shower: "GEM" ×3 is the 2026, 2027, and 2028 Geminids', () => {
+    const events = svc.findEvents('meteor_shower', {
+      start: new Date('2026-01-01T00:00:00Z'),
+      count: 3,
+      shower: 'GEM',
+    });
+    expect(events.map((e) => e.showerCode)).toEqual(['GEM', 'GEM', 'GEM']);
+    expect(events.map((e) => e.timeUtc.slice(0, 4))).toEqual(['2026', '2027', '2028']);
+    for (const e of events) expect(e.timeUtc.slice(5, 10)).toMatch(/^12-1[3-5]$/);
+  });
+
+  it.each([
+    ['GEM', 'GEM'],
+    ['gem', 'GEM'],
+    ['  gem  ', 'GEM'],
+    ['Geminids', 'GEM'],
+    ['GEMINIDS', 'GEM'],
+    ['η-Aquariids', 'ETA'],
+    ['Η-AQUARIIDS', 'ETA'],
+    ['Eta Aquariids', 'ETA'],
+    ['eta-aquariids', 'ETA'],
+    ['eta_aquariids', 'ETA'],
+    ['η Aquariids', 'ETA'],
+    ['ETA', 'ETA'],
+    ['April Lyrids', 'LYR'],
+    ['Lyrids', 'LYR'],
+    ['Southern δ-Aquariids', 'SDA'],
+    ['southern delta aquariids', 'SDA'],
+    ['δ-Aquariids', 'SDA'],
+    ['Delta Aquariids', 'SDA'],
+    ['Quadrantids', 'QUA'],
+    ['Perseids', 'PER'],
+    ['Orionids', 'ORI'],
+    ['Leonids', 'LEO'],
+    ['Ursids', 'URS'],
+  ])('resolves shower %j to %s', (shower, code) => {
+    const [e] = svc.findEvents('meteor_shower', {
+      start: new Date('2026-01-01T00:00:00Z'),
+      count: 1,
+      shower,
+    });
+    expect(e?.showerCode).toBe(code);
+    expect(e?.shower).toBe(IMO_2026.find((s) => s.code === code)!.name);
+  });
+
+  it.each([
+    'Draconids',
+    'Northern δ-Aquariids',
+    'Geminid',
+    'GEMX',
+    'constructor',
+    '__proto__',
+    'toString',
+    '',
+    '   ',
+  ])('fails shower_not_found for %j, listing all nine showers', (shower) => {
+    const err = captureThrown(() =>
+      svc.findEvents('meteor_shower', {
+        start: new Date('2026-01-01T00:00:00Z'),
+        count: 1,
+        shower,
+      }),
+    );
+    expect(err?.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err?.data?.reason).toBe('shower_not_found');
+    expect(err?.data?.recovery?.hint).toBe(
+      findEventsTool.errors?.find((e) => e.reason === 'shower_not_found')?.recovery,
+    );
+    expect((err?.data as { catalog_showers?: unknown } | undefined)?.catalog_showers).toEqual(
+      IMO_2026.map(({ code, name }) => ({ code, name })),
+    );
+    for (const { code, name } of IMO_2026) expect(err?.message).toContain(`${name} (${code})`);
+  });
+
+  it('counts a maximum at or after start: a second either side of the 2026 Geminids', () => {
+    const first = (start: string) =>
+      svc.findEvents('meteor_shower', { start: new Date(start), count: 1 })[0]!;
+    // The 2026 Geminid maximum falls at 13:41:10 UT on December 14.
+    expect(first('2026-12-14T13:41:09.496Z').showerCode).toBe('GEM');
+    expect(first('2026-12-14T13:41:11.496Z').showerCode).toBe('URS');
+    expect(first('2026-12-14T13:41:11.496Z').timeUtc.slice(0, 10)).toBe('2026-12-22');
+  });
+
+  it('resumes an hour past the 2026 Geminids at the Ursids, 8.35 days on; ten days skips them', () => {
+    const gem = Date.parse(geminids2026().timeUtc);
+    const [next] = svc.findEvents('meteor_shower', { start: new Date(gem + 3_600_000), count: 1 });
+    expect(next?.showerCode).toBe('URS');
+    expect((Date.parse(next!.timeUtc) - gem) / 86_400_000).toBeCloseTo(8.35, 2);
+    const [afterTenDays] = svc.findEvents('meteor_shower', {
+      start: new Date(gem + 10 * 86_400_000),
+      count: 1,
+    });
+    expect([afterTenDays?.showerCode, afterTenDays?.timeUtc.slice(0, 4)]).toEqual(['QUA', '2027']);
+  });
+
+  it('recurs a shower every sidereal year, as a longitude fixed in the J2000 frame does', () => {
+    // 201 Geminid maxima, 1900–2100. A longitude of date recurs every tropical year
+    // (365.24219 d), which over 200 years lands the last maximum 2.8 days early.
+    const events = svc.findEvents('meteor_shower', {
+      start: new Date('1900-01-01T00:00:00Z'),
+      count: 201,
+      shower: 'Geminids',
+    });
+    expect(events.map((e) => e.timeUtc.slice(0, 4))).toEqual(
+      Array.from({ length: 201 }, (_unused, k) => String(1900 + k)),
+    );
+    const meanGapDays =
+      (Date.parse(events.at(-1)!.timeUtc) - Date.parse(events[0]!.timeUtc)) / 86_400_000 / 200;
+    expect(Math.abs(meanGapDays - 365.256363)).toBeLessThan(0.001);
+  });
+
+  /**
+   * Every maximum of the supported span, 1900 through 2100: nine a year, each where λ⊙
+   * reaches its table value, with an activity window bounded by the UTC dates on which the
+   * Sun reaches the λ⊙ it held at 12:00 UT on the calendar's 2026 start and end dates.
+   */
+  describe('across the whole supported span', () => {
+    let events: EventRecord[];
+    beforeAll(() => {
+      events = svc.findEvents('meteor_shower', {
+        start: new Date('1900-01-01T00:00:00Z'),
+        count: 5000,
+      });
+    });
+
+    it('returns 1,809 maxima, nine in every year from 1900 to 2100', () => {
+      expect(events).toHaveLength(1809);
+      const perYear = new Map<string, string[]>();
+      for (const e of events) {
+        const year = e.timeUtc.slice(0, 4);
+        perYear.set(year, [...(perYear.get(year) ?? []), e.showerCode!]);
+      }
+      expect([...perYear.keys()]).toEqual(
+        Array.from({ length: 201 }, (_unused, k) => String(1900 + k)),
+      );
+      for (const [year, codes] of perYear) {
+        expect([...codes].sort(), year).toEqual(IMO_2026.map((s) => s.code).sort());
+      }
+      for (let i = 1; i < events.length; i++) {
+        expect(Date.parse(events[i]!.timeUtc)).toBeGreaterThan(Date.parse(events[i - 1]!.timeUtc));
+      }
+    });
+
+    it("puts every maximum at its shower's table λ⊙", () => {
+      for (const e of events) {
+        const offset = signedDegrees(
+          imoSolarLongitude(new Date(e.timeUtc)),
+          PEAK_SOLAR_LONGITUDE[e.showerCode!]!,
+        );
+        // 1e-5° is under a second of the Sun's motion.
+        expect(Math.abs(offset), `${e.showerCode} ${e.timeUtc}`).toBeLessThan(1e-5);
+      }
+    });
+
+    it("bounds every window by the UTC dates the Sun reaches the calendar's start and end λ⊙", () => {
+      const bounds = new Map<string, number[]>(
+        IMO_2026.map((s) => [
+          s.code,
+          [s.from, s.to].map((d) => imoSolarLongitude(new Date(`${d}T12:00:00Z`))),
+        ]),
+      );
+      const reachedOn = (date: string, longitude: number) => {
+        const dayStart = Date.parse(`${date}T00:00:00Z`);
+        return (
+          signedDegrees(imoSolarLongitude(new Date(dayStart)), longitude) <= 0 &&
+          signedDegrees(imoSolarLongitude(new Date(dayStart + 86_400_000)), longitude) > 0
+        );
+      };
+      for (const e of events) {
+        const [from, to] = bounds.get(e.showerCode!)!;
+        const label = `${e.showerCode} ${e.timeUtc}`;
+        expect(reachedOn(e.activityStartDate!, from!), `${label} start`).toBe(true);
+        expect(reachedOn(e.activityEndDate!, to!), `${label} end`).toBe(true);
+        const maxDate = e.timeUtc.slice(0, 10);
+        expect(e.activityStartDate! < maxDate && maxDate < e.activityEndDate!, label).toBe(true);
+      }
+    });
+
+    it('opens the 1900 Quadrantid window in the previous calendar year', () => {
+      const qua = events[0]!;
+      expect(qua.showerCode).toBe('QUA');
+      expect(qua.timeUtc.slice(0, 10)).toBe('1900-01-02');
+      expect([qua.activityStartDate, qua.activityEndDate]).toEqual(['1899-12-27', '1900-01-11']);
+    });
+
+    it('ends with the 2100 Geminids and Ursids, the 2101 Quadrantids past the span', () => {
+      expect(events.slice(-2).map((e) => [e.showerCode, e.timeUtc.slice(0, 4)])).toEqual([
+        ['GEM', '2100'],
+        ['URS', '2100'],
+      ]);
+    });
+  });
+});
+
 describe('position', () => {
   it('places the Sun above the horizon at local noon and below at midnight in Seattle', () => {
     // 2024-06-21 ~20:00 UTC ≈ 13:00 local (PDT) — Sun should be high.
@@ -950,18 +1489,22 @@ describe('position', () => {
 });
 
 describe('riseSet', () => {
+  /** The solar-system targets these cases search. */
+  const SUN = { kind: 'body', body: 'sun' } as const;
+  const MOON = { kind: 'body', body: 'moon' } as const;
+
   it('retains ordinary Moon crossings at observer elevation', () => {
     const observer = { latitude: 47.6062, longitude: -122.3321, elevation: 2400 };
     const start = new Date('2026-09-07T12:00:00Z');
     const engineObserver = new Observer(observer.latitude, observer.longitude, observer.elevation);
-    const event = svc.riseSet('moon', observer, start, 1)[0]!;
+    const event = svc.riseSet(MOON, observer, start, 1)[0]!;
     expect(event.riseUtc).toBeNull();
     expect(event.setUtc).toBe(SearchRiseSet(Body.Moon, engineObserver, -1, start, 2)!.toString());
   });
 
   it('keeps the short below-horizon interval between genuine Moon crossings', () => {
     const events = svc.riseSet(
-      'moon',
+      MOON,
       { latitude: 68, longitude: 18.96, elevation: 0 },
       new Date('2026-09-07T12:00:00Z'),
       3,
@@ -972,7 +1515,7 @@ describe('riseSet', () => {
 
   it('does not admit an ascending Mars root as a set', () => {
     const events = svc.riseSet(
-      'mars',
+      { kind: 'body', body: 'mars' },
       { latitude: 70, longitude: 18.96, elevation: 0 },
       new Date('2028-01-07T11:57:45.137Z'),
       8,
@@ -1009,7 +1552,7 @@ describe('riseSet', () => {
       };
       for (const offset of [-200, 200]) {
         const start = new Date(Date.parse(root) + offset);
-        const search = svc.riseSetSearch(body, observer, start, 3);
+        const search = svc.riseSetSearch({ kind: 'body', body }, observer, start, 3);
         const first = search.events[0]!;
         if (kind === 'rise' && offset < 0)
           expect(Math.abs(Date.parse(first.riseUtc!) - Date.parse(root))).toBeLessThan(100);
@@ -1033,8 +1576,8 @@ describe('riseSet', () => {
           if (event.transitUtc && event.setUtc)
             expect(Date.parse(event.transitUtc)).toBeLessThan(Date.parse(event.setUtc));
         }
-        const continued = svc.riseSetSearch(body, observer, search.resumeAt, 2);
-        const whole = svc.riseSetSearch(body, observer, start, 5);
+        const continued = svc.riseSetSearch({ kind: 'body', body }, observer, search.resumeAt, 2);
+        const whole = svc.riseSetSearch({ kind: 'body', body }, observer, start, 5);
         expect([...search.events, ...continued.events]).toEqual(whole.events);
       }
     },
@@ -1044,7 +1587,7 @@ describe('riseSet', () => {
     // rise-then-set. The original 00:00Z start is 17:00 local with the Sun already up,
     // where the returned pair was tomorrow's rise beside tonight's set — the test passed
     // while contradicting its own name. The already-up case is covered on its own below.
-    const events = svc.riseSet('sun', SEATTLE, new Date('2024-06-21T09:00:00Z'), 1);
+    const events = svc.riseSet(SUN, SEATTLE, new Date('2024-06-21T09:00:00Z'), 1);
     expect(events).toHaveLength(1);
     const e = events[0]!;
     expect(e.riseUtc).toBeTruthy();
@@ -1067,7 +1610,7 @@ describe('riseSet', () => {
   const SUN_UP_START = new Date('2026-08-11T20:00:00Z');
 
   it('reports the interval in progress rather than pairing tonight_s set with tomorrow_s rise', () => {
-    const [cycle] = svc.riseSet('sun', SEATTLE, SUN_UP_START, 1);
+    const [cycle] = svc.riseSet(SUN, SEATTLE, SUN_UP_START, 1);
     // The rise that opened this interval is behind `start`, and riseSet only searches
     // forward, so the honest answer is a partial cycle that names the imminent set.
     expect(cycle?.riseUtc).toBeNull();
@@ -1082,7 +1625,7 @@ describe('riseSet', () => {
   it('never reports a set before its own rise, for any body or cycle', () => {
     for (const body of ['sun', 'moon', 'mars'] as const) {
       for (const start of [SUN_UP_START, new Date('2026-08-11T09:00:00Z')]) {
-        for (const cycle of svc.riseSet(body, SEATTLE, start, 4)) {
+        for (const cycle of svc.riseSet({ kind: 'body', body }, SEATTLE, start, 4)) {
           if (!cycle.riseUtc || !cycle.setUtc) continue;
           expect(
             Date.parse(cycle.setUtc),
@@ -1097,7 +1640,7 @@ describe('riseSet', () => {
     // The cursor used to advance a full day past the cycle's rise, which lands beyond the
     // following day's set — so a multi-count call silently dropped an entire day's set.
     const sets = svc
-      .riseSet('sun', SEATTLE, SUN_UP_START, 4)
+      .riseSet(SUN, SEATTLE, SUN_UP_START, 4)
       .map((c) => c.setUtc)
       .filter((s): s is string => s !== null)
       .map((s) => Date.parse(s));
@@ -1109,7 +1652,7 @@ describe('riseSet', () => {
   });
 
   it('keeps the transit inside the cycle it is reported with', () => {
-    for (const cycle of svc.riseSet('sun', SEATTLE, SUN_UP_START, 3)) {
+    for (const cycle of svc.riseSet(SUN, SEATTLE, SUN_UP_START, 3)) {
       if (!cycle.transitUtc) continue;
       const transit = Date.parse(cycle.transitUtc);
       if (cycle.riseUtc) expect(transit).toBeGreaterThan(Date.parse(cycle.riseUtc));
@@ -1121,7 +1664,7 @@ describe('riseSet', () => {
     // The twilight pair used to be searched from the resume cursor, which sits between
     // sunset and civil dusk — so the following cycle came back carrying the previous
     // evening's twilight while its own rise and set had moved on a day.
-    for (const cycle of svc.riseSet('sun', SEATTLE, SUN_UP_START, 3)) {
+    for (const cycle of svc.riseSet(SUN, SEATTLE, SUN_UP_START, 3)) {
       const dusk = cycle.twilight?.civil.duskUtc;
       if (!dusk || !cycle.setUtc) continue;
       const afterSetMinutes = (Date.parse(dusk) - Date.parse(cycle.setUtc)) / 60000;
@@ -1142,7 +1685,7 @@ describe('riseSet', () => {
   it('pairs each cycle_s dusk with the following morning_s dawn', () => {
     // 07:00Z is 00:00 local in Seattle, before the 2026-09-23 sunrise.
     const cycles = svc.riseSet(
-      'sun',
+      SUN,
       SEATTLE,
       new Date('2026-09-23T07:00:00Z'),
       3,
@@ -1183,7 +1726,7 @@ describe('riseSet', () => {
    * second past the last set.
    */
   it('pins a mid-latitude series: rise, set, full twilight, and resume point', () => {
-    const sun = svc.riseSetSearch('sun', SEATTLE, new Date('2026-09-23T07:00:00Z'), 3);
+    const sun = svc.riseSetSearch(SUN, SEATTLE, new Date('2026-09-23T07:00:00Z'), 3);
     expect(sun.events.map((e) => [e.riseUtc?.slice(0, 16), e.setUtc?.slice(0, 16)])).toEqual([
       ['2026-09-23T13:57', '2026-09-24T02:04'],
       ['2026-09-24T13:59', '2026-09-25T02:02'],
@@ -1200,7 +1743,7 @@ describe('riseSet', () => {
       astronomical: { dawnUtc: '2026-09-25T12:16:39.748Z', duskUtc: '2026-09-25T03:46:07.375Z' },
     });
     expect(sun.resumeAt.toISOString()).toBe('2026-09-26T02:00:28.150Z');
-    const moon = svc.riseSetSearch('moon', SEATTLE, new Date('2026-10-15T04:00:00Z'), 2);
+    const moon = svc.riseSetSearch(MOON, SEATTLE, new Date('2026-10-15T04:00:00Z'), 2);
     expect(moon.resumeAt.toISOString()).toBe('2026-10-17T04:44:07.461Z');
   });
 
@@ -1208,7 +1751,7 @@ describe('riseSet', () => {
   const LONDON = { latitude: 51.5, longitude: -0.12, elevation: 0 };
 
   it('nulls a depth the cycle_s night never reaches instead of borrowing a later night_s', () => {
-    const [cycle] = svc.riseSet('sun', LONDON, new Date('2026-07-20T00:00:00Z'), 1);
+    const [cycle] = svc.riseSet(SUN, LONDON, new Date('2026-07-20T00:00:00Z'), 1);
     expect(cycle?.setUtc).toBe('2026-07-20T20:05:45.758Z');
     // The Sun gets no deeper than −18° that night; the next night's dusk and dawn fall
     // 27.6 h and 28.4 h after this set, past the next sunrise that bounds this night.
@@ -1222,7 +1765,7 @@ describe('riseSet', () => {
       Helsinki: { latitude: 60.17, longitude: 24.94, elevation: 0 },
     };
     for (const [name, site] of Object.entries(sites)) {
-      const cycles = svc.riseSet('sun', site, new Date('2026-04-15T12:00:00Z'), 141);
+      const cycles = svc.riseSet(SUN, site, new Date('2026-04-15T12:00:00Z'), 141);
       for (const [i, cycle] of cycles.slice(0, -1).entries()) {
         const set = Date.parse(cycle.setUtc as string);
         const nextRise = Date.parse(cycles[i + 1]!.riseUtc as string);
@@ -1249,7 +1792,7 @@ describe('riseSet', () => {
 
     it('reports the night under way after sunset, every depth bounded by that night', () => {
       // 19:00 local, after the 18:22 sunset and inside nautical twilight.
-      const search = svc.riseSetSearch('sun', SEATTLE, new Date('2026-10-15T02:00:00Z'), 1, TZ);
+      const search = svc.riseSetSearch(SUN, SEATTLE, new Date('2026-10-15T02:00:00Z'), 1, TZ);
       const night = search.nightInProgress!;
       expect(hhmm(night.civil.duskLocal)).toBe('2026-10-14T18:53');
       expect(hhmm(night.civil.dawnLocal)).toBe('2026-10-15T06:57');
@@ -1263,8 +1806,8 @@ describe('riseSet', () => {
     });
 
     it('reports the same night from a pre-dawn start, including dawns already passed', () => {
-      const evening = svc.riseSetSearch('sun', SEATTLE, new Date('2026-10-15T02:00:00Z'), 1, TZ);
-      const predawn = svc.riseSetSearch('sun', SEATTLE, new Date('2026-10-15T13:30:00Z'), 1, TZ);
+      const evening = svc.riseSetSearch(SUN, SEATTLE, new Date('2026-10-15T02:00:00Z'), 1, TZ);
+      const predawn = svc.riseSetSearch(SUN, SEATTLE, new Date('2026-10-15T13:30:00Z'), 1, TZ);
       expect(predawn.nightInProgress).toEqual(evening.nightInProgress);
       // 06:30 local: astronomical and nautical dawn precede the start and are still there.
       expect(hhmm(predawn.nightInProgress?.astronomical.dawnLocal)).toBe('2026-10-15T05:45');
@@ -1272,14 +1815,14 @@ describe('riseSet', () => {
     });
 
     it('is absent while the Sun is up', () => {
-      expect(svc.riseSetSearch('sun', SEATTLE, SUN_UP_START, 1).nightInProgress).toBeUndefined();
+      expect(svc.riseSetSearch(SUN, SEATTLE, SUN_UP_START, 1).nightInProgress).toBeUndefined();
     });
 
     it('distinguishes a polar morning night from midnight sun without horizon crossings', () => {
       const observer = { latitude: 89, longitude: 0, elevation: 0 };
-      const midnightSun = svc.riseSetSearch('sun', observer, new Date('2027-06-21T06:00:00Z'), 1);
+      const midnightSun = svc.riseSetSearch(SUN, observer, new Date('2027-06-21T06:00:00Z'), 1);
       expect(midnightSun.nightInProgress).toBeUndefined();
-      const dark = svc.riseSetSearch('sun', observer, new Date('2027-12-21T06:00:00Z'), 1);
+      const dark = svc.riseSetSearch(SUN, observer, new Date('2027-12-21T06:00:00Z'), 1);
       expect(dark.nightInProgress).toEqual({
         civil: { dawnUtc: null, duskUtc: null },
         nautical: { dawnUtc: null, duskUtc: null },
@@ -1289,7 +1832,7 @@ describe('riseSet', () => {
 
     it('bounds the preceding night by a first day with no sunrise', () => {
       const observer = { latitude: 69.65, longitude: 18.96, elevation: 0 };
-      const search = svc.riseSetSearch('sun', observer, new Date('2026-12-10T06:00:00Z'), 1);
+      const search = svc.riseSetSearch(SUN, observer, new Date('2026-12-10T06:00:00Z'), 1);
       expect(search.events[0]?.riseUtc).toBeNull();
       expect(search.nightInProgress?.civil).toEqual({
         dawnUtc: '2026-12-10T08:14:44.187Z',
@@ -1300,7 +1843,7 @@ describe('riseSet', () => {
 
     it('nulls a depth that night never reaches', () => {
       const { nightInProgress } = svc.riseSetSearch(
-        'sun',
+        SUN,
         LONDON,
         new Date('2026-06-21T22:30:00Z'),
         1,
@@ -1315,7 +1858,7 @@ describe('riseSet', () => {
     it('reports the preceding polar night without a sunset in the look-back window', () => {
       // Tromsø the morning the polar night ends: a sunrise lies ahead, but no sunset behind.
       const tromso = { latitude: 69.65, longitude: 18.96, elevation: 0 };
-      const search = svc.riseSetSearch('sun', tromso, new Date('2027-01-15T06:00:00Z'), 1);
+      const search = svc.riseSetSearch(SUN, tromso, new Date('2027-01-15T06:00:00Z'), 1);
       expect(search.events[0]?.riseUtc).toBe('2027-01-15T10:34:40.655Z');
       expect(search.nightInProgress?.civil).toEqual({
         duskUtc: '2027-01-14T13:46:24.184Z',
@@ -1332,7 +1875,7 @@ describe('riseSet', () => {
       // 67.4° N on the afternoon of 2026-12-21, a day without a sunrise: the first cycle is
       // the rest of that day and carries its night; the sunset of the 20th is behind it.
       const north = svc.riseSetSearch(
-        'sun',
+        SUN,
         { latitude: 67.4, longitude: 18.96, elevation: 0 },
         new Date('2026-12-21T15:42:11.858Z'),
         4,
@@ -1346,7 +1889,7 @@ describe('riseSet', () => {
       // 67.39° S before dawn on 2027-06-22: the 21st had no sunrise, and the sunset of the
       // 20th began the night that ended on the 21st.
       const south = svc.riseSetSearch(
-        'sun',
+        SUN,
         { latitude: -67.39, longitude: -68.13, elevation: 0 },
         new Date('2027-06-22T06:34:32.666Z'),
         3,
@@ -1361,7 +1904,12 @@ describe('riseSet', () => {
 
     it('is never computed for a body other than the Sun', () => {
       for (const body of ['moon', 'mars'] as const) {
-        const search = svc.riseSetSearch(body, SEATTLE, new Date('2026-10-15T04:00:00Z'), 2);
+        const search = svc.riseSetSearch(
+          { kind: 'body', body },
+          SEATTLE,
+          new Date('2026-10-15T04:00:00Z'),
+          2,
+        );
         expect(search.nightInProgress).toBeUndefined();
         expect(search.events).toHaveLength(2);
       }
@@ -1370,7 +1918,7 @@ describe('riseSet', () => {
 
   it('reports the Sun as circumpolar at the North Pole in June', () => {
     const events = svc.riseSet(
-      'sun',
+      SUN,
       { latitude: 89.9, longitude: 0, elevation: 0 },
       new Date('2024-06-21T00:00:00Z'),
       1,
@@ -1428,7 +1976,7 @@ describe('riseSet', () => {
     it('gives the first never-rises day the night after its own culmination', () => {
       // The polar night begins at Tromsø on 2026-11-28.
       const [lastSunrise, firstDark] = svc.riseSet(
-        'sun',
+        SUN,
         TROMSO,
         new Date('2026-11-26T23:00:00Z'),
         2,
@@ -1445,7 +1993,7 @@ describe('riseSet', () => {
     it('keeps the last never-rises day before the Sun returns', () => {
       // 2027-01-14 is the last day without a sunrise; it and the nights of the 13th and 14th
       // each get a cycle before the sunrise of the 15th opens the next.
-      const cycles = svc.riseSet('sun', TROMSO, new Date('2027-01-12T12:00:00Z'), 4);
+      const cycles = svc.riseSet(SUN, TROMSO, new Date('2027-01-12T12:00:00Z'), 4);
       expect(cycles.map((e) => dayOf(e.transitUtc))).toEqual([
         null,
         '2027-01-13',
@@ -1463,7 +2011,7 @@ describe('riseSet', () => {
 
     it('keeps the last midnight-sun day before the Sun sets again', () => {
       // The 24th has no sunset and the 25th's is its own cycle's, not the 24th's.
-      const cycles = svc.riseSet('sun', TROMSO, new Date('2026-07-23T00:00:00Z'), 4);
+      const cycles = svc.riseSet(SUN, TROMSO, new Date('2026-07-23T00:00:00Z'), 4);
       expect(cycles.map((e) => dayOf(e.transitUtc))).toEqual([
         '2026-07-23',
         '2026-07-24',
@@ -1478,12 +2026,12 @@ describe('riseSet', () => {
       // The midnight sun ends with the 2026-07-25 sunset: that cycle opens with the Sun
       // already up, as its second cycle here and as the first of a call started there.
       const start = new Date('2026-07-24T09:50:42.696Z');
-      const firstSet = svc.riseSet('sun', TROMSO, start, 2)[1]!;
+      const firstSet = svc.riseSet(SUN, TROMSO, start, 2)[1]!;
       expect(firstSet).toMatchObject({ riseUtc: null, setUtc: '2026-07-25T22:36:24.735Z' });
       const note = 'Already above the horizon when this cycle opens — no rise in this cycle.';
       expect(firstSet.note).toBe(note);
-      const { resumeAt } = svc.riseSetSearch('sun', TROMSO, start, 1);
-      const [paged] = svc.riseSet('sun', TROMSO, resumeAt, 1);
+      const { resumeAt } = svc.riseSetSearch(SUN, TROMSO, start, 1);
+      const [paged] = svc.riseSet(SUN, TROMSO, resumeAt, 1);
       expect(paged).toEqual(firstSet);
     });
 
@@ -1491,7 +2039,7 @@ describe('riseSet', () => {
       // 89.9° N near the March equinox: the Sun culminated below the horizon at 10:52Z, then
       // rises a second after `start` and sets again before the day's lower culmination.
       const [first] = svc.riseSet(
-        'sun',
+        SUN,
         { latitude: 89.9, longitude: 18.96, elevation: 0 },
         new Date('2027-03-18T12:10:26.779Z'),
         1,
@@ -1502,7 +2050,7 @@ describe('riseSet', () => {
 
     it('opens a polar-night afternoon with the rest of that day and its night', () => {
       // 2026-12-10 at Tromsø: the Sun culminates below the horizon at 10:37Z.
-      const [rest, next] = svc.riseSet('sun', TROMSO, new Date('2026-12-10T12:00:00Z'), 2);
+      const [rest, next] = svc.riseSet(SUN, TROMSO, new Date('2026-12-10T12:00:00Z'), 2);
       expect(rest).toMatchObject({
         riseUtc: null,
         setUtc: null,
@@ -1516,7 +2064,7 @@ describe('riseSet', () => {
       expect(minute(next?.transitUtc)).toBe('2026-12-11T10:37');
       expect(dayOf(next?.twilight?.civil.duskUtc)).toBe('2026-12-11');
       // Started after that dusk, the night keeps it rather than reading as one it never reaches.
-      const [late] = svc.riseSet('sun', TROMSO, new Date('2026-12-10T20:00:00Z'), 1);
+      const [late] = svc.riseSet(SUN, TROMSO, new Date('2026-12-10T20:00:00Z'), 1);
       expect(civil(late!)).toEqual(['2026-12-10T12:58:42.578Z', '2026-12-11T08:16:59.773Z']);
     });
 
@@ -1526,7 +2074,7 @@ describe('riseSet', () => {
       const start = new Date('2026-11-27T15:00:00Z');
       const sunset = SearchRiseSet(Body.Sun, new Observer(69.65, 18.96, 0), -1, start, -2);
       expect(sunset?.date.toISOString().slice(0, 16)).toBe('2026-11-27T10:42');
-      const search = svc.riseSetSearch('sun', TROMSO, start, 2);
+      const search = svc.riseSetSearch(SUN, TROMSO, start, 2);
       const [rest, firstDark] = search.events;
       expect(rest).toMatchObject({ riseUtc: null, setUtc: null, transitUtc: null });
       expect(civil(rest!)).toEqual(['2026-11-27T13:26:39.728Z', '2026-11-28T07:39:29.525Z']);
@@ -1537,14 +2085,14 @@ describe('riseSet', () => {
 
     it('resumes past a polar-night boundary without repeating its night', () => {
       // The last sunrise day alone, then a continuation from where it stopped.
-      const lastSunrise = svc.riseSetSearch('sun', TROMSO, new Date('2026-11-27T05:00:00Z'), 1);
-      const [after] = svc.riseSet('sun', TROMSO, lastSunrise.resumeAt, 1);
+      const lastSunrise = svc.riseSetSearch(SUN, TROMSO, new Date('2026-11-27T05:00:00Z'), 1);
+      const [after] = svc.riseSet(SUN, TROMSO, lastSunrise.resumeAt, 1);
       expect(dayOf(lastSunrise.events[0]?.twilight?.civil.duskUtc)).toBe('2026-11-27');
       expect(minute(after?.transitUtc)).toBe('2026-11-28T10:32');
       expect(dayOf(after?.twilight?.civil.duskUtc)).toBe('2026-11-28');
       // The rest of a dark day resumes at the next day, not at a second rest of the same one.
-      const rest = svc.riseSetSearch('sun', TROMSO, new Date('2026-12-10T12:00:00Z'), 1);
-      const [following] = svc.riseSet('sun', TROMSO, rest.resumeAt, 1);
+      const rest = svc.riseSetSearch(SUN, TROMSO, new Date('2026-12-10T12:00:00Z'), 1);
+      const [following] = svc.riseSet(SUN, TROMSO, rest.resumeAt, 1);
       expect(minute(following?.transitUtc)).toBe('2026-12-11T10:37');
       expect(dayOf(following?.twilight?.civil.duskUtc)).toBe('2026-12-11');
     });
@@ -1564,7 +2112,7 @@ describe('riseSet', () => {
       ] as const;
       for (const { body, site, start, count } of walks) {
         const label = `${body} at ${site.latitude} from ${start}`;
-        const cycles = svc.riseSet(body, site, new Date(start), count);
+        const cycles = svc.riseSet({ kind: 'body', body }, site, new Date(start), count);
         expect(cycles, label).toHaveLength(count);
         const last = cycles.at(-1)!;
         const until = Date.parse(last.riseUtc ?? last.transitUtc ?? last.setUtc!);
@@ -1620,12 +2168,13 @@ describe('riseSet', () => {
       ] as const;
       for (const { body, site, start, count } of walks) {
         const label = `${body} at ${site.latitude} from ${start}`;
-        const direct = svc.riseSet(body, site, new Date(start), count);
+        const target = { kind: 'body', body } as const;
+        const direct = svc.riseSet(target, site, new Date(start), count);
         const paged: RiseSetEvent[] = [];
         let cursor = new Date(start);
         let pages = 0;
         while (paged.length < count) {
-          const page = svc.riseSetSearch(body, site, cursor, Math.min(31, count - paged.length));
+          const page = svc.riseSetSearch(target, site, cursor, Math.min(31, count - paged.length));
           paged.push(...page.events);
           cursor = page.resumeAt;
           pages++;
@@ -1634,6 +2183,121 @@ describe('riseSet', () => {
         expect(paged, label).toEqual(direct);
       }
     });
+  });
+});
+
+/**
+ * A catalog star runs the same cycle loop as a solar-system body, on the DefineStar slot
+ * `resolveStarTarget()` loads. It is a point at the horizon, its day is one sidereal day, and
+ * it carries no twilight and no night in progress.
+ */
+describe('riseSet — catalog stars', () => {
+  const OBSERVER = { latitude: 47.6062, longitude: -122.3321, elevation: 0 };
+  const START = new Date('2026-11-05T00:00:00Z');
+  /** Resolved at each use, as the tool does: a slot is defined in the call that searches it. */
+  const star = (name: string) => ({ kind: 'star', star: svc.resolveStarTarget(name) }) as const;
+  const SIDEREAL_DAY_MS = 86_164_091;
+
+  it('finds Sirius rising, culminating, and setting from Seattle', () => {
+    const search = svc.riseSetSearch(star('Sirius'), OBSERVER, START, 1);
+    expect(search.body).toBe('Sirius');
+    expect(search.events).toHaveLength(1);
+    const cycle = search.events[0]!;
+    expect(cycle).toMatchObject({
+      riseUtc: '2026-11-05T07:10:47.470Z',
+      transitUtc: '2026-11-05T11:56:45.982Z',
+      setUtc: '2026-11-05T16:42:44.516Z',
+    });
+    expect(Math.abs(cycle.transitAltitudeDegrees! - 25.69)).toBeLessThan(0.01);
+    expect(cycle.note).toBeUndefined();
+    expect(cycle.twilight).toBeUndefined();
+    expect(search.nightInProgress).toBeUndefined();
+  });
+
+  it('agrees with the engine searched directly on the same slot', () => {
+    const obs = new Observer(OBSERVER.latitude, OBSERVER.longitude, OBSERVER.elevation);
+    const target = star('Sirius');
+    const cycle = svc.riseSetSearch(target, OBSERVER, START, 1).events[0]!;
+    expect(cycle.riseUtc).toBe(SearchRiseSet(target.star.slot, obs, +1, START, 2)!.toString());
+    expect(cycle.setUtc).toBe(SearchRiseSet(target.star.slot, obs, -1, START, 2)!.toString());
+    const transit = SearchHourAngle(target.star.slot, obs, 0, START, +1);
+    expect(cycle.transitUtc).toBe(transit.time.toString());
+    expect(cycle.transitAltitudeDegrees).toBe(transit.hor.altitude);
+  });
+
+  it('resolves every spelling of a Bayer designation to the same cycle', () => {
+    const sirius = svc.riseSetSearch(star('Sirius'), OBSERVER, START, 2);
+    for (const name of ['α CMa', 'Alpha CMa', 'alpha canis majoris']) {
+      const search = svc.riseSetSearch(star(name), OBSERVER, START, 2);
+      expect(search.body, name).toBe('Sirius');
+      expect(search.events, name).toEqual(sirius.events);
+    }
+  });
+
+  it('reports Polaris as circumpolar and Canopus as never rising', () => {
+    const [polaris] = svc.riseSet(star('Polaris'), OBSERVER, START, 1);
+    expect(polaris).toMatchObject({
+      riseUtc: null,
+      setUtc: null,
+      note: 'Circumpolar — never sets at this latitude/date.',
+    });
+    expect(polaris?.transitAltitudeDegrees).toBeCloseTo(48.24, 2);
+    const [canopus] = svc.riseSet(star('Canopus'), OBSERVER, START, 1);
+    expect(canopus).toMatchObject({
+      riseUtc: null,
+      setUtc: null,
+      note: 'Never rises above the horizon at this latitude/date.',
+    });
+    expect(canopus?.transitAltitudeDegrees).toBeCloseTo(-9.73, 2);
+    for (const name of ['Polaris', 'Canopus']) {
+      const cycles = svc.riseSet(star(name), OBSERVER, START, 3);
+      expect(new Set(cycles.map((c) => c.note)).size, name).toBe(1);
+      expect(
+        cycles.every((c) => c.transitUtc !== null && !c.twilight),
+        name,
+      ).toBe(true);
+    }
+  });
+
+  it('opens on a partial cycle naming the set when the star is already up', () => {
+    const obs = new Observer(OBSERVER.latitude, OBSERVER.longitude, OBSERVER.elevation);
+    const target = star('Antares');
+    const [first, second] = svc.riseSet(target, OBSERVER, START, 2);
+    expect(first?.riseUtc).toBeNull();
+    expect(first?.setUtc).toBe(SearchRiseSet(target.star.slot, obs, -1, START, 2)!.toString());
+    expect(first?.note).toBe(
+      'Already above the horizon when this cycle opens — no rise in this cycle.',
+    );
+    expect(Date.parse(second!.riseUtc!)).toBeGreaterThan(Date.parse(first!.setUtc!));
+  });
+
+  it('steps one sidereal day per cycle and pages across calls exactly as one search does', () => {
+    const count = 70;
+    const direct = svc.riseSet(star('Sirius'), OBSERVER, START, count);
+    const rises = direct.map((c) => Date.parse(c.riseUtc!));
+    for (const [i, rise] of rises.slice(1).entries()) {
+      expect(Math.abs(rise - rises[i]! - SIDEREAL_DAY_MS), direct[i + 1]!.riseUtc!).toBeLessThan(
+        1000,
+      );
+    }
+    const paged: RiseSetEvent[] = [];
+    let cursor = START;
+    let pages = 0;
+    while (paged.length < count) {
+      const served = Math.min(31, count - paged.length);
+      const page = svc.riseSetSearch(star('Sirius'), OBSERVER, cursor, served);
+      paged.push(...page.events);
+      cursor = page.resumeAt;
+      pages++;
+    }
+    expect(pages).toBe(3);
+    expect(paged).toEqual(direct);
+  });
+
+  it('recomputes the same cycles after another call has redefined every slot', () => {
+    const first = svc.riseSetSearch(star('Sirius'), OBSERVER, START, 3).events;
+    svc.listVisible(OBSERVER, START, { minAltitude: -90, includeStars: true });
+    expect(svc.riseSetSearch(star('Sirius'), OBSERVER, START, 3).events).toEqual(first);
   });
 });
 

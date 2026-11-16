@@ -1,9 +1,10 @@
 /**
  * @fileoverview Bundled bright-star catalog — a curated subset of the brightest
  *   naked-eye stars with J2000 (EQJ) right ascension, declination, distance, and
- *   apparent magnitude. Feeds astronomy-engine's DefineStar so list_visible and
- *   get_sky_position can answer for named stars. Static asset, no upstream; loaded
- *   once at module init. Coordinates from the Hipparcos / Yale Bright Star catalogs.
+ *   apparent magnitude. Feeds astronomy-engine's DefineStar so list_visible,
+ *   get_sky_position, and get_rise_set can answer for named stars. Static asset, no
+ *   upstream; loaded once at module init. Coordinates from the Hipparcos / Yale Bright
+ *   Star catalogs.
  *   Also holds the Greek-letter and constellation-abbreviation tables that let a Bayer
  *   designation be written `α CMa` or `Alpha CMa` as well as `Alpha Canis Majoris`.
  * @module services/ephemeris/star-catalog
@@ -280,7 +281,7 @@ export const STAR_CATALOG: readonly CatalogStar[] = [
  * Greek letter symbol → the spelled-out name every catalog `designation` leads with, so a
  * Bayer designation written `α CMa` resolves like `Alpha CMa`.
  */
-export const GREEK_LETTER_NAMES: Readonly<Record<string, string>> = {
+const GREEK_LETTER_NAMES: Readonly<Record<string, string>> = {
   α: 'Alpha',
   β: 'Beta',
   γ: 'Gamma',
@@ -306,6 +307,11 @@ export const GREEK_LETTER_NAMES: Readonly<Record<string, string>> = {
   ψ: 'Psi',
   ω: 'Omega',
 };
+
+/** `GREEK_LETTER_NAMES` with the names lower-cased, e.g. `α` → `alpha`, for case-folded lookups. */
+export const GREEK_LETTERS: ReadonlyMap<string, string> = new Map(
+  Object.entries(GREEK_LETTER_NAMES).map(([symbol, spelled]) => [symbol, spelled.toLowerCase()]),
+);
 
 /**
  * IAU three-letter constellation abbreviation → the genitive every catalog `designation`

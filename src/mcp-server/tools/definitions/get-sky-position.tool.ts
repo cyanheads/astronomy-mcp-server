@@ -14,7 +14,11 @@ import { STAR_CATALOG } from '@/services/ephemeris/star-catalog.js';
 import { BODY_NAMES } from '@/services/ephemeris/types.js';
 
 export const SkyPositionOutput = z.object({
-  body: z.string().describe('The body or star this position is for, echoed from the request.'),
+  body: z
+    .string()
+    .describe(
+      'The body this position is for, or the catalog name of the star (e.g. "Sirius" for a `star` of "α CMa").',
+    ),
   body_metadata: z
     .object({
       type: z.enum(['star', 'planet', 'moon', 'dwarf']).describe('Classification of the body.'),

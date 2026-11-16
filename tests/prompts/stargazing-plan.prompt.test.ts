@@ -63,7 +63,27 @@ describe('stargazingPlanPrompt', () => {
       const m = /^(\d+)\. /.exec(l);
       return m ? [Number(m[1])] : [];
     });
-    expect(numbers).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  });
+
+  it('checks for a meteor shower active across the requested night, not only one peaking on it', async () => {
+    // A shower stays active for days to weeks around its maximum, and the tool returns only
+    // maxima at or after `start`: a start on <date> itself misses a shower that peaked a few
+    // nights earlier and is still active. The step starts four weeks early and filters on
+    // the activity dates instead.
+    const text = await generate({ location: 'Mount Rainier', date: '2026-12-13' });
+    const step6 = stepText(text, 6);
+    expect(step6).toContain('astronomy_find_events with event "meteor_shower"');
+    expect(step6).toMatch(/`start` four weeks before the local <date> night/);
+    expect(step6).toContain('activity_start_date');
+    expect(step6).toContain('activity_end_date');
+    // Moon interference comes from the moonrise and moonset of step 4, not the fraction. The
+    // whole clause is pinned: its parts alone survive a sentence that inverts the advice.
+    expect(step6).toContain(
+      "moon_illuminated_fraction is geocentric, so judge the moon's interference from the moonrise and moonset of step 4.",
+    );
+    expect(stepText(text, 7)).toContain('weather');
+    expect(text).toMatch(/Then summarize:.*meteor shower/);
   });
 
   it('defaults to tonight when no date is supplied', async () => {
@@ -102,11 +122,11 @@ describe('stargazingPlanPrompt', () => {
   });
 
   it('anchors the observing window to the requested date in the observer timezone', async () => {
-    // Steps 2, 4, and 5 each pick a time. Without the requested date and the IANA zone
+    // Steps 2, 4, 5, and 6 each pick a time. Without the requested date and the IANA zone
     // resolved in step 1, they resolve against UTC midnight and can land on the wrong
     // local night — the defect this pins.
     const text = await generate({ location: 'Mount Rainier', date: '2024-08-12' });
-    for (const n of [2, 4, 5]) {
+    for (const n of [2, 4, 5, 6]) {
       const step = stepText(text, n);
       expect(step, `step ${n} must reference the requested date`).toMatch(/<date>/);
       expect(step, `step ${n} must reference the observer timezone`).toMatch(/timezone/i);

@@ -51,7 +51,7 @@ export const PAIR_BODY_NAMES = [
 
 export type PairBodyName = (typeof PAIR_BODY_NAMES)[number];
 
-/** The nine consolidated event classes for astronomy_find_events. */
+/** The ten consolidated event classes for astronomy_find_events. */
 export const EVENT_NAMES = [
   'solar_eclipse',
   'lunar_eclipse',
@@ -62,6 +62,7 @@ export const EVENT_NAMES = [
   'conjunction',
   'max_elongation',
   'perigee_apogee',
+  'meteor_shower',
 ] as const;
 
 export type EventName = (typeof EVENT_NAMES)[number];
@@ -165,6 +166,8 @@ export interface RiseSetEvent {
 
 /** One forward rise/set search: its cycles, the Sun's night under way at the start, and where it stops. */
 export interface RiseSetSearch {
+  /** The body key searched, or the catalog name of the star — `"Sirius"` for `α CMa`. */
+  body: string;
   events: RiseSetEvent[];
   /**
    * Sun only: the preceding night when the first cycle's day begins after `start`. Bounded
@@ -214,6 +217,10 @@ export type EclipsePhase =
 
 /** Discriminated event record. `event` is the discriminator; details vary. */
 export interface EventRecord {
+  /** Meteor shower: UTC date (YYYY-MM-DD) the activity window around this maximum closes. */
+  activityEndDate?: string;
+  /** Meteor shower: UTC date (YYYY-MM-DD) the activity window around this maximum opens. */
+  activityStartDate?: string;
   /** Apsis classification. */
   apsisKind?: 'perigee' | 'apogee' | 'perihelion' | 'aphelion';
   /** Body the event pertains to (opposition/conjunction/elongation/apsis). */
@@ -229,6 +236,11 @@ export interface EventRecord {
   contactAltitudesDegrees?: Partial<Record<EclipsePhase, number | null>>;
   /** Solar/lunar eclipse contact times (ISO 8601 UTC), present per eclipse phase. */
   contacts?: Record<string, string | null>;
+  /**
+   * `contacts` on the observer's clock, keyed `<phase>_local` and null where `contacts` is,
+   * each instant formatted as `timeLocal` is. Present exactly when `timeLocal` is.
+   */
+  contactsLocal?: Record<string, string | null>;
   distanceAu?: number;
   distanceKm?: number;
   /** Greatest-elongation angle in degrees. */
@@ -238,6 +250,11 @@ export interface EventRecord {
   kind?: string;
   /** Observer only: true when the eclipsed body is above the horizon at any contact. */
   localVisible?: boolean;
+  /**
+   * Meteor shower: the Moon's illuminated fraction (0 to 1) at the maximum, geocentric — it
+   * says nothing about whether the Moon is up.
+   */
+  moonIlluminatedFraction?: number;
   /** Peak fraction of the disc obscured, when known (eclipses). */
   obscuration?: number | null;
   /** Global total/annular solar eclipse: geographic latitude of greatest eclipse. */
@@ -247,20 +264,40 @@ export interface EventRecord {
   /** Moon quarter name. */
   quarter?: QuarterName;
   /**
+   * Meteor shower, observer only: refracted altitude in degrees of the radiant, precessed to
+   * the date, at the maximum.
+   */
+  radiantAltitudeDegrees?: number;
+  /** Meteor shower: radiant declination at the maximum in degrees, J2000. */
+  radiantDecDegrees?: number;
+  /** Meteor shower: radiant right ascension at the maximum in sidereal hours, J2000. */
+  radiantRaHours?: number;
+  /**
    * Two-body conjunction only: the pair's angular separation in degrees, seen from Earth's
    * center at the conjunction instant. Not their closest approach, which for two planets
    * can fall days or weeks away and be degrees closer.
    */
   separationDegrees?: number;
+  /** Meteor shower: IMO name, e.g. "Geminids". */
+  shower?: string;
+  /** Meteor shower: IMO three-letter code, e.g. "GEM". */
+  showerCode?: string;
+  /** Meteor shower, observer only: refracted altitude in degrees of the Sun at the maximum. */
+  sunAltitudeDegrees?: number;
   timeLocal?: string;
   timeUtc: string;
   /** Morning/evening apparition (max elongation). */
   visibility?: 'morning' | 'evening';
   /** Which equinox/solstice. */
   which?: 'march' | 'september' | 'june' | 'december';
+  /** Meteor shower: zenithal hourly rate at the maximum. */
+  zhr?: number;
 }
 
-/** One forward event search. `body`, `body2`, and `observer` apply to some classes only. */
+/**
+ * One forward event search. `body`, `body2`, `observer`, and `shower` apply to some classes
+ * only.
+ */
 export interface FindEventsOptions {
   /** Target body of a body-relative class. */
   body?: EventBodyName;
@@ -268,8 +305,14 @@ export interface FindEventsOptions {
   body2?: PairBodyName;
   /** Occurrences to return; the search stops sooner at the end of the supported span. */
   count: number;
-  /** Eclipse classes only: switches solar eclipses to local, and adds local circumstances. */
+  /**
+   * Eclipse and meteor-shower classes only: switches solar eclipses to local, adds local
+   * circumstances to both eclipse classes, and adds the radiant's and the Sun's altitude to
+   * a meteor shower's maximum.
+   */
   observer?: ObserverInput;
+  /** Meteor-shower class only: one shower's IMO code or name; every other class ignores it. */
+  shower?: string;
   start: Date;
   /** IANA zone for `timeLocal`. */
   timezone?: string;

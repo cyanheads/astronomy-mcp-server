@@ -386,7 +386,12 @@ describe('astronomy_get_rise_set — a count past the per-call cap', () => {
         expect(resume?.count, label).toBe(9);
         const rest = await call({ body, ...site, ...resume });
         expect(rest.out.notice, label).toBeUndefined();
-        const uncapped = svc.riseSet(body, { ...site, elevation: 0 }, new Date(start), 40);
+        const uncapped = svc.riseSet(
+          { kind: 'body', body },
+          { ...site, elevation: 0 },
+          new Date(start),
+          40,
+        );
         expect([...first.out.events, ...rest.out.events].map(wireKey), label).toEqual(
           uncapped.map(serviceKey),
         );
@@ -412,7 +417,7 @@ describe('astronomy_get_rise_set — a count past the per-call cap', () => {
       expect(third.out.events).toHaveLength(3);
       expect(third.out.notice).toBeUndefined();
       const whole = getEphemerisService().riseSet(
-        input.body,
+        { kind: 'body', body: input.body },
         { latitude: input.latitude, longitude: input.longitude, elevation: 0 },
         new Date(input.start),
         65,
@@ -433,7 +438,7 @@ describe('astronomy_get_rise_set — a count past the per-call cap', () => {
     expect(resume).toEqual({ start: '2026-07-01T22:48:09.206Z', count: 9 });
     const rest = await call({ body: 'sun', ...tromso, ...resume });
     const uncapped = getEphemerisService().riseSet(
-      'sun',
+      { kind: 'body', body: 'sun' },
       { ...tromso, elevation: 0 },
       new Date('2026-06-01T00:00:00Z'),
       40,
@@ -463,7 +468,7 @@ describe('astronomy_get_rise_set — a count past the per-call cap', () => {
     }
     expect(Date.parse(rest.out.events[0]!.rise_utc!)).toBeGreaterThan(Date.parse(last.set_utc!));
     const uncapped = getEphemerisService().riseSet(
-      'sun',
+      { kind: 'body', body: 'sun' },
       { ...SEATTLE, elevation: 0 },
       new Date(start),
       40,
@@ -532,10 +537,217 @@ describe('astronomy_get_rise_set — a count past the per-call cap', () => {
   });
 });
 
+/**
+ * `star` takes astronomy_get_sky_position's contract: a non-blank name wins over `body` and
+ * resolves through the bundled catalog, a blank one falls through to `body`, and neither fails
+ * `body_required`. The output echoes the catalog name the star resolved to.
+ */
+describe('astronomy_get_rise_set — catalog stars', () => {
+  const START = '2026-11-05T00:00:00Z';
+  const call = async (input: Parameters<typeof runToolContract<typeof getRiseSetTool>>[1]) => {
+    const result = await runToolContract(getRiseSetTool, input);
+    expect(result.isError).toBeFalsy();
+    return { result, out: result.structuredContent as RiseSetOutputType & CapEnrichment };
+  };
+  /** One star cycle, in a form the wire and service shapes both reduce to. */
+  const wireKey = (e: RiseSetOutputType['events'][number]) =>
+    JSON.stringify([e.rise_utc, e.set_utc, e.transit_utc, e.transit_altitude_degrees, e.note]);
+  const serviceKey = (e: RiseSetEvent) =>
+    JSON.stringify([e.riseUtc, e.setUtc, e.transitUtc, e.transitAltitudeDegrees, e.note]);
+
+  it('returns Sirius rising, culminating, and setting on both surfaces', async () => {
+    const { result, out } = await call({
+      star: 'Sirius',
+      ...SEATTLE,
+      start: START,
+      timezone: 'America/Los_Angeles',
+    });
+    expect(out.body).toBe('Sirius');
+    expect(out.events).toHaveLength(1);
+    const cycle = out.events[0]!;
+    expect(cycle).toMatchObject({
+      rise_utc: '2026-11-05T07:10:47.470Z',
+      transit_utc: '2026-11-05T11:56:45.982Z',
+      set_utc: '2026-11-05T16:42:44.516Z',
+      rise_local: '2026-11-04T23:10:47-08:00',
+      transit_local: '2026-11-05T03:56:45-08:00',
+      set_local: '2026-11-05T08:42:44-08:00',
+    });
+    expect(Math.abs(cycle.transit_altitude_degrees! - 25.69)).toBeLessThan(0.01);
+    expect('twilight' in cycle).toBe(false);
+    expect('note' in cycle).toBe(false);
+    expect('night_in_progress' in out).toBe(false);
+    const text = allText(result);
+    expect(text).toContain('## Sirius — 1 rise/set cycle');
+    for (const stamp of [cycle.rise_utc, cycle.transit_utc, cycle.set_utc]) {
+      expect(text).toContain(stamp!);
+    }
+    expect(text).toContain('max alt 25.7°');
+    expectContentCarriesEveryNumber(result);
+  });
+
+  it('echoes the catalog name a Bayer designation resolves to', async () => {
+    const sirius = await call({ star: 'Sirius', ...SEATTLE, start: START, count: 2 });
+    const bayer = await call({ star: 'α CMa', ...SEATTLE, start: START, count: 2 });
+    expect(bayer.out).toEqual(sirius.out);
+    expect(allText(bayer.result)).toContain('## Sirius — 2 rise/set cycles');
+  });
+
+  it('notes a circumpolar star and a never-rising one on both surfaces', async () => {
+    for (const [star, note, altitude] of [
+      ['Polaris', 'Circumpolar — never sets at this latitude/date.', 48.24],
+      ['Canopus', 'Never rises above the horizon at this latitude/date.', -9.73],
+    ] as const) {
+      const { result, out } = await call({ star, ...SEATTLE, start: START });
+      const cycle = out.events[0]!;
+      expect(cycle, star).toMatchObject({ rise_utc: null, set_utc: null, note });
+      expect(cycle.transit_altitude_degrees, star).toBeCloseTo(altitude, 2);
+      const text = allText(result);
+      expect(text, star).toContain(`1. Rise none · Set none · Transit ${cycle.transit_utc}`);
+      expect(text, star).toContain(`   ${note}`);
+    }
+  });
+
+  it('ignores body when star is set, so even body "sun" adds no twilight or night in progress', async () => {
+    // 06:00Z is 22:00 in Seattle: a Sun request from here carries the night under way.
+    const start = '2026-11-05T06:00:00Z';
+    const sun = await call({ body: 'sun', ...SEATTLE, start });
+    expect(sun.out.night_in_progress).toBeDefined();
+    const both = await call({ star: 'Sirius', body: 'sun', ...SEATTLE, start, count: 2 });
+    const alone = await call({ star: 'Sirius', ...SEATTLE, start, count: 2 });
+    expect(both.out).toEqual(alone.out);
+    expect(both.out.body).toBe('Sirius');
+    expect('night_in_progress' in both.out).toBe(false);
+    expect(both.out.events.some((e) => 'twilight' in e)).toBe(false);
+    expect(allText(both.result)).not.toMatch(/twilight|Night in progress/i);
+  });
+
+  it('falls through a blank star to body', async () => {
+    const mars = await call({ body: 'mars', ...SEATTLE, start: START, count: 2 });
+    for (const star of ['', '   ']) {
+      const blank = await call({ star, body: 'mars', ...SEATTLE, start: START, count: 2 });
+      expect(blank.out, JSON.stringify(star)).toEqual(mars.out);
+      expect(blank.out.body).toBe('mars');
+    }
+  });
+
+  it('fails body_required for a blank star with no body', () => {
+    const ctx = createMockContext({ errors: getRiseSetTool.errors });
+    const input = getRiseSetTool.input.parse({ star: '  ', ...SEATTLE, start: START });
+    const err = captureThrown(() => {
+      getRiseSetTool.handler(input, ctx);
+    });
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('body_required');
+  });
+
+  it('fails star_not_found for a name outside the catalog, listing the catalog', async () => {
+    const result = await runToolContract(getRiseSetTool, { star: 'Toliman', ...SEATTLE });
+    const envelope = errorEnvelope(result) as
+      | (ReturnType<typeof errorEnvelope> & { data?: { catalog_stars?: string[] } })
+      | undefined;
+    expect(result.isError).toBe(true);
+    expect(envelope?.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(envelope?.data?.reason).toBe('star_not_found');
+    expect(envelope?.data?.catalog_stars).toEqual(STAR_CATALOG.map((s) => s.name));
+    expect(declaredRecovery(getRiseSetTool.errors, 'star_not_found')).toBe(
+      declaredRecovery(getSkyPositionTool.errors, 'star_not_found'),
+    );
+  });
+
+  it('fails star_not_found for an unknown star sent with a body, never answering for the body', async () => {
+    // A non-blank star takes precedence, so a mistyped one is a miss — not a cue to fall back.
+    const result = await runToolContract(getRiseSetTool, {
+      star: 'Toliman',
+      body: 'mars',
+      ...SEATTLE,
+      start: START,
+    });
+    expect(result.isError).toBe(true);
+    const envelope = errorEnvelope(result);
+    expect(envelope?.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(envelope?.data?.reason).toBe('star_not_found');
+    expect(firstText(result)).not.toContain('## mars');
+  });
+
+  it('serves 31 cycles one sidereal day apart and resumes without repeating or skipping one', async () => {
+    const first = await call({ star: 'Sirius', ...SEATTLE, start: START, count: 32 });
+    expect(first.out.events).toHaveLength(31);
+    expect(first.out).toMatchObject({ truncated: true, shown: 31, cap: 31, totalCount: 31 });
+    const rises = first.out.events.map((e) => Date.parse(e.rise_utc!));
+    for (const [i, rise] of rises.slice(1).entries()) {
+      // A sidereal day, 23 h 56 m 4.09 s — not the 24 h a solar-day step would give.
+      expect(Math.abs(rise - rises[i]! - 86_164_091)).toBeLessThan(1000);
+    }
+    const resume = resumeOf(first.out.notice);
+    expect(resume?.count).toBe(1);
+    expect(allText(first.result)).toContain(first.out.notice!);
+    const rest = await call({ star: 'Sirius', ...SEATTLE, ...resume });
+    expect(rest.out.notice).toBeUndefined();
+    const uncapped = getEphemerisService().riseSet(
+      { kind: 'star', star: getEphemerisService().resolveStarTarget('Sirius') },
+      { ...SEATTLE, elevation: 0 },
+      new Date(START),
+      32,
+    );
+    expect([...first.out.events, ...rest.out.events].map(wireKey)).toEqual(
+      uncapped.map(serviceKey),
+    );
+  });
+
+  it('re-slices a star series through two continuation pages', async () => {
+    const input = { star: 'Vega', ...SEATTLE, start: START };
+    const first = await call({ ...input, count: 70 });
+    const second = await call({ ...input, ...resumeOf(first.out.notice) });
+    const third = await call({ ...input, ...resumeOf(second.out.notice) });
+    expect([first, second, third].map((p) => p.out.events.length)).toEqual([31, 31, 8]);
+    expect(third.out.notice).toBeUndefined();
+    const uncapped = getEphemerisService().riseSet(
+      { kind: 'star', star: getEphemerisService().resolveStarTarget('Vega') },
+      { ...SEATTLE, elevation: 0 },
+      new Date(START),
+      70,
+    );
+    expect([...first.out.events, ...second.out.events, ...third.out.events].map(wireKey)).toEqual(
+      uncapped.map(serviceKey),
+    );
+  });
+
+  it('names no continuation when the next star cycle starts past the supported span', async () => {
+    const { result, out } = await call({
+      star: 'Sirius',
+      ...SEATTLE,
+      start: '2100-12-15T00:00:00Z',
+      count: 40,
+    });
+    expect(out.events).toHaveLength(31);
+    expect(out.notice).toBe(
+      'Returned 31 of the 40 requested cycles (31 per call). The next cycle starts past the end of the supported span (2100), so no call can continue the series.',
+    );
+    expect(allText(result)).toContain(out.notice!);
+  });
+
+  it('returns the same cycles after astronomy_list_visible has redefined every star slot', async () => {
+    const input = { star: 'Sirius', ...SEATTLE, start: START, count: 3 };
+    const before = await call(input);
+    const visible = await runToolContract(listVisibleTool, {
+      ...SEATTLE,
+      time: START,
+      include_stars: true,
+      min_altitude: -90,
+    });
+    expect(visible.isError).toBeFalsy();
+    const after = await call(input);
+    expect(after.out).toEqual(before.out);
+  });
+});
+
 describe('astronomy_find_events — error contracts and validation', () => {
   it.each([
     ['solar_eclipse', { latitude: 41.9 }],
     ['lunar_eclipse', { longitude: 12.5 }],
+    ['meteor_shower', { latitude: 51.5 }],
+    ['meteor_shower', { longitude: -0.13 }],
   ] as const)(
     'fails incomplete_observer for a %s with one coordinate',
     async (event, coordinate) => {
@@ -793,11 +1005,23 @@ function allText(result: ToolCallResult): string {
   return result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
 }
 
-/** Every number in `structuredContent` is recoverable from the `content[]` a client reads. */
+/** An ISO 8601 date or date-time: its fields are part of one stamp, never a value of their own. */
+const ISO_STAMP = /\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?)?/g;
+
+/** A whole decimal number: not the tail of a word or a longer number, and not cut short. */
+const NUMERIC_TOKEN = /(?<![\w.])-?\d+(?:\.\d+)?(?:e[+-]?\d+)?(?!\.?\d)/g;
+
+/**
+ * Every number in `structuredContent` is recoverable from the `content[]` a client reads, as a
+ * whole numeric token of the same value: `33.0°` carries 33, while the 33 inside `133.2`, a
+ * longer decimal, or a timestamp does not.
+ */
 function expectContentCarriesEveryNumber(result: ToolCallResult): void {
-  const text = allText(result);
+  const tokens = new Set(
+    allText(result).replaceAll(ISO_STAMP, ' ').match(NUMERIC_TOKEN)?.map(Number),
+  );
   for (const [path, value] of numericLeaves(result.structuredContent)) {
-    expect(text, `${path} = ${value} is not recoverable from content[]`).toContain(String(value));
+    expect(tokens.has(value), `${path} = ${value} is not recoverable from content[]`).toBe(true);
   }
 }
 
@@ -962,13 +1186,322 @@ describe('astronomy_find_events — eclipse circumstances on both surfaces', () 
     const altitudes = eventsOf(partial)[0]!.contact_altitudes_degrees!;
     expect(altitudes.total_begin).toBeNull();
     expect(altitudes.total_end).toBeNull();
-    // A phase that does not occur is left out of the rendered line, as in Contacts.
+    // A phase that does not occur renders as `none`, the null structuredContent carries.
     const line = firstText(partial)
       .split('\n')
       .find((l) => l.startsWith('**Contact altitudes:**'));
     expect(line).toBeDefined();
-    expect(line).not.toContain('total_begin');
-    expect(line).toContain('penumbral_begin');
+    expect(line).toContain('total_begin none');
+    expect(line).toContain('total_end none');
+    expect(line).toContain(`penumbral_begin ${num1(altitudes.penumbral_begin!)}`);
+  });
+});
+
+/** The rendered `**Contacts:**` line of one event's `content[]` text. */
+function contactsLine(result: ToolCallResult): string {
+  const line = firstText(result)
+    .split('\n')
+    .find((l) => l.startsWith('**Contacts:**'));
+  if (!line) throw new Error('No **Contacts:** line in the rendered text.');
+  return line;
+}
+
+/**
+ * Eclipse contact times on the observer's clock, on both client surfaces: `contacts_local`
+ * in structuredContent, and each local time beside its UTC contact in `content[]`.
+ */
+describe('astronomy_find_events — local contact times on both surfaces', () => {
+  const LUXOR = { latitude: 25.6872, longitude: 32.6396 };
+
+  it('carries every Luxor contact on the Cairo clock beside its UTC time', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'solar_eclipse',
+      start: '2026-11-04T00:00:00Z',
+      ...LUXOR,
+      timezone: 'Africa/Cairo',
+    });
+    expect(result.isError).toBeFalsy();
+    const e = eventsOf(result)[0]!;
+    expect(e.contacts_local).toEqual({
+      partial_begin_local: '2027-08-02T11:40:09+03:00',
+      total_begin_local: '2027-08-02T13:01:55+03:00',
+      peak_local: '2027-08-02T13:05:08+03:00',
+      total_end_local: '2027-08-02T13:08:20+03:00',
+      partial_end_local: '2027-08-02T14:26:23+03:00',
+    });
+    expect(e.contacts_local?.peak_local).toBe(e.time_local);
+    expect(contactsLine(result)).toBe(
+      '**Contacts:** partial_begin 2027-08-02T08:40:09.243Z (local 2027-08-02T11:40:09+03:00), total_begin 2027-08-02T10:01:55.537Z (local 2027-08-02T13:01:55+03:00), peak 2027-08-02T10:05:08.056Z (local 2027-08-02T13:05:08+03:00), total_end 2027-08-02T10:08:20.595Z (local 2027-08-02T13:08:20+03:00), partial_end 2027-08-02T11:26:23.600Z (local 2027-08-02T14:26:23+03:00)',
+    );
+  });
+
+  it('carries the single global peak on the local clock', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'solar_eclipse',
+      start: '2026-08-01T00:00:00Z',
+      timezone: 'Europe/Rome',
+    });
+    const e = eventsOf(result)[0]!;
+    expect(e.contacts).toEqual({ peak_utc: e.time_utc });
+    expect(e.contacts_local).toEqual({ peak_local: e.time_local });
+    expect(contactsLine(result)).toBe(`**Contacts:** peak ${e.time_utc} (local ${e.time_local})`);
+  });
+
+  it('renders an unreached phase as none on both lines, local times beside the rest', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'solar_eclipse',
+      start: '2026-01-01T00:00:00Z',
+      latitude: 41.9,
+      longitude: 12.5,
+      timezone: 'Europe/Rome',
+    });
+    const e = eventsOf(result)[0]!;
+    expect(e.kind).toBe('partial');
+    expect(e.contacts?.total_begin_utc).toBeNull();
+    expect(e.contacts_local?.total_begin_local).toBeNull();
+    expect(e.contact_altitudes_degrees?.total_end).toBeNull();
+    expect(contactsLine(result)).toBe(
+      `**Contacts:** partial_begin ${e.contacts!.partial_begin_utc} (local ${e.contacts_local!.partial_begin_local}), total_begin none, peak ${e.contacts!.peak_utc} (local ${e.contacts_local!.peak_local}), total_end none, partial_end ${e.contacts!.partial_end_utc} (local ${e.contacts_local!.partial_end_local})`,
+    );
+    const altitudes = firstText(result)
+      .split('\n')
+      .find((l) => l.startsWith('**Contact altitudes:**'));
+    expect(altitudes).toContain('total_begin none');
+    expect(altitudes).toContain('total_end none');
+    expectContentCarriesEveryNumber(result);
+  });
+
+  describe('across the 2015-04-05 end of New Zealand daylight time', () => {
+    /** Local 03:00 on the NZDT clock, the instant the zone falls back from +13:00 to +12:00. */
+    const FALL_BACK_MS = Date.parse('2015-04-05T03:00:00+13:00');
+    const AUCKLAND_PARTS = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Pacific/Auckland',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+      timeZoneName: 'longOffset',
+    });
+    /** A UTC contact on the Auckland clock, whole seconds and its own offset, built here. */
+    const aucklandLocal = (utc: string) => {
+      const p = Object.fromEntries(
+        AUCKLAND_PARTS.formatToParts(new Date(utc)).map((part) => [part.type, part.value]),
+      );
+      const offset = p.timeZoneName!.replace(/^GMT/, '');
+      return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${offset}`;
+    };
+    const search = () =>
+      runToolContract(findEventsTool, {
+        event: 'lunar_eclipse',
+        start: '2015-04-01T00:00:00Z',
+        timezone: 'Pacific/Auckland',
+      });
+
+    it("gives each contact in contacts_local the offset in force at that contact's own instant", async () => {
+      const result = await search();
+      expect(result.isError).toBeFalsy();
+      const e = eventsOf(result)[0]!;
+      expect(e.time_utc.slice(0, 10)).toBe('2015-04-04');
+      const contacts = Object.entries(e.contacts!);
+      expect(contacts).toHaveLength(7);
+      const offsets: string[] = [];
+      for (const [key, utc] of contacts) {
+        const localKey = key.replace(/_utc$/, '_local');
+        const local = e.contacts_local?.[localKey];
+        const expected = Date.parse(utc!) < FALL_BACK_MS ? '+13:00' : '+12:00';
+        expect(local, localKey).toBe(aucklandLocal(utc!));
+        expect(local?.slice(-6), localKey).toBe(expected);
+        offsets.push(expected);
+      }
+      // Six contacts before the fall-back, penumbral_end after it.
+      expect(offsets).toEqual([...Array(6).fill('+13:00'), '+12:00']);
+      expect(e.contacts_local).toMatchObject({
+        partial_end_local: '2015-04-05T02:45:06+13:00',
+        penumbral_end_local: '2015-04-05T02:59:21+12:00',
+      });
+    });
+
+    it('renders each local contact in content[] with its own offset', async () => {
+      const result = await search();
+      const e = eventsOf(result)[0]!;
+      const line = contactsLine(result);
+      // The whole token, offset included: the peak's +13:00 must not stand in for +12:00.
+      expect(line).toContain(
+        `penumbral_end ${e.contacts!.penumbral_end_utc} (local 2015-04-05T02:59:21+12:00)`,
+      );
+      expect(line).toBe(
+        `**Contacts:** ${Object.entries(e.contacts!)
+          .map(([key, utc]) => `${key.replace(/_utc$/, '')} ${utc} (local ${aucklandLocal(utc!)})`)
+          .join(', ')}`,
+      );
+    });
+  });
+
+  it('adds no contacts_local and no local stamps without a timezone', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'lunar_eclipse',
+      start: '2026-08-01T00:00:00Z',
+      ...SEATTLE,
+    });
+    const e = eventsOf(result)[0]!;
+    expect(e.contacts).toBeDefined();
+    expect('time_local' in e).toBe(false);
+    expect('contacts_local' in e).toBe(false);
+    expect(contactsLine(result)).not.toContain('(local ');
+    expect(contactsLine(result)).toContain('total_begin none');
+  });
+});
+
+/**
+ * Meteor shower maxima on both client surfaces: each field in structuredContent, and its
+ * rendering in the `content[]` text, with every number recoverable from that text.
+ */
+describe('astronomy_find_events — meteor showers on both surfaces', () => {
+  const LONDON = { latitude: 51.5074, longitude: -0.1278 };
+
+  it('carries the 2026 Geminids from London on both surfaces, on the London clock', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'meteor_shower',
+      start: '2026-12-01T00:00:00Z',
+      ...LONDON,
+      timezone: 'Europe/London',
+    });
+    expect(result.isError).toBeFalsy();
+    const e = eventsOf(result)[0]!;
+    expect(e).toMatchObject({
+      event: 'meteor_shower',
+      shower: 'Geminids',
+      shower_code: 'GEM',
+      zhr: 150,
+      radiant_dec_degrees: 33,
+      activity_start_date: '2026-12-04',
+      activity_end_date: '2026-12-20',
+    });
+    expect(e.time_utc.slice(0, 13)).toBe('2026-12-14T13');
+    // London keeps GMT in December: the same instant, cut to the second, at +00:00.
+    expect(e.time_local).toMatch(/^2026-12-14T13:41:\d{2}\+00:00$/);
+    expect(Date.parse(e.time_local!)).toBe(Math.floor(Date.parse(e.time_utc) / 1000) * 1000);
+    expect(e.radiant_ra_hours).toBeCloseTo(112 / 15, 12);
+    expect(e.moon_illuminated_fraction).toBeCloseTo(0.2507, 4);
+    expect(e.radiant_altitude_degrees).toBeCloseTo(-4.86, 2);
+    expect(e.sun_altitude_degrees).toBeCloseTo(11.8, 1);
+    for (const key of ['kind', 'contacts', 'local_visible', 'contact_altitudes_degrees']) {
+      expect(key in e, key).toBe(false);
+    }
+
+    const text = firstText(result);
+    expect(text.split('\n').slice(0, 3)).toEqual([
+      '## 1 event found',
+      '### meteor_shower — Geminids (GEM)',
+      `time_utc: ${e.time_utc} | time_local: ${e.time_local}`,
+    ]);
+    expect(text).toContain('**ZHR:** 150');
+    expect(text).toContain(`**Radiant (J2000):** RA 7.47h [${e.radiant_ra_hours}], Dec 33.0°`);
+    expect(text).toContain('**Activity:** 2026-12-04 to 2026-12-20');
+    expect(text).toContain(`**Moon illuminated:** 25.1% [fraction ${e.moon_illuminated_fraction}]`);
+    expect(text).toContain(`**Radiant altitude:** -4.9° [${e.radiant_altitude_degrees}]`);
+    expect(text).toContain(`**Sun altitude:** 11.8° [${e.sun_altitude_degrees}]`);
+    expectContentCarriesEveryNumber(result);
+    expectRoundedDisplay(text);
+  });
+
+  it('omits both altitudes without an observer, and the local time without a timezone', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'meteor_shower',
+      start: '2026-12-01T00:00:00Z',
+      count: 2,
+    });
+    const events = eventsOf(result);
+    expect(events.map((e) => e.shower_code)).toEqual(['GEM', 'URS']);
+    for (const e of events) {
+      for (const key of ['radiant_altitude_degrees', 'sun_altitude_degrees', 'time_local']) {
+        expect(key in e, `${e.shower_code} ${key}`).toBe(false);
+      }
+      expect(e.moon_illuminated_fraction).toBeTypeOf('number');
+    }
+    const text = firstText(result);
+    for (const absent of ['Radiant altitude', 'Sun altitude', 'time_local']) {
+      expect(text).not.toContain(absent);
+    }
+    expect(text).toContain('**Activity:** 2026-12-17 to 2026-12-26');
+    expectContentCarriesEveryNumber(result);
+  });
+
+  it('fails shower_not_found for a shower outside the table, naming all nine', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'meteor_shower',
+      start: '2026-01-01T00:00:00Z',
+      shower: 'Draconids',
+    });
+    expect(result.isError).toBe(true);
+    const err = errorEnvelope(result);
+    expect(err?.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err?.data?.reason).toBe('shower_not_found');
+    expect(err?.data?.recovery?.hint).toBe(
+      declaredRecovery(findEventsTool.errors, 'shower_not_found'),
+    );
+    const listed =
+      'Quadrantids (QUA), April Lyrids (LYR), η-Aquariids (ETA), Southern δ-Aquariids (SDA), Perseids (PER), Orionids (ORI), Leonids (LEO), Geminids (GEM), Ursids (URS)';
+    expect(err?.message).toContain(`It holds these 9 showers: ${listed}.`);
+    expect(firstText(result)).toContain(listed);
+  });
+
+  it('narrows the search with `shower`, and every other event ignores it', async () => {
+    const geminids = await runToolContract(findEventsTool, {
+      event: 'meteor_shower',
+      start: '2026-01-01T00:00:00Z',
+      count: 2,
+      shower: 'Geminids',
+    });
+    expect(eventsOf(geminids).map((e) => [e.shower_code, e.time_utc.slice(0, 4)])).toEqual([
+      ['GEM', '2026'],
+      ['GEM', '2027'],
+    ]);
+    const args = { event: 'equinox', start: '2026-01-01T00:00:00Z', count: 2 } as const;
+    const withShower = await runToolContract(findEventsTool, { ...args, shower: 'Draconids' });
+    expect(withShower.isError).toBeFalsy();
+    expect(eventsOf(withShower)).toEqual(eventsOf(await runToolContract(findEventsTool, args)));
+  });
+
+  it('reads a blank `shower`, as a form client sends it, as all nine showers', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'meteor_shower',
+      start: '2026-12-01T00:00:00Z',
+      count: 2,
+      shower: '',
+    });
+    expect(eventsOf(result).map((e) => e.shower_code)).toEqual(['GEM', 'URS']);
+  });
+
+  it('reads a whitespace-only `shower` as blank, as `star` reads one, never as a miss', async () => {
+    const args = { event: 'meteor_shower', start: '2026-12-01T00:00:00Z', count: 2 } as const;
+    const omitted = eventsOf(await runToolContract(findEventsTool, args));
+    expect(omitted.map((e) => e.shower_code)).toEqual(['GEM', 'URS']);
+    for (const shower of ['  ', '\t']) {
+      const result = await runToolContract(findEventsTool, { ...args, shower });
+      expect(result.isError, JSON.stringify(shower)).toBeFalsy();
+      expect(eventsOf(result), JSON.stringify(shower)).toEqual(omitted);
+    }
+  });
+
+  it('stops at the 2100 Ursids with the span notice', async () => {
+    const result = await runToolContract(findEventsTool, {
+      event: 'meteor_shower',
+      start: '2100-12-01T00:00:00Z',
+      count: 5,
+    });
+    expect(eventsOf(result).map((e) => [e.shower_code, e.time_utc.slice(0, 4)])).toEqual([
+      ['GEM', '2100'],
+      ['URS', '2100'],
+    ]);
+    const notice = (result.structuredContent as CapEnrichment).notice;
+    expect(notice).toBe(
+      'The search reached the end of the supported span (2100) after 2 of 5 requested events; no occurrence after 2100 is computed.',
+    );
+    expect(allText(result)).toContain(notice!);
   });
 });
 
@@ -1162,6 +1695,7 @@ describe('astronomy_find_events — a count past the per-call cap', () => {
     ['perigee_apogee of earth', { event: 'perigee_apogee', body: 'earth' }],
     ['conjunction of mercury and venus', { event: 'conjunction', body: 'mercury', body2: 'venus' }],
     ['conjunction of the moon and saturn', { event: 'conjunction', body: 'moon', body2: 'saturn' }],
+    ['meteor_shower', { event: 'meteor_shower' }],
   ];
 
   it.each(CLASSES)(
@@ -1244,6 +1778,62 @@ describe('astronomy_find_events — a count past the per-call cap', () => {
     },
   );
 
+  it('resumes a page ending on the 2026 Geminids an hour on, at the 2026 Ursids', async () => {
+    // Twenty maxima from the 2024 Leonids end on the 2026 Geminids; the Ursids follow 8.35
+    // days later, so the eclipses' ten-day offset would resume past them.
+    const start = '2024-11-01T00:00:00Z';
+    const first = await call({ event: 'meteor_shower', start, count: 40 });
+    const last = first.out.events[19]!;
+    expect([last.shower_code, last.time_utc.slice(0, 10)]).toEqual(['GEM', '2026-12-14']);
+    const resumeAt = new Date(Date.parse(last.time_utc) + 3_600_000).toISOString();
+    expect(first.out.notice).toBe(
+      `Returned 20 of the 40 requested events (20 per call). Re-call with start ${resumeAt} and count 20 for the rest.`,
+    );
+    const rest = await call({ event: 'meteor_shower', ...resumeOf(first.out.notice) });
+    const opener = rest.out.events[0]!;
+    expect([opener.shower_code, opener.time_utc.slice(0, 10)]).toEqual(['URS', '2026-12-22']);
+    const uncapped = getEphemerisService().findEvents('meteor_shower', {
+      start: new Date(start),
+      count: 40,
+    });
+    expectSameInstants([...first.out.events, ...rest.out.events], uncapped);
+  });
+
+  it('pages a `shower`-filtered search past 20 without repeating or skipping a year', async () => {
+    const args = { event: 'meteor_shower', shower: 'GEM' } as const;
+    const first = await call({ ...args, start: '2026-01-01T00:00:00Z', count: 25 });
+    expect(first.out.events).toHaveLength(20);
+    expect(resumeOf(first.out.notice)?.count).toBe(5);
+    const rest = await call({ ...args, ...resumeOf(first.out.notice) });
+    expect(rest.out.notice).toBeUndefined();
+    const served = [...first.out.events, ...rest.out.events];
+    expect(served.map((e) => e.shower_code)).toEqual(Array(25).fill('GEM'));
+    expect(served.map((e) => e.time_utc.slice(0, 4))).toEqual(
+      Array.from({ length: 25 }, (_unused, k) => String(2026 + k)),
+    );
+  });
+
+  it('walks every page of meteor showers from 1900 without repeating or skipping one', async () => {
+    const start = '1900-01-01T00:00:00Z';
+    const uncapped = getEphemerisService().findEvents('meteor_shower', {
+      start: new Date(start),
+      count: 200,
+    });
+    const served: FindEventsOutputType['events'] = [];
+    let next: { start: string; count: number } | undefined = { start, count: 200 };
+    let pages = 0;
+    while (next) {
+      pages++;
+      expect(pages, 'pages walked').toBeLessThanOrEqual(10);
+      const { out } = await call({ event: 'meteor_shower', ...next });
+      served.push(...out.events);
+      next = resumeOf(out.notice);
+    }
+    expect(pages).toBe(10);
+    expectSameInstants(served, uncapped);
+    expect(served.map((e) => e.shower_code)).toEqual(uncapped.map((e) => e.showerCode));
+  });
+
   it('names the whole remainder at the ceiling', async () => {
     const { out } = await call({
       event: 'moon_quarter',
@@ -1275,11 +1865,19 @@ describe('astronomy_find_events — a count past the per-call cap', () => {
     const RECORDS = {
       moon_quarter: { record: { event: 'moon_quarter', quarter: 'new' }, spacingDays: 7 },
       lunar_eclipse: { record: { event: 'lunar_eclipse', kind: 'penumbral' }, spacingDays: 177 },
+      meteor_shower: {
+        record: { event: 'meteor_shower', shower: 'Ursids', showerCode: 'URS' },
+        spacingDays: 8,
+      },
     } as const;
 
     it.each([
       ['moon_quarter', '2100-12-31T23:00:00.000Z', SPAN_NOTICE],
       ['moon_quarter', '2100-12-31T22:59:59.999Z', CAP_NOTICE],
+      // Meteor showers take the one-hour offset, though they share the observer gate with
+      // the eclipses: under the eclipses' ten days the second row would end the span too.
+      ['meteor_shower', '2100-12-31T23:00:00.000Z', SPAN_NOTICE],
+      ['meteor_shower', '2100-12-31T22:59:59.999Z', CAP_NOTICE],
       ['lunar_eclipse', '2100-12-22T00:00:00.000Z', SPAN_NOTICE],
       ['lunar_eclipse', '2100-12-21T23:59:59.999Z', CAP_NOTICE],
     ] as const)('%s ending at %s', async (event, lastIso, notice) => {

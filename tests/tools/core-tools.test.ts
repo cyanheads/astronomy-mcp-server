@@ -315,7 +315,7 @@ describe('astronomy_get_rise_set', () => {
     expect(result.isError).toBeFalsy();
     const out = getRiseSetTool.output.parse(result.structuredContent);
     const { nightInProgress } = getEphemerisService().riseSetSearch(
-      'sun',
+      { kind: 'body', body: 'sun' },
       { ...SEATTLE, elevation: 0 },
       new Date(start),
       1,

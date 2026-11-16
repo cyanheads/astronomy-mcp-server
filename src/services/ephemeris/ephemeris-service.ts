@@ -23,7 +23,9 @@ import {
   type EclipseEvent,
   Ecliptic,
   Equator,
+  EquatorFromVector,
   GeoVector,
+  HelioVector,
   Horizon,
   type HourAngleEvent,
   Illumination,
@@ -39,6 +41,9 @@ import {
   NextPlanetApsis,
   Observer,
   PairLongitude,
+  RotateVector,
+  Rotation_EQJ_ECL,
+  Rotation_EQJ_EQD,
   Search,
   SearchAltitude,
   SearchGlobalSolarEclipse,
@@ -53,10 +58,13 @@ import {
   SearchRelativeLongitude,
   SearchRiseSet,
   Seasons,
+  Spherical,
+  VectorFromSphere,
 } from 'astronomy-engine';
 import { BODY_META } from './body-data.js';
 import { parseIsoInstant } from './iso-time.js';
-import { CONSTELLATION_GENITIVES, GREEK_LETTER_NAMES, STAR_CATALOG } from './star-catalog.js';
+import { findShower, METEOR_SHOWERS, type MeteorShower } from './meteor-showers.js';
+import { CONSTELLATION_GENITIVES, GREEK_LETTERS, STAR_CATALOG } from './star-catalog.js';
 import type {
   BodyName,
   CatalogStar,
@@ -235,6 +243,9 @@ interface StarTarget {
   meta: CatalogStar;
   slot: Body;
 }
+
+/** What the rise/set searches target — the solar-system body or slotted star `position()` takes. */
+type RiseSetTarget = Parameters<EphemerisService['position']>[0];
 
 export class EphemerisService {
   /** Lower-cased common name → catalog entry, built once at construction. */
@@ -466,37 +477,42 @@ export class EphemerisService {
 
   // ---- Rise / set / transit + twilight ------------------------------------
 
-  /** Rise/set/transit cycles for a body, searching forward from `start` — the cycles alone. */
+  /** Rise/set/transit cycles for a body or catalog star from `start` — the cycles alone. */
   riseSet(
-    body: BodyName,
+    target: RiseSetTarget,
     observer: ObserverInput,
     start: Date,
     count: number,
     timezone?: string,
   ): RiseSetEvent[] {
-    return this.riseSetSearch(body, observer, start, count, timezone).events;
+    return this.riseSetSearch(target, observer, start, count, timezone).events;
   }
 
   /**
-   * Rise/set/transit cycles for a body, searching forward from `start`, plus where the search
-   * stopped and — for the Sun when `start` falls at night — the night already under way.
+   * Rise/set/transit cycles for a body or catalog star, searching forward from `start`, plus
+   * where the search stopped and — for the Sun when `start` falls at night — the night already
+   * under way.
    *
    * A cycle is one of the body's days: a culmination with the rise before it and the set after
    * it. A day with neither — the Sun's polar night or midnight sun, a day the Moon spends wholly
    * below or above the horizon — is a cycle of its own, never folded into a neighbour, so
    * consecutive cycles cover consecutive days. A Sun cycle also carries the night after its day,
    * which ends where the next cycle's day begins, so each night falls in exactly one cycle.
+   *
+   * A star runs the same loop on its DefineStar slot, a point at the horizon like a planet. The
+   * eight slots are module state that any later definition overwrites, so resolve the star with
+   * `resolveStarTarget()` in the same synchronous call that searches it, never ahead of it.
    */
   riseSetSearch(
-    body: BodyName,
+    target: RiseSetTarget,
     observer: ObserverInput,
     start: Date,
     count: number,
     timezone?: string,
   ): RiseSetSearch {
     const obs = this.toObserver(observer);
-    const target = BODY_ENUM[body];
-    const isSun = body === 'sun';
+    const engineBody = target.kind === 'body' ? BODY_ENUM[target.body] : target.star.slot;
+    const isSun = target.kind === 'body' && target.body === 'sun';
     /**
      * The next rise from a cursor, searched once per cursor: a Sun cycle that closes with a set
      * looks ahead for the following sunrise to place its resume point, and the cycle resumed
@@ -506,14 +522,16 @@ export class EphemerisService {
     const riseFrom = (cursor: Date): AstroTime | null => {
       const key = cursor.getTime();
       if (!rises.has(key)) {
-        rises.set(key, this.horizonCrossing(target, obs, +1, cursor, RISE_SET_WINDOW_DAYS));
+        rises.set(key, this.horizonCrossing(engineBody, obs, +1, cursor, RISE_SET_WINDOW_DAYS));
       }
       return rises.get(key) ?? null;
     };
-    const cycleAt = (cursor: Date, crossings = this.crossingsFrom(target, obs, cursor, riseFrom)) =>
-      this.dayCycle(target, obs, cursor, crossings, isSun, riseFrom);
+    const cycleAt = (
+      cursor: Date,
+      crossings = this.crossingsFrom(engineBody, obs, cursor, riseFrom),
+    ) => this.dayCycle(engineBody, obs, cursor, crossings, isSun, riseFrom);
 
-    const opening = this.crossingsFrom(target, obs, start, riseFrom);
+    const opening = this.crossingsFrom(engineBody, obs, start, riseFrom);
     const sunsetBefore =
       isSun && !opening.alreadyUp
         ? this.horizonCrossing(Body.Sun, obs, -1, start, -RISE_SET_WINDOW_DAYS)
@@ -562,7 +580,11 @@ export class EphemerisService {
       return event;
     });
 
-    const search: RiseSetSearch = { events, resumeAt };
+    const search: RiseSetSearch = {
+      body: target.kind === 'body' ? target.body : target.star.meta.name,
+      events,
+      resumeAt,
+    };
     /**
      * The opener owns the night after its day. If that day begins after `start`, the preceding
      * night has no cycle in this result and is reported separately. A sunset after the previous
@@ -930,8 +952,10 @@ export class EphemerisService {
    * Search forward for the next `count` occurrences of an event class. Every search stops
    * at the end of the supported span, which is the only reason fewer than `count` come back.
    * An observer adds local circumstances to either eclipse class, and for solar eclipses it
-   * switches the search from global to observer-local. `body2` turns a conjunction with
-   * the Sun into a conjunction of two bodies, and is rejected on every other class.
+   * switches the search from global to observer-local; on a meteor shower it adds the
+   * radiant's and the Sun's altitude at each maximum. `body2` turns a conjunction with the
+   * Sun into a conjunction of two bodies, and is rejected on every other class. `shower`
+   * narrows a meteor-shower search to one shower, and every other class ignores it.
    */
   findEvents(event: EventName, opts: FindEventsOptions): EventRecord[] {
     if (opts.body2 !== undefined && event !== 'conjunction') {
@@ -976,6 +1000,14 @@ export class EphemerisService {
           resolveBody(event, opts.body),
           opts.start,
           opts.count,
+          opts.timezone,
+        );
+      case 'meteor_shower':
+        return this.meteorShowerEvents(
+          opts.start,
+          opts.count,
+          opts.shower,
+          opts.observer,
           opts.timezone,
         );
     }
@@ -1081,7 +1113,10 @@ export class EphemerisService {
             )
           : {}),
       };
-      if (timezone) rec.timeLocal = this.formatLocal(peak.date, timezone);
+      if (timezone) {
+        rec.timeLocal = this.formatLocal(peak.date, timezone);
+        rec.contactsLocal = this.localContactTimes(contacts, timezone);
+      }
       out.push(rec);
       ecl = NextLunarEclipse(peak);
     }
@@ -1118,15 +1153,22 @@ export class EphemerisService {
           ['total_end', ecl.total_end],
           ['partial_end', ecl.partial_end],
         ];
+        const times: EclipseContacts<AstroTime> = contacts.map(([phase, contact]) => [
+          phase,
+          contact?.time,
+        ]);
         const rec: EventRecord = {
           event: 'solar_eclipse',
           timeUtc: peakTime.toString(),
           kind: ecl.kind,
           obscuration: ecl.obscuration,
-          contacts: contactTimes(contacts.map(([phase, contact]) => [phase, contact?.time])),
+          contacts: contactTimes(times),
           ...localCircumstances(contacts.map(([phase, contact]) => [phase, contact?.altitude])),
         };
-        if (timezone) rec.timeLocal = this.formatLocal(peakTime.date, timezone);
+        if (timezone) {
+          rec.timeLocal = this.formatLocal(peakTime.date, timezone);
+          rec.contactsLocal = this.localContactTimes(times, timezone);
+        }
         out.push(rec);
         ecl = NextLocalSolarEclipse(peakTime, obs);
       }
@@ -1134,24 +1176,46 @@ export class EphemerisService {
       let ecl = SearchGlobalSolarEclipse(new Date(start.getTime() - 86_400_000));
       while (ecl.peak.date < start) ecl = NextGlobalSolarEclipse(ecl.peak);
       for (let i = 0; i < count && withinSpan(ecl.peak.date); i++) {
+        // A global eclipse has no observer to time the partial or total phases for.
+        const times: EclipseContacts<AstroTime> = [['peak', ecl.peak]];
         const rec: EventRecord = {
           event: 'solar_eclipse',
           timeUtc: ecl.peak.toString(),
           kind: ecl.kind,
           obscuration: ecl.obscuration ?? null,
-          contacts: { peak_utc: ecl.peak.toString() },
+          contacts: contactTimes(times),
         };
         // The engine leaves both undefined for a partial eclipse, whose axis misses Earth.
         if (ecl.latitude !== undefined && ecl.longitude !== undefined) {
           rec.peakLatitudeDegrees = ecl.latitude;
           rec.peakLongitudeDegrees = ecl.longitude;
         }
-        if (timezone) rec.timeLocal = this.formatLocal(ecl.peak.date, timezone);
+        if (timezone) {
+          rec.timeLocal = this.formatLocal(ecl.peak.date, timezone);
+          rec.contactsLocal = this.localContactTimes(times, timezone);
+        }
         out.push(rec);
         ecl = NextGlobalSolarEclipse(ecl.peak);
       }
     }
     return out;
+  }
+
+  /**
+   * `contactTimes()` on the observer's clock: keyed `<phase>_local`, null for a phase that
+   * does not occur, each instant formatted as `timeLocal` is — whole seconds, and the zone's
+   * offset at that contact's own instant.
+   */
+  private localContactTimes(
+    contacts: EclipseContacts<AstroTime>,
+    timezone: string,
+  ): Record<string, string | null> {
+    return Object.fromEntries(
+      contacts.map(([phase, time]) => [
+        `${phase}_local`,
+        time ? this.formatLocal(time.date, timezone) : null,
+      ]),
+    );
   }
 
   private relativeLongitudeEvents(
@@ -1219,10 +1283,7 @@ export class EphemerisService {
     const [b1, b2] = [BODY_ENUM[body], BODY_ENUM[body2]];
     const maxRate = MAX_LONGITUDE_RATE_DEG_PER_DAY[body] + MAX_LONGITUDE_RATE_DEG_PER_DAY[body2];
     /** `body`'s longitude minus `body2`'s in (−180°, 180°]: 0 at conjunction, ±180 opposite. */
-    const offset = (t: AstroTime) => {
-      const d = PairLongitude(b1, b2, t);
-      return d > 180 ? d - 360 : d;
-    };
+    const offset = (t: AstroTime) => toSignedTurn(PairLongitude(b1, b2, t));
 
     const end = MakeTime(SPAN_END);
     const out: EventRecord[] = [];
@@ -1313,6 +1374,64 @@ export class EphemerisService {
     return out;
   }
 
+  /**
+   * Meteor shower maxima from the bundled IMO table, merged in time order: each the instant
+   * λ⊙ reaches the shower's peak value, kept when it falls at or after `start`. `shower`
+   * narrows the search to one shower, and a name the table does not hold throws
+   * `shower_not_found`. An observer adds the radiant's and the Sun's altitude at each maximum.
+   */
+  private meteorShowerEvents(
+    start: Date,
+    count: number,
+    shower?: string,
+    observer?: ObserverInput,
+    timezone?: string,
+  ): EventRecord[] {
+    const showers = shower === undefined ? METEOR_SHOWERS : [lookupShower(shower)];
+    const obs = observer ? this.toObserver(observer) : undefined;
+    const from = MakeTime(start);
+    // Each shower's next maximum; the earliest is served, then replaced by that shower's next.
+    const pending = showers.map((s) => ({
+      shower: s,
+      peak: nextSolarLongitude(s.peakSolarLongitudeDegrees, from),
+    }));
+    const out: EventRecord[] = [];
+    while (out.length < count) {
+      const next = pending.reduce((earliest, p) => (p.peak.ut < earliest.peak.ut ? p : earliest));
+      if (!withinSpan(next.peak.date)) break;
+      out.push(this.meteorShowerRecord(next.shower, next.peak, obs, timezone));
+      next.peak = nextSolarLongitude(next.shower.peakSolarLongitudeDegrees, next.peak.AddDays(1));
+    }
+    return out;
+  }
+
+  /** One meteor shower maximum: the bundled parameters, the dates bounding its activity, and the Moon. */
+  private meteorShowerRecord(
+    shower: MeteorShower,
+    peak: AstroTime,
+    obs?: Observer,
+    timezone?: string,
+  ): EventRecord {
+    const rec: EventRecord = {
+      event: 'meteor_shower',
+      timeUtc: peak.toString(),
+      shower: shower.name,
+      showerCode: shower.code,
+      zhr: shower.zhr,
+      radiantRaHours: shower.radiantRaDegrees / 15,
+      radiantDecDegrees: shower.radiantDecDegrees,
+      activityStartDate: activityDate(shower.activity2026.start, shower, peak),
+      activityEndDate: activityDate(shower.activity2026.end, shower, peak),
+      moonIlluminatedFraction: Illumination(Body.Moon, peak).phase_fraction,
+    };
+    if (obs) {
+      rec.radiantAltitudeDegrees = radiantAltitudeDegrees(shower, obs, peak);
+      rec.sunAltitudeDegrees = this.altitudeDegrees(Body.Sun, obs, peak);
+    }
+    if (timezone) rec.timeLocal = this.formatLocal(peak.date, timezone);
+    return rec;
+  }
+
   // ---- list_visible --------------------------------------------------------
 
   /** Iterate naked-eye bodies (+ optional catalog stars), filter above-horizon, rank. */
@@ -1371,7 +1490,7 @@ export class EphemerisService {
     return { bodies, skyCondition, sunAltitudeDegrees: sunAlt };
   }
 
-  /** Resolve a single named star into a DefineStar slot for get_sky_position. */
+  /** Resolve a single named star into a DefineStar slot for get_sky_position and get_rise_set. */
   resolveStarTarget(name: string): StarTarget {
     return this.defineStarTarget(this.lookupStar(name), 0);
   }
@@ -1401,10 +1520,14 @@ function angularDiameterArcsec(radiusKm: number, distanceAu: number): number {
   return radians * (180 / Math.PI) * 3600;
 }
 
-/** Lower-cased Greek letter symbol → spelled-out name, e.g. `α` → `alpha`. */
-const GREEK_LETTERS = new Map(
-  Object.entries(GREEK_LETTER_NAMES).map(([symbol, spelled]) => [symbol, spelled.toLowerCase()]),
-);
+/** Degrees folded into [0, 360). */
+const toTurn = (degrees: number): number => ((degrees % 360) + 360) % 360;
+
+/** Degrees folded into (−180, 180]. */
+const toSignedTurn = (degrees: number): number => {
+  const d = toTurn(degrees);
+  return d > 180 ? d - 360 : d;
+};
 
 /** Lower-cased IAU abbreviation → lower-cased genitive, e.g. `cma` → `canis majoris`. */
 const GENITIVES = new Map(
@@ -1441,7 +1564,7 @@ function quarterName(index: number): QuarterName {
 
 /** Human phase name from the Moon–Sun longitude difference (0=new, 90=first, 180=full, 270=last). */
 function phaseNameFromLongitude(longitude: number): string {
-  const a = ((longitude % 360) + 360) % 360;
+  const a = toTurn(longitude);
   if (a < 22.5 || a >= 337.5) return 'New Moon';
   if (a < 67.5) return 'Waxing Crescent';
   if (a < 112.5) return 'First Quarter';
@@ -1468,7 +1591,7 @@ function skyConditionFromSunAltitude(sunAlt: number): SkyCondition {
 /** Compass octant label from an azimuth in degrees (0=N, 90=E, 180=S, 270=W). */
 function compassOctant(azimuth: number): string {
   const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-  const normalized = (((azimuth % 360) + 360) % 360) / 45;
+  const normalized = toTurn(azimuth) / 45;
   const idx = Math.round(normalized) % 8;
   return dirs[idx] ?? 'N';
 }
@@ -1549,6 +1672,97 @@ function localCircumstances(
   };
 }
 
+/** The rotation from the J2000 equator to the J2000 mean ecliptic — fixed, so built once. */
+const EQJ_TO_ECL = Rotation_EQJ_ECL();
+
+/** The Earth's mean sidereal motion in degrees per day: how fast λ⊙ advances on average. */
+const SOLAR_LONGITUDE_RATE_DEG_PER_DAY = 360 / 365.256363;
+
+/**
+ * Half-width in days of the window a λ⊙ crossing is refined in around an estimate made at
+ * the mean rate. The orbit's eccentricity puts the true crossing up to 3.9 days from that
+ * estimate however far ahead it reaches, and λ⊙ returns to any value only once a year, so
+ * the window holds exactly the one crossing sought.
+ */
+const SOLAR_LONGITUDE_WINDOW_DAYS = 6;
+
+/**
+ * IMO's solar longitude λ⊙ in degrees: the Earth's heliocentric longitude plus 180° in the
+ * J2000 mean ecliptic, geometric — no aberration. Not the Sun's apparent longitude of date
+ * that `SearchSunLongitude` tracks, which drifts from it with precession (about 0.37° in
+ * 2026, nine hours of the Sun's motion), so the meteor-shower calendar's maxima need this one.
+ */
+function solarLongitude(time: AstroTime): number {
+  const v = RotateVector(EQJ_TO_ECL, HelioVector(Body.Earth, time));
+  return toTurn((Math.atan2(v.y, v.x) * 180) / Math.PI + 180);
+}
+
+/** The instant λ⊙ reaches `target` degrees within `SOLAR_LONGITUDE_WINDOW_DAYS` of `estimate`. */
+function solarLongitudeCrossing(target: number, estimate: AstroTime): AstroTime {
+  const time = Search(
+    (t) => toSignedTurn(solarLongitude(t) - target),
+    estimate.AddDays(-SOLAR_LONGITUDE_WINDOW_DAYS),
+    estimate.AddDays(SOLAR_LONGITUDE_WINDOW_DAYS),
+    { dt_tolerance_seconds: 0.01 },
+  );
+  if (!time) throw new Error(`No crossing of solar longitude ${target}° near ${estimate}.`);
+  return time;
+}
+
+/** The first instant at or after `from` that λ⊙ reaches `target` degrees. */
+function nextSolarLongitude(target: number, from: AstroTime): AstroTime {
+  const ahead = toTurn(target - solarLongitude(from));
+  return solarLongitudeCrossing(target, from.AddDays(ahead / SOLAR_LONGITUDE_RATE_DEG_PER_DAY));
+}
+
+/**
+ * The UTC date (YYYY-MM-DD), near a maximum at `peak`, on which the Sun reaches the λ⊙ it
+ * held at 12:00 UT on `calendarDate` — one of the 2026 calendar's activity bounds. Kept in
+ * λ⊙ rather than as a date, the window moves with the maximum across the span, as the
+ * maximum's own date does, and needs no year-boundary case: the Quadrantids' opens in the
+ * previous calendar year.
+ */
+function activityDate(calendarDate: string, shower: MeteorShower, peak: AstroTime): string {
+  const bound = solarLongitude(MakeTime(new Date(`${calendarDate}T12:00:00Z`)));
+  const fromPeak = toSignedTurn(bound - shower.peakSolarLongitudeDegrees);
+  const crossing = solarLongitudeCrossing(
+    bound,
+    peak.AddDays(fromPeak / SOLAR_LONGITUDE_RATE_DEG_PER_DAY),
+  );
+  return crossing.date.toISOString().slice(0, 10);
+}
+
+/** Refracted altitude in degrees of a shower's J2000 radiant at `time`, precessed to the date. */
+function radiantAltitudeDegrees(shower: MeteorShower, obs: Observer, time: AstroTime): number {
+  const j2000 = VectorFromSphere(
+    new Spherical(shower.radiantDecDegrees, shower.radiantRaDegrees, 1),
+    time,
+  );
+  const ofDate = EquatorFromVector(RotateVector(Rotation_EQJ_EQD(time), j2000));
+  return Horizon(time, obs, ofDate.ra, ofDate.dec, 'normal').altitude;
+}
+
+/**
+ * Resolve a shower's IMO code or name (case-insensitive, a Greek letter spelled out or as a
+ * symbol). A miss throws `shower_not_found` listing the table, in the message and as
+ * `catalog_showers`.
+ */
+function lookupShower(name: string): MeteorShower {
+  const hit = findShower(name);
+  if (hit) return hit;
+  const listed = METEOR_SHOWERS.map((s) => `${s.name} (${s.code})`);
+  throw notFound(
+    `Meteor shower "${name}" is not in the bundled table. It holds these ${listed.length} showers: ${listed.join(', ')}.`,
+    {
+      reason: 'shower_not_found',
+      recovery: {
+        hint: 'Pick a shower from the table this error lists, by its IMO code or name (e.g. "GEM", "Geminids", "eta Aquariids"). A shower outside the table cannot be searched.',
+      },
+      catalog_showers: METEOR_SHOWERS.map(({ code, name }) => ({ code, name })),
+    },
+  );
+}
+
 /** The event classes that target a specific body. */
 type BodyEventName = 'opposition' | 'conjunction' | 'max_elongation' | 'perigee_apogee';
 
@@ -1593,12 +1807,13 @@ function resolveBody(event: BodyEventName, body: EventBodyName | undefined): Eve
   return body;
 }
 
-/** A body-relative event searched without its target body — the `body_required` reason. */
+/**
+ * A body-relative event searched without its target body — the `body_required` reason. It
+ * carries no hint: one written here would override the recovery astronomy_find_events
+ * declares for the same reason, so the framework fills that declared recovery instead.
+ */
 function bodyRequired(event: BodyEventName) {
-  return invalidParams(`The "${event}" event requires a target body.`, {
-    reason: 'body_required',
-    recovery: { hint: 'Add the target body (e.g. "mars" or "jupiter") and retry.' },
-  });
+  return invalidParams(`The "${event}" event requires a target body.`, { reason: 'body_required' });
 }
 
 /**

@@ -24,9 +24,13 @@ import { getRiseSetTool } from '@/mcp-server/tools/definitions/get-rise-set.tool
 import { getSatellitePassesTool } from '@/mcp-server/tools/definitions/get-satellite-passes.tool.js';
 import { getSkyPositionTool } from '@/mcp-server/tools/definitions/get-sky-position.tool.js';
 import { listVisibleTool } from '@/mcp-server/tools/definitions/list-visible.tool.js';
-import { initEphemerisService } from '@/services/ephemeris/ephemeris-service.js';
+import {
+  getEphemerisService,
+  initEphemerisService,
+} from '@/services/ephemeris/ephemeris-service.js';
 import { initHorizonsService } from '@/services/horizons/horizons-service.js';
 import { initSatelliteService } from '@/services/satellite/satellite-service.js';
+import { captureThrown } from '../helpers/capture-thrown.js';
 
 const SEATTLE = { latitude: 47.6062, longitude: -122.3321 };
 
@@ -182,6 +186,24 @@ describe('declared recovery reaches both client surfaces', () => {
     expect(firstText(result)).toContain('(reason incomplete_observer');
   });
 
+  it('carries a service-thrown reason whose hint is written inline (find_events / shower_not_found)', async () => {
+    // The shower lookup writes this hint at its throw site, with no ctx to read the contract
+    // from, so only this equality keeps the declared recovery and the wire hint together.
+    const result = await runToolContract(findEventsTool, {
+      event: 'meteor_shower',
+      start: '2026-01-01T00:00:00Z',
+      shower: 'Draconids',
+    });
+    const hint = declaredRecovery(findEventsTool.errors, 'shower_not_found');
+
+    expect(result.isError).toBe(true);
+    expect(errorEnvelope(result)?.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(errorEnvelope(result)?.data?.reason).toBe('shower_not_found');
+    expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
+    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+    expect(firstText(result)).toContain('(reason shower_not_found');
+  });
+
   it('carries a service-thrown reason (get_sky_position / star_not_found)', async () => {
     const result = await runToolContract(getSkyPositionTool, { star: 'Betelgeuze', ...SEATTLE });
     const hint = declaredRecovery(getSkyPositionTool.errors, 'star_not_found');
@@ -192,6 +214,34 @@ describe('declared recovery reaches both client surfaces', () => {
     expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
     expect(firstText(result)).toContain(`Recovery: ${hint}`);
     expect(firstText(result)).toContain('(reason star_not_found');
+  });
+
+  it('carries the same service-thrown reason on a second tool (get_rise_set / star_not_found)', async () => {
+    // lookupStar() writes this hint at its throw site, so every tool resolving a star through
+    // it declares the same string — and only this equality keeps the two together.
+    const result = await runToolContract(getRiseSetTool, { star: 'Toliman', ...SEATTLE });
+    const hint = declaredRecovery(getRiseSetTool.errors, 'star_not_found');
+
+    expect(result.isError).toBe(true);
+    expect(errorEnvelope(result)?.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(errorEnvelope(result)?.data?.reason).toBe('star_not_found');
+    expect(errorEnvelope(result)?.data?.recovery?.hint).toBe(hint);
+    expect(firstText(result)).toContain(`Recovery: ${hint}`);
+    expect(firstText(result)).toContain('(reason star_not_found');
+  });
+
+  it('leaves body_required from the service hintless, so find_events fills its own recovery', () => {
+    // bodyRequired() takes no ctx and backs a reason the find_events handler gate also raises;
+    // a hint written there would override the declared recovery on every path that reaches it.
+    const err = captureThrown(() => {
+      getEphemerisService().findEvents('opposition', {
+        start: new Date('2026-01-01T00:00:00Z'),
+        count: 1,
+      });
+    });
+    expect(err?.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err?.data?.reason).toBe('body_required');
+    expect(err?.data?.recovery).toBeUndefined();
   });
 
   it('carries a service-thrown reason whose hint is written inline (get_ephemeris / time_out_of_range)', async () => {
@@ -397,6 +447,7 @@ describe('a bare ctx.fail reaches the wire with its declared hint', () => {
     tool:
       | typeof findEventsTool
       | typeof getEphemerisTool
+      | typeof getRiseSetTool
       | typeof getSatellitePassesTool
       | typeof getSkyPositionTool;
   }
@@ -405,6 +456,12 @@ describe('a bare ctx.fail reaches the wire with its declared hint', () => {
     {
       site: 'get_sky_position: neither body nor star',
       tool: getSkyPositionTool,
+      input: { ...SEATTLE },
+      reason: 'body_required',
+    },
+    {
+      site: 'get_rise_set: neither body nor star',
+      tool: getRiseSetTool,
       input: { ...SEATTLE },
       reason: 'body_required',
     },
@@ -418,6 +475,12 @@ describe('a bare ctx.fail reaches the wire with its declared hint', () => {
       site: 'find_events: eclipse with one coordinate',
       tool: findEventsTool,
       input: { event: 'lunar_eclipse', start: '2026-01-01T00:00:00Z', longitude: 12.5 },
+      reason: 'incomplete_observer',
+    },
+    {
+      site: 'find_events: meteor shower with one coordinate',
+      tool: findEventsTool,
+      input: { event: 'meteor_shower', start: '2026-01-01T00:00:00Z', latitude: 51.5 },
       reason: 'incomplete_observer',
     },
     {
