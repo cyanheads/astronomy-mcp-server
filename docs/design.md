@@ -17,12 +17,12 @@ idea sketch — not renamed, added, or dropped.
 
 | Tool | Summary | readOnlyHint | openWorldHint | Key inputs | Output shape |
 |---|---|---|---|---|---|
-| `astronomy_get_sky_position` | Apparent position of one body for an observer + time: equatorial (RA/Dec), horizontal (alt/az), ecliptic lon/lat, distance, magnitude, angular diameter, phase angle/fraction, angular distance from the Sun, constellation. For a solar-system body it also carries that body card (type, mean radius, naked-eye) inline, so a resource-less client reaches it without a second surface; absent for a catalog star. The atomic "where is X right now." Topocentric by default. | `true` | `false` | `body`, `star?`, `latitude`, `longitude`, `elevation?`, `time?`, `timezone?` | single position record |
-| `astronomy_get_rise_set` | Rise, set, and culmination (transit) times for a body at a location/date, plus max altitude at transit. For the Sun, also the three twilight pairs (civil/nautical/astronomical), each a dusk and the following dawn. Searches forward from `start`; returns the next `count` cycles (default 1; 31 per call, `count` up to 366 returns the first 31 with a notice naming the `start` that continues). A body already above the horizon at `start` yields a partial first cycle (null `rise`, the imminent `set`) rather than a set paired with the following day's rise. When the Sun is down and the first cycle's day begins after `start`, `night_in_progress` carries the preceding night, including polar nights without a sunset. | `true` | `false` | `body`, `latitude`, `longitude`, `elevation?`, `start?`, `count?`, `timezone?` | array of rise/set/transit events + `night_in_progress?` |
+| `astronomy_get_sky_position` | Apparent position of one body for an observer + time: equatorial (RA/Dec), horizontal (alt/az), ecliptic lon/lat, distance, magnitude, angular diameter, phase angle/fraction, angular distance from the Sun, constellation. For a solar-system body it also carries that body card (type, mean radius, naked-eye) inline, so a resource-less client reaches it without a second surface; absent for a catalog star. The atomic "where is X right now." Topocentric by default. | `true` | `false` | `body` or `star`, `latitude`, `longitude`, `elevation?`, `time?`, `timezone?` | single position record |
+| `astronomy_get_rise_set` | Rise, set, and culmination (transit) times for a body or catalog star at a location/date, plus max altitude at transit. A non-blank `star` takes precedence over `body`, resolves as on `astronomy_get_sky_position`, and is echoed as its catalog name. For the Sun, also the three twilight pairs (civil/nautical/astronomical), each a dusk and the following dawn. Searches forward from `start`; returns the next `count` cycles (default 1; 31 per call, `count` up to 366 returns the first 31 with a notice naming the `start` that continues). A body already above the horizon at `start` yields a partial first cycle (null `rise`, the imminent `set`) rather than a set paired with the following day's rise. When the Sun is down and the first cycle's day begins after `start`, `night_in_progress` carries the preceding night, including polar nights without a sunset. | `true` | `false` | `body` or `star`, `latitude`, `longitude`, `elevation?`, `start?`, `count?`, `timezone?` | array of rise/set/transit events + `night_in_progress?` |
 | `astronomy_get_moon_phase` | Moon phase for a date: illuminated fraction, phase name, age (days since new), phase longitude (Moon–Sun ecliptic-longitude difference), and the next four quarter phases (new/first/full/last) with timestamps. | `true` | `false` | `time?`, `timezone?` | phase record + next 4 quarters |
-| `astronomy_find_events` | Search upcoming sky events from a start time, consolidated by an `event` enum. Both eclipse classes take an optional observer: solar eclipses are global without one (peak location for total/annular) and local with one; lunar contact times are geocentric, and an observer adds local visibility + the Moon's altitude at each contact. The rest are geocentric. Returns the next `count` occurrences (default 1; 20 per call, `count` up to 200 returns the first 20 with a notice naming the `start` that continues), stopping at the end of 2100. `body` is required for `opposition`, `conjunction`, `max_elongation`, and `perigee_apogee`; a `conjunction` with `body` alone is that planet's conjunction with the Sun, and `body2` makes it a two-body conjunction (the Moon or a planet) with `separation_degrees`. | `true` | `false` | `event`, `start?`, `count?`, `body?`, `body2?`, `latitude?`, `longitude?`, `elevation?`, `timezone?` | array of event records |
+| `astronomy_find_events` | Search upcoming sky events from a start time, consolidated by an `event` enum. Both eclipse classes take an optional observer: solar eclipses are global without one (peak location for total/annular) and local with one; lunar contact times are geocentric, and an observer adds local visibility + the Moon's altitude at each contact. With a `timezone`, an eclipse also carries its contacts on the local clock (`contacts_local`). `meteor_shower` returns the maxima of nine major annual showers from a table bundled from the IMO 2026 Meteor Shower Calendar (ZHR, J2000 radiant, activity dates, the Moon's geocentric illuminated fraction), `shower` narrows it to one by IMO code or name, and an observer adds the radiant's and the Sun's altitude at the maximum. The rest are geocentric. Returns the next `count` occurrences (default 1; 20 per call, `count` up to 200 returns the first 20 with a notice naming the `start` that continues), stopping at the end of 2100. `body` is required for `opposition`, `conjunction`, `max_elongation`, and `perigee_apogee`; a `conjunction` with `body` alone is that planet's conjunction with the Sun, and `body2` makes it a two-body conjunction (the Moon or a planet) with `separation_degrees`. | `true` | `false` | `event`, `start?`, `count?`, `body?`, `body2?`, `shower?`, `latitude?`, `longitude?`, `elevation?`, `timezone?` | array of event records |
 | `astronomy_list_visible` | Workflow flagship. For a location + instant, iterate every naked-eye body (sun, moon, planets; optional bundled bright stars), compute alt/az, filter to above-horizon, return a ranked "what's up" list with a visibility note and each body's angular distance from the Sun. Sun-altitude gate flags daylight/twilight/dark, and the note says when daylight, civil twilight, or the Sun's glare hides or dims a body. `time` is a single evaluation instant, not a window — for "tonight" pick a time after astronomical dusk. | `true` | `false` | `latitude`, `longitude`, `elevation?`, `time?`, `timezone?`, `min_altitude?`, `include_stars?` | ranked visible-body list + sky condition |
-| `astronomy_get_ephemeris` | *(extension, gated)* Ephemeris for a small body (asteroid/comet) or spacecraft via JPL Horizons. The designation is passed to Horizons verbatim and must resolve to one record: numbered asteroid as `433;` (trailing semicolon), periodic comet as `DES=1P;CAP` (DES + closest-apparition), spacecraft as a negative SPK-ID — a bare name goes through the Horizons name search, which rejects one matching nothing (`433 Eros`) or several records (`1P/Halley`) but accepts one matching a single object even when it is the wrong one (`Eros` → Kerberos), so the output carries `target_name`, the object Horizons resolved. A name matching several major bodies (`Mars`) is rejected with each candidate's ID number, Earth is rejected as the observer's own body, a name containing an apostrophe is rejected because the Horizons search cannot match it, and one containing a character outside printable ASCII because Horizons refuses it (`Šteins` resolves as `2867;`). RA/Dec, distance, magnitude over a time span. Covers what the major-body set can't. `start`/`stop` are ISO 8601 (UTC, or with a `Z`/numeric offset) in years 0100 through 9999, Gregorian (extended before 1582), and reach Horizons as the resolved UTC instant, fractional seconds kept; `stop` equal to `start` returns one row. `step` is a positive count plus `m`, `h`, `d`, `mo`, or `y` (e.g. `"1d"`, `"1h"`, `"10m"`, `"3mo"`). One page of at most 200 rows is returned per call, with a resume `start` when the span continues. | `true` | `true` | `designation`, `latitude?`, `longitude?`, `elevation?`, `start?`, `stop?`, `step?` | time-series of positions |
+| `astronomy_get_ephemeris` | *(extension, gated)* Ephemeris for a small body (asteroid/comet) or spacecraft via JPL Horizons. The designation is passed to Horizons verbatim and must resolve to one record: numbered asteroid as `433;` (trailing semicolon), periodic comet as `DES=1P;CAP` (DES + closest-apparition), spacecraft as a negative SPK-ID — a bare name goes through the Horizons name search, which rejects one matching nothing (`433 Eros`) or several records (`1P/Halley`) but accepts one matching a single object even when it is the wrong one (`Eros` → Kerberos), so the output carries `target_name`, the object Horizons resolved. A name matching several major bodies (`Mars`) is rejected with each candidate's ID number, Earth is rejected as the observer's own body, a name containing an apostrophe is rejected because the Horizons search cannot match it, and one containing a character outside printable ASCII because Horizons refuses it (`Šteins` resolves as `2867;`). RA/Dec, distance, magnitude, constellation, and Sun elongation with its morning/evening side (Horizons quantity 23, S-O-T) over a time span; RA/Dec are astrometric ICRF (J2000), Horizons quantity 1, not the apparent of-date values `astronomy_get_sky_position` returns, and the constellation is computed from them in-process. Covers what the major-body set can't. `start`/`stop` are ISO 8601 (UTC, or with a `Z`/numeric offset) in years 0100 through 9999, Gregorian (extended before 1582), and reach Horizons as the resolved UTC instant, fractional seconds kept; `stop` equal to `start` returns one row. `step` is a positive count plus `m`, `h`, `d`, `mo`, or `y` (e.g. `"1d"`, `"1h"`, `"10m"`, `"3mo"`). One page of at most 200 rows is returned per call, with a resume `start` when the span continues. | `true` | `true` | `designation`, `latitude?`, `longitude?`, `elevation?`, `start?`, `stop?`, `step?` | time-series of positions |
 | `astronomy_get_satellite_passes` | *(extension, gated)* Visible passes of a satellite (ISS, by NORAD catalog number or catalog name) over an observer in the next `days` (default 7; 10 per call, `days` up to 30 searches the first 10 with a notice naming the `start` and `days` that continue). Fetches the GP element set from CelesTrak as OMM JSON, propagates with SGP4 (offline), returns pass rise/peak/set (rise and set within 1 s) with alt/az; a pass is kept when its visible stretch — satellite above the horizon and sunlit while the Sun is below −6° — reaches 10° elevation, and the stretch is returned as the eight `visible_*` fields. Exactly one of `norad_id` and `name` is required; a fixed alias table resolves the common names ISS / International Space Station, Hubble / Hubble Space Telescope / HST, and Tiangong / CSS / Chinese Space Station to their catalog numbers, and any other `name` is a case-insensitive substring match, so a broad one is rejected with the matching objects to choose from. A pass rising inside the window is reported through its set even when that falls after the window ends. NORAD IDs and names are found at celestrak.org or heavens-above.com. | `true` | `true` | one of `norad_id` / `name`, plus `latitude`, `longitude`, `elevation?`, `days?`, `start?`, `timezone?` | array of visible passes |
 
 Seven tools total. Five form the keyless offline core (always registered); two extensions
@@ -43,7 +43,7 @@ those are query-shaped, not URI-addressable.
 
 | Name | Description | Args |
 |---|---|---|
-| `astronomy_stargazing_plan` | Structures a "plan tonight's stargazing from <place>" workflow: resolve coordinates, find the twilight window, check moon brightness and whether the moon is above the horizon during it, list visible bodies, and (cross-server) prompt for cloud-cover via a weather server. Emits a message template that chains the tools in order. Each step that picks a time is anchored to the requested date in the observer resolved IANA zone rather than UTC midnight, and the visibility step sets `include_stars` so the bundled bright stars are not silently omitted. | `location` (string), `date?` (ISO date) |
+| `astronomy_stargazing_plan` | Structures a "plan tonight's stargazing from <place>" workflow: resolve coordinates, find the twilight window, check moon brightness and whether the moon is above the horizon during it, list visible bodies, check for a meteor shower active that night (`astronomy_find_events` `meteor_shower`, searched from four weeks before the night), and (cross-server) prompt for cloud-cover via a weather server. Emits a message template that chains the tools in order. Each step that picks a time is anchored to the requested date in the observer resolved IANA zone rather than UTC midnight, and the visibility step sets `include_stars` so the bundled bright stars are not silently omitted. | `location` (string), `date?` (ISO date) |
 
 One prompt. It encodes the flagship cross-tool + cross-server workflow (see Workflow
 Analysis #4) as a reusable template for clients that surface prompts.
@@ -86,16 +86,19 @@ caller passes an IANA timezone, or derives one upstream by composing with `refer
   angular diameter, phase, and constellation for Sun, Moon, Mercury–Neptune, Pluto.
 - Compute rise/set/culmination and twilight (civil −6°, nautical −12°, astronomical −18°).
 - Compute moon phase, illumination, age, and the next four lunar quarters.
-- Search forward for nine event classes under one `event` enum: `solar_eclipse`,
+- Search forward for ten event classes under one `event` enum: `solar_eclipse`,
   `lunar_eclipse`, `equinox`, `solstice`, `moon_quarter`, `opposition`, `conjunction`,
-  `max_elongation`, `perigee_apogee`. Eclipses report observer-local circumstances when an
-  observer is supplied; solar eclipses without one are global. Every search stops at the
-  end of the supported span (2100).
+  `max_elongation`, `perigee_apogee`, `meteor_shower`. Eclipses report observer-local
+  circumstances when an observer is supplied; solar eclipses without one are global.
+  `meteor_shower` returns the maxima of nine major annual showers from a bundled table, and an
+  observer adds the radiant's and the Sun's altitude at each. Every search stops at the end of
+  the supported span (2100).
 - "What's visible now" workflow: enumerate naked-eye bodies, filter above-horizon, rank,
   annotate with a human-readable visibility note, and gate by sun altitude
   (daylight/twilight/dark).
 - Bundle a bright-star subset so the catalog-backed star slots (`DefineStar`) answer for
-  named stars in `astronomy_list_visible` and `astronomy_get_sky_position`.
+  named stars in `astronomy_list_visible`, `astronomy_get_sky_position`, and
+  `astronomy_get_rise_set`.
 - Extensions (config-gated): JPL Horizons small-body ephemerides; CelesTrak GP/OMM + SGP4
   satellite pass prediction.
 
@@ -152,15 +155,15 @@ type Body =
 // supported, resolved through the bundled catalog into a DefineStar slot — NOT folded
 // into this enum (the engine's Body enum has only 8 user-star slots).
 
-// When `star` is provided, `body` should be omitted (or the handler treats `star` as
-// taking precedence). `star` is a z.string().optional() accepting a common name or
+// A non-blank `star` takes precedence over `body`, a blank one falls through to it, and
+// neither fails `body_required`. `star` is a z.string().optional() accepting a common name or
 // Bayer designation (e.g. "Sirius", "Alpha Centauri", "Polaris") — matched
 // case-insensitively against the bundled 32-star catalog. A designation's Greek letter may
 // be a symbol (α) and its constellation an IAU abbreviation (CMa): "α CMa", "Alpha CMa", and
 // "Alpha Canis Majoris" all resolve to Sirius. Unknown names throw `star_not_found`, listing
 // every catalog star.
-// Valid only on `astronomy_get_sky_position`; `astronomy_list_visible` uses
-// `include_stars` (boolean, default false) to include all catalog stars above the horizon.
+// Valid on `astronomy_get_sky_position` and `astronomy_get_rise_set`; `astronomy_list_visible`
+// uses `include_stars` (boolean, default false) to include all catalog stars above the horizon.
 ```
 
 **SkyPosition** (output of `astronomy_get_sky_position`; per-row in `astronomy_list_visible`):
@@ -186,7 +189,7 @@ type Body =
   phase_angle_degrees: number | null;      // Illumination().phase_angle
   illuminated_fraction: number | null;     // Illumination().phase_fraction, 0..1
   sun_elongation_degrees: number;          // AngleFromSun(body, t), geocentric, 0..180; 0 for the Sun
-  constellation: { abbreviation: string; name: string };  // Constellation(ra, dec)
+  constellation: { abbreviation: string; name: string };  // Constellation(ra, dec) of the J2000 Equator(…, ofdate=false, aberration=false), not the of-date equatorial above
 }
 ```
 
@@ -199,9 +202,10 @@ type Body =
   transit_utc: string | null;       // SearchHourAngle(hourAngle=0)
   transit_altitude_degrees: number | null;  // max altitude at culmination
   rise_local?: string; set_local?: string; transit_local?: string;  // iff timezone supplied
-  // Sun-only, present when body === 'sun'. Each pair spans the night after this cycle's set:
-  // dusk that evening, dawn the following morning (a day after this cycle's rise). Each depth is
-  // searched only up to the next day's sunrise or culmination; an absent crossing is null.
+  // Sun-only, present when the target is body 'sun', never with a `star`. Each pair spans the
+  // night after this cycle's set: dusk that evening, dawn the following morning (a day after this
+  // cycle's rise). Each depth is searched only up to the next day's sunrise or culmination; an
+  // absent crossing is null.
   twilight?: {
     civil:        { dawn_utc: string | null; dusk_utc: string | null; dawn_local?: string | null; dusk_local?: string | null };  // SearchAltitude(-6)
     nautical:     { dawn_utc: string | null; dusk_utc: string | null; dawn_local?: string | null; dusk_local?: string | null };  // SearchAltitude(-12)
@@ -212,7 +216,7 @@ type Body =
 }
 // envelope:
 {
-  body: string;
+  body: string;              // the requested body, or the catalog name a `star` resolved to
   events: RiseSetEvent[];
   // Sun-only: present when the Sun is below the horizon and the first cycle's day begins after
   // `start`. Holds the preceding night, bounded from the previous culmination or a later sunset
@@ -250,7 +254,9 @@ type Body =
 ```ts
 // common: { event: string; time_utc: string; time_local?: string }
 // Eclipse contact times are emitted under a `contacts` record (phase → ISO 8601 UTC | null),
-// not as flat *_utc fields. Apsis classification is `apsis_kind` (not `kind`, which is the
+// not as flat *_utc fields. With a timezone, an eclipse also carries `contacts_local`: the same
+// phases keyed <phase>_local, null wherever `contacts` is null, each with the zone offset in
+// force at that contact's own instant; present exactly when `time_local` is. Apsis classification is `apsis_kind` (not `kind`, which is the
 // eclipse-classification field).
 // + per-event detail:
 //
@@ -285,6 +291,16 @@ type Body =
 //   max_elongation → { body: string; elongation_degrees: number; visibility: 'morning'|'evening' }  // SearchMaxElongation (mercury/venus only; other bodies throw body_not_supported)
 //   perigee_apogee → { body: 'moon'|<planet>; apsis_kind: 'perigee'|'apogee'|'perihelion'|'aphelion'; distance_km: number; distance_au: number }
 //                    // moon → SearchLunarApsis; planet → SearchPlanetApsis
+//
+//   meteor_shower  → { shower: string; shower_code: string; zhr: number;
+//                      radiant_ra_hours: number; radiant_dec_degrees: number;   // J2000
+//                      activity_start_date: string; activity_end_date: string;  // YYYY-MM-DD UTC
+//                      moon_illuminated_fraction: number }                      // geocentric
+//                    // time_utc is the maximum, from the bundled IMO table's solar longitude.
+//                    // Optional input `shower` (IMO code or name) narrows to one; a miss throws
+//                    // shower_not_found. With an observer (latitude + longitude together; one alone
+//                    // throws incomplete_observer) the record adds radiant_altitude_degrees (radiant
+//                    // precessed to the date) and sun_altitude_degrees at the maximum.
 //
 // Truncation is reported via the enrichment block: { totalCount; truncated?; shown?; cap?; notice? }.
 //   A `count` past the 20-per-call cap (ceiling 200) serves the first 20 and `notice` names the exact
@@ -323,10 +339,13 @@ include_stars: boolean // include catalog bright stars in the output, default fa
 ```ts
 {
   time_utc: string;           // ISO 8601 UTC step instant
-  ra_hours: number;           // right ascension [0,24)
-  dec_degrees: number;        // declination [-90,90]
+  ra_hours: number;           // right ascension [0,24), astrometric ICRF (J2000) — Horizons quantity 1, not apparent of date
+  dec_degrees: number;        // declination [-90,90], astrometric ICRF (J2000)
   distance_au: number;        // observer-to-body distance in AU
   magnitude: number | null;   // apparent magnitude, null when Horizons omits it
+  constellation: { abbreviation: string; name: string };  // Constellation(ra_hours, dec_degrees), in-process — J2000 is the frame it reads
+  sun_elongation_degrees: number | null;     // Horizons quantity 23 S-O-T, from the observer when supplied, else Earth's center; null when the column has no number
+  visibility: 'morning' | 'evening' | null;  // the S-O-T /r code: /L (leads the Sun) → morning, /T (trails) → evening, /? or none → null
   // iff observer supplied:
   altitude_degrees?: number;  // horizontal altitude (refraction-corrected — the request sets APPARENT=REFRACTED)
   azimuth_degrees?: number;   // azimuth 0=N 90=E 180=S 270=W
@@ -398,7 +417,7 @@ small-body database).
 
 | Service | Wraps / owns | Key methods | Used by |
 |---|---|---|---|
-| `EphemerisService` | `astronomy-engine` (in-process, no network) + the bundled bright-star catalog | `position(body, observer, time)`, `riseSetSearch(body, observer, start, count, timezone?)`, `twilight(observer, start, until?)`, `moonPhase(time)`, `findEvents(event, opts)`, `listVisible(observer, time, opts)`, `defineStar(name)` | all five core tools |
+| `EphemerisService` | `astronomy-engine` (in-process, no network) + the bundled bright-star catalog | `position(target, observer, time)`, `riseSetSearch(target, observer, start, count, timezone?)`, `moonPhase(time)`, `findEvents(event, opts)`, `listVisible(observer, time, opts)`, `resolveStarTarget(name)` — a `target` is a body or a catalog star `resolveStarTarget()` loaded into a slot | all five core tools |
 | `HorizonsService` *(gated)* | JPL Horizons HTTP API (`ssd.jpl.nasa.gov/api/horizons.api`, keyless) | `ephemeris(designation, observer, start, stop, step)` | `astronomy_get_ephemeris` |
 | `SatelliteService` *(gated)* | CelesTrak GP/OMM JSON fetch (`celestrak.org`, keyless) + SGP4 propagation via `satellite.js` (in-process) | `fetchElementSet(noradId)`, `resolveByName(name)`, `predictPasses(elements, observer, days, start)` | `astronomy_get_satellite_passes` |
 
@@ -406,8 +425,9 @@ small-body database).
   retry; it's pure computation over `astronomy-engine` plus a static catalog. Owns unit
   normalization (radians/sidereal-hours → degrees/hours), the angular-diameter computation
   (from `dist` + a body-radius table), the `phase_name` / `visibility_note` derivations, and
-  the `DefineStar` slot management (≤8 stars resolvable at once — `listVisible` and
-  `get_sky_position` allocate slots from the catalog as needed). No `ctx.state`, no TTLs,
+  the `DefineStar` slot management (≤8 stars resolvable at once — `listVisible` cycles the
+  catalog through all eight, and `get_sky_position` and `get_rise_set` load slot 0 in the same
+  synchronous call that reads it). No `ctx.state`, no TTLs,
   nothing crosses requests; the catalog loads once at module init. Init in `setup()`,
   accessed via `getEphemerisService()`.
 - **`HorizonsService`** and **`SatelliteService`** are the only network-touching code. Each
@@ -519,7 +539,8 @@ the idea's "when does the sun set and when is it truly dark" framing.
 | 3 | `astronomy_get_moon_phase(date)` | how bright is the moon? (washes out faint objects) |
 | 4 | `astronomy_get_rise_set(body="moon", …)` | is the moon above the horizon during that window? (phase is geocentric and cannot say) |
 | 5 | `astronomy_list_visible(lat, lon, time=after dusk)` | what's up once it's dark |
-| 6 | `open-meteo` / `nws` *(other server)* | cloud cover + transparency for "good seeing?" |
+| 6 | `astronomy_find_events(event="meteor_shower", lat, lon, start=four weeks before, count=5)` | showers whose activity window covers the night |
+| 7 | `open-meteo` / `nws` *(other server)* | cloud cover + transparency for "good seeing?" |
 
 `astronomy_stargazing_plan` ships this chain as a prompt template.
 
@@ -541,10 +562,10 @@ service.
   no network — host anywhere including Cloudflare Workers. The two extensions add an upstream
   and (for satellites) a runtime dep; config flags keep them off by default so the core
   always runs. Drives the no-DataCanvas, no-API-key, Workers-portable posture.
-- **`astronomy_find_events` consolidates nine event classes under one `event` enum** rather
-  than nine event-specific tools — mode consolidation per the design skill. Eclipses are the
-  one class an observer location changes (local circumstances); the enum routes them through
-  the observer-aware path and the rest through the geocentric path within one handler.
+- **`astronomy_find_events` consolidates ten event classes under one `event` enum** rather
+  than ten event-specific tools — mode consolidation per the design skill. Eclipses and meteor
+  showers are the classes an observer location changes (local circumstances); the enum routes
+  them through the observer-aware path and the rest through the geocentric path within one handler.
 - **The observer is optional for both eclipse classes.** Without one, a solar eclipse answers
   "when is the next total eclipse, and where?" from the global search; requiring an observer
   left that question unanswerable. A lunar eclipse's contact times are geocentric either way,
@@ -570,8 +591,8 @@ service.
   ("Venus, mag −4.1, 12° above the W horizon") is what lets an agent answer the real
   question. The service computes these, not the agent.
 - **Bundle a 32-star bright-star catalog as an in-source table (`star-catalog.ts`).**
-  No upstream, fits the offline ethos, and lets `list_visible` / `get_sky_position` answer
-  for named stars via `DefineStar`.
+  No upstream, fits the offline ethos, and lets `list_visible`, `get_sky_position`, and
+  `get_rise_set` answer for named stars via `DefineStar`.
 - **Both UTC and observer-local time in output; the server does not geocode and does not
   guess the timezone.** Caller supplies `timezone` (IANA), or derives it upstream via
   `reference-data` / `openstreetmap`. Keeps the server a pure compute surface and avoids
@@ -612,13 +633,16 @@ public surface, so it is repeated per tool rather than extracted:
 | `astronomy_get_rise_set` | `invalid_time` | `InvalidParams` | As above, on `start`. |
 | `astronomy_get_rise_set` | `time_out_of_range` | `InvalidParams` | As above, on the requested start instant. |
 | `astronomy_get_rise_set` | `invalid_timezone` | `InvalidParams` | As above. |
+| `astronomy_get_rise_set` | `star_not_found` | `NotFound` | As on `astronomy_get_sky_position`, with the same recovery. |
+| `astronomy_get_rise_set` | `body_required` | `InvalidParams` | As on `astronomy_get_sky_position`: neither `body` nor a non-blank `star` was supplied. |
 | `astronomy_get_moon_phase` | `invalid_time` | `InvalidParams` | As above, on `time`. |
 | `astronomy_get_moon_phase` | `time_out_of_range` | `InvalidParams` | As above. |
 | `astronomy_get_moon_phase` | `invalid_timezone` | `InvalidParams` | As above. |
 | `astronomy_find_events` | `invalid_time` | `InvalidParams` | As above, on `start`. |
 | `astronomy_find_events` | `time_out_of_range` | `InvalidParams` | As above, on the requested start instant. |
 | `astronomy_find_events` | `invalid_timezone` | `InvalidParams` | As above. |
-| `astronomy_find_events` | `incomplete_observer` | `InvalidParams` | `event` is `solar_eclipse` or `lunar_eclipse` and exactly one of `latitude` and `longitude` was supplied. Recovery: supply both for local circumstances, or neither for global ones. Other events ignore a location, so a lone coordinate there passes. |
+| `astronomy_find_events` | `incomplete_observer` | `InvalidParams` | `event` is `solar_eclipse`, `lunar_eclipse`, or `meteor_shower` and exactly one of `latitude` and `longitude` was supplied. Recovery: supply both for local circumstances, or neither to search without an observer. Other events ignore a location, so a lone coordinate there passes. |
+| `astronomy_find_events` | `shower_not_found` | `NotFound` | `shower` names none of the nine showers in the bundled table. Thrown by `EphemerisService`; the message lists the table. Recovery: pick a shower from that table by its IMO code or name (e.g. `"GEM"`, `"Geminids"`, `"eta Aquariids"`). A shower outside the table cannot be searched. |
 | `astronomy_find_events` | `body_required` | `InvalidParams` | `event` is one of `opposition`, `conjunction`, `max_elongation`, or `perigee_apogee` but `body` is not supplied. Recovery: add the target body (e.g. `"mars"`) and retry. |
 | `astronomy_find_events` | `body_not_supported` | `InvalidParams` | The body has no such event — `opposition` for the Sun, Moon, Earth, or an inner planet; `conjunction` without `body2` for the Sun, Moon, or Earth; `max_elongation` for anything but mercury or venus; `perigee_apogee` for the Sun. |
 | `astronomy_find_events` | `invalid_body_pair` | `InvalidParams` | `body2` was supplied with an event other than `conjunction`, names the same body as `body`, or is paired with a `body` of `sun` or `earth`. Thrown by `EphemerisService`. Recovery: `body2` applies only to event `"conjunction"` and pairs two different bodies among the Moon and the planets (mercury through pluto). For a planet's conjunction with the Sun, pass the planet as `body` and omit `body2`; for the Moon's, search `moon_quarter` for the new moon. |
@@ -649,8 +673,8 @@ public surface, so it is repeated per tool rather than extracted:
 | `astronomy://body/{body}` | `unknown_body` | `NotFound` | The `{body}` segment is not one of the supported solar-system bodies. Recovery: use one of `sun`, `moon`, `mercury` … `pluto`. |
 
 Two cross-cutting validation gates: (1) `astronomy_find_events` `incomplete_observer` — an
-eclipse given only one coordinate fails fast rather than silently answering the global
-question when the caller reached for local circumstances; (2) `astronomy_find_events`
+eclipse or meteor shower given only one coordinate fails fast rather than silently answering
+the observer-free question when the caller reached for local circumstances; (2) `astronomy_find_events`
 `body_required` — body-specific events (`opposition`, `conjunction`, `max_elongation`,
 `perigee_apogee`) require a `body` and fail fast with a clear recovery hint naming the valid
 values.
@@ -812,6 +836,15 @@ because each would be a hand-kept alias with no rule behind it. A miss lists all
 stars in the message and in `data.catalog_stars`, so a caller can tell a misspelling from a
 star that is not bundled; a catalog resource was rejected because only resource-capable
 clients would see it.
+
+**A star rises and sets through the body cycle loop.** `astronomy_get_rise_set` takes `star`
+with `astronomy_get_sky_position`'s contract and runs the existing cycle search on the star's
+`DefineStar` slot: the engine's rise/set and hour-angle searches accept one, and the horizon
+test treats it as a point, as it does a planet, so circumpolar and never-rising stars land in
+the existing null-crossing cycles and notes. The eight slots are module state any definition
+overwrites, so the handler resolves the star in the same synchronous call that searches it; a
+target held across calls would compute whichever star another call loaded there since. A star
+gets no twilight or `night_in_progress`, which belong to the Sun.
 
 **Visibility notes follow the sky, not magnitude alone.** `visibility_note` is the headline an
 agent reads, and it used to call Mercury "bright" at 13:00 local. A body in daylight now reads

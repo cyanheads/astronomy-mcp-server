@@ -36,9 +36,9 @@ Observational astronomy for any place and time: sky positions, rise/set and twil
 | Tool | Description |
 |:---|:---|
 | `astronomy_get_sky_position` | Apparent position of one body or named star: RA/Dec, alt/az, ecliptic, magnitude, phase, Sun elongation, constellation |
-| `astronomy_get_rise_set` | Rise, set, and transit times for a body, plus civil, nautical, and astronomical twilight for the Sun |
+| `astronomy_get_rise_set` | Rise, set, and transit times for a body or named star, plus civil, nautical, and astronomical twilight for the Sun |
 | `astronomy_get_moon_phase` | Illuminated fraction, phase name, synodic age, and the next four quarter phases |
-| `astronomy_find_events` | Next eclipses, equinoxes, solstices, moon quarters, oppositions, conjunctions, greatest elongations, or apsides |
+| `astronomy_find_events` | Next eclipses, equinoxes, solstices, moon quarters, oppositions, conjunctions, greatest elongations, apsides, or meteor-shower maxima |
 | `astronomy_list_visible` | What's up now: naked-eye bodies (and optional bright stars) above the horizon, ranked, with a sky-condition gate |
 | `astronomy_get_ephemeris` | Small-body or spacecraft ephemeris from JPL Horizons (opt-in) |
 | `astronomy_get_satellite_passes` | Visible satellite passes from a CelesTrak element set propagated with SGP4 (opt-in) |
@@ -79,8 +79,9 @@ Design reference: [`docs/design.md`](./docs/design.md).
 
 ### `astronomy_get_rise_set` <sub>tool</sub>
 
-- One `body` searched forward from `start` (default now) for the next `count` cycles, default 1; 31 are served per call, and a `count` up to 366 returns the first 31 with a notice naming the `start` and `count` that continue the series
-- Each cycle carries `rise_utc`, `set_utc`, `transit_utc`, and `transit_altitude_degrees`; a circumpolar or never-rising body gets `null` rise/set and a `note` instead of an error
+- One `body` or `star` searched forward from `start` (default now) for the next `count` cycles, default 1; 31 are served per call, and a `count` up to 366 returns the first 31 with a notice naming the `start` and `count` that continue the series
+- `star` takes the same catalog names as `astronomy_get_sky_position` and wins over `body`; `body` echoes the catalog name (`Sirius` for `α CMa`), a miss fails as `star_not_found`, and a star gets no twilight
+- Each cycle carries `rise_utc`, `set_utc`, `transit_utc`, and `transit_altitude_degrees`; a circumpolar or never-rising body or star gets `null` rise/set and a `note` instead of an error
 - For `body: "sun"`, `twilight` holds civil, nautical, and astronomical dusk/dawn pairs for the night after each cycle's day. When the first day begins after `start`, `night_in_progress` holds the preceding night, including polar nights without a sunset; the first cycle otherwise carries its own night. Each pair stays within that night, and times before `start` remain included
 
 ---
@@ -94,10 +95,13 @@ Design reference: [`docs/design.md`](./docs/design.md).
 
 ### `astronomy_find_events` <sub>tool</sub>
 
-- One `event` (`solar_eclipse`, `lunar_eclipse`, `equinox`, `solstice`, `moon_quarter`, `opposition`, `conjunction`, `max_elongation`, `perigee_apogee`) and the next `count` occurrences, default 1; 20 are served per call, and a `count` up to 200 returns the first 20 with a notice naming the `start` and `count` that continue the series; searches stop at the end of 2100
+- One `event` (`solar_eclipse`, `lunar_eclipse`, `equinox`, `solstice`, `moon_quarter`, `opposition`, `conjunction`, `max_elongation`, `perigee_apogee`, `meteor_shower`) and the next `count` occurrences, default 1; 20 are served per call, and a `count` up to 200 returns the first 20 with a notice naming the `start` and `count` that continue the series; searches stop at the end of 2100
 - Body-relative events require `body` (`body_required`); a body the event doesn't apply to fails as `body_not_supported`, and `conjunction` with `body2` takes the Moon or a planet different from `body` (`invalid_body_pair` otherwise) and reports `separation_degrees`
-- Eclipses take an optional observer (`latitude` and `longitude` together, else `incomplete_observer`) that adds `local_visible` and `contact_altitudes_degrees`
-- Eclipses are included when their peak is at or after `start`; their contacts may precede `start`
+- Eclipses and meteor showers take an optional observer (`latitude` and `longitude` together, else `incomplete_observer`); for eclipses it adds `local_visible` and `contact_altitudes_degrees`
+- With a `timezone`, each eclipse also carries `contacts_local`: the `contacts` phases keyed `<phase>_local`, each with the zone offset in force at that contact's own instant, and null where `contacts` is null
+- `meteor_shower` returns the maxima of nine major annual showers (Quadrantids, April Lyrids, η-Aquariids, Southern δ-Aquariids, Perseids, Orionids, Leonids, Geminids, Ursids) with `zhr`, the J2000 radiant, activity dates, and the Moon's geocentric `moon_illuminated_fraction`; an observer adds `radiant_altitude_degrees` and `sun_altitude_degrees` at the maximum. `shower` narrows the search to one by IMO code or name, and a miss fails as `shower_not_found`. Maxima are the calendar's nominal ones, with no outburst predictions
+- Eclipses and meteor showers are included when their peak is at or after `start`; eclipse contacts and shower activity dates may precede `start`
+- Meteor shower table: International Meteor Organization, [2026 Meteor Shower Calendar](https://www.imo.net/files/meteor-shower/cal2026.pdf), ed. Jürgen Rendtel, DOI [10.13140/RG.2.2.36179.08480](https://doi.org/10.13140/RG.2.2.36179.08480)
 
 ---
 
@@ -111,6 +115,7 @@ Design reference: [`docs/design.md`](./docs/design.md).
 ### `astronomy_get_ephemeris` <sub>tool</sub>
 
 - `designation` is passed to Horizons verbatim (`"433;"` for a numbered asteroid, `"DES=1P;CAP"` for a periodic comet, a negative SPK-ID for a spacecraft); `start` defaults to now, `stop` to 24 h later, and `step` to `"1h"` (a count plus `m`, `h`, `d`, `mo`, or `y`); `latitude` and `longitude` together add alt/az
+- Each row carries `ra_hours`/`dec_degrees` as astrometric ICRF (J2000), not the apparent of-date values `astronomy_get_sky_position` returns, plus `distance_au`, `magnitude`, `constellation`, `sun_elongation_degrees`, and `visibility` (`morning`, `evening`, or null); with an observer, the elongation is measured from that place
 - Up to 200 rows per call; when `truncated` is true the notice names the `start` to resume from. `target_name` is the object Horizons resolved
 - Fails as `ambiguous_designation`, `observer_is_target`, `body_not_found`, `invalid_step`, `invalid_elevation`, `time_out_of_range`, or `request_rejected`, each naming the input to correct
 - Registered only when `ASTRONOMY_ENABLE_HORIZONS=true`
@@ -136,7 +141,7 @@ Design reference: [`docs/design.md`](./docs/design.md).
 ### `astronomy_stargazing_plan` <sub>prompt</sub>
 
 - Arguments: `location` required; `date` (`YYYY-MM-DD`) optional, defaults to tonight
-- Returns one user message that chains `astronomy_get_rise_set` (sun, then moon), `astronomy_get_moon_phase`, and `astronomy_list_visible` with `include_stars`, plus the geocoding and weather steps this server doesn't cover
+- Returns one user message that chains `astronomy_get_rise_set` (sun, then moon), `astronomy_get_moon_phase`, `astronomy_list_visible` with `include_stars`, and `astronomy_find_events` for `meteor_shower` (searched from four weeks before the night, keeping the showers active that night), plus the geocoding and weather steps this server doesn't cover
 
 ## Features
 
@@ -257,7 +262,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 - No API key. The core is offline, and both extensions (JPL Horizons, CelesTrak) are keyless.
 
 ### Installation

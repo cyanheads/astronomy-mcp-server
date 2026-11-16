@@ -1,16 +1,16 @@
 ---
 name: astronomy-guide
-description: Chain the astronomy_* tools for observing questions — what is up tonight from a place, whether and when a planet can be seen, the next eclipse from a location and how long totality lasts, satellite passes, comet or asteroid positions. Covers anchoring dates to the observer's local night, what each tool means by visible, the Moon's interference, the 1900–2100 span, and the opt-in Horizons and satellite tools.
+description: Chain the astronomy_* tools for observing questions — what is up tonight from a place, whether and when a planet can be seen, the next eclipse from a place and how long totality lasts, meteor showers and whether the Moon washes them out, when a bright star rises or transits, satellite passes, comet or asteroid positions. Covers anchoring dates to the observer's local night, what each tool means by visible, the Moon's interference, the 1900–2100 span, and the opt-in Horizons and satellite tools.
 license: Apache-2.0
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
 
 - In-process and keyless: the Sun, the Moon, Mercury through Neptune, Pluto, and a 32-star bright-star catalog, for 1900–2100.
-- Not covered: deep-sky objects (galaxies, nebulae, clusters), meteor showers, cloud cover, light pollution, aurora. Pair with a weather server for cloud cover and a space-weather server for aurora.
+- Not covered: deep-sky objects (galaxies, nebulae, clusters), cloud cover, light pollution, aurora. Pair with a weather server for cloud cover and a space-weather server for aurora.
 - Two network tools exist only where the deployment enables them: `astronomy_get_ephemeris` (JPL Horizons: asteroids, comets, spacecraft, and major bodies by Horizons ID number) and `astronomy_get_satellite_passes` (CelesTrak element sets).
 
 ## Gates
@@ -20,7 +20,7 @@ metadata:
 - **Dark starts at astronomical dusk, not sunset.** The dark-sky window runs from astronomical (−18°) dusk to astronomical dawn. In `astronomy_list_visible`, `civil_twilight`, `nautical_twilight`, and `astronomical_twilight` are all brighter than `dark`.
 - **`astronomy_list_visible` lists what is above the horizon, not what can be seen.** It returns the Sun in daylight and a planet beside the Sun alike; judge each from `sky_condition` and its `visibility_note` ("daylight, not naked-eye visible", "lost in glare"), never from membership in the list. It never includes Uranus, Neptune, or Pluto, and includes stars only with `include_stars` — ask `astronomy_get_sky_position` for the outer planets.
 - **Moon phase does not say whether the Moon is up.** The phase is geocentric. Before calling a night moon-washed or moon-free, get the Moon's rise and set with `astronomy_get_rise_set` over the same night and compare them with the dark window.
-- **Outside 1900–2100 every core tool fails `time_out_of_range`.** Where `astronomy_get_ephemeris` is listed, it reaches other dates for a major body by its Horizons ID number — `301` for the Moon, `499` for Mars — returning position, distance, and magnitude (altitude and azimuth with an observer), but no phase name, rise/set, or event search. Without it, the date is out of reach.
+- **Outside 1900–2100 every core tool fails `time_out_of_range`.** Where `astronomy_get_ephemeris` is listed, it reaches other dates for a major body by its Horizons ID number — `301` for the Moon, `499` for Mars — returning position, distance, magnitude, constellation, and angle from the Sun (altitude and azimuth with an observer), but no phase name, rise/set, or event search. Its RA/Dec are J2000 (astrometric ICRF), so they differ from `astronomy_get_sky_position`'s apparent of-date values, by more the further the date is from 2000 — about 4° for Mars in 1700. Without it, the date is out of reach.
 
 Magnitude runs backwards: lower is brighter, negative is very bright, and about 6 is the naked-eye limit under a dark sky.
 
@@ -34,7 +34,8 @@ The `astronomy_stargazing_plan` prompt templates this chain for users.
 2. `astronomy_get_rise_set` for `sun`, `start` at local midday: sunset, astronomical dusk, and the next astronomical dawn.
 3. `astronomy_get_moon_phase` for the illuminated fraction, and `astronomy_get_rise_set` for `moon` with `count` 2 — when the Moon is already up at the start, the first cycle holds only its set and the next rise is in the second — for the hours the Moon is up inside the dark window.
 4. `astronomy_list_visible` at an instant after astronomical dusk, with `include_stars` set and a `min_altitude` of about 10 to drop horizon-grazers. It evaluates one instant; a second call before astronomical dawn finds the objects that rise late.
-5. Cloud cover and transparency from a weather server.
+5. `astronomy_find_events` with `meteor_shower` at the observer's coordinates, `start` about four weeks before the night: keep the showers whose activity dates cover it (Meteor showers, below).
+6. Cloud cover and transparency from a weather server.
 
 ### Can I see a planet this week?
 
@@ -44,12 +45,18 @@ The `astronomy_stargazing_plan` prompt templates this chain for users.
 
 ### Eclipses
 
-- **From a place**, pass `latitude` and `longitude` to `astronomy_find_events`. `kind`, the times, and the contacts are then what that place sees: an eclipse that is total elsewhere can be partial here. To find the next total eclipse from a place, page through the results and keep those whose `kind` is `total`; a notice that the search reached the end of the supported span before one appears means none through 2100, not never.
+- **From a place**, pass `latitude` and `longitude` to `astronomy_find_events`. `kind`, the times, and the contacts are then what that place sees: an eclipse that is total elsewhere can be partial here. With a `timezone`, the contact times on the local clock are in `contacts_local`. To find the next total eclipse from a place, page through the results and keep those whose `kind` is `total`; a notice that the search reached the end of the supported span before one appears means none through 2100, not never.
 - **Totality lasts** from `total_begin_utc` to `total_end_utc` in `contacts`; subtract them. For an annular eclipse the same pair bounds the ring phase; for a partial one both are null.
 - **Where it is total**: the global search (no observer) returns at most the point of greatest eclipse. No tool returns the path of totality, so test a specific place with the local search instead of judging from that point.
+
+### Meteor showers
+
+- `astronomy_find_events` with `event` `meteor_shower` returns the maxima of nine major annual showers, each with `zhr`, the radiant, activity dates, and the Moon's illuminated fraction; `shower` narrows it to one by IMO code or name. A latitude and longitude together add the radiant's and the Sun's altitude at the maximum, which can fall in daylight.
+- A shower counts when its maximum is at or after `start`, so a search from tonight skips one already past its maximum but still active. To check a night, start about four weeks before it and keep the showers whose `activity_start_date` to `activity_end_date` covers that night, as the `astronomy_stargazing_plan` prompt does.
+- `moon_illuminated_fraction` is geocentric. Moon interference across the night still comes from the Moon's rise and set (`astronomy_get_rise_set` for `moon`) against the dark window.
 
 ### Satellites and small bodies
 
 - Tell the user where to look from the visible stretch — `visible_start_utc` to `visible_end_utc` with their altitudes and azimuths — not from rise and set: the satellite can rise in Earth's shadow and only appear partway through the pass.
 - `start` must fall within 30 days of the current element set's epoch, before or after it — in practice, roughly the past month or the next month from today. Passes from earlier or further ahead fail `time_out_of_range`.
-- For "where will this comet be next month", request a `1d` step across the month with observer coordinates for altitude and azimuth, and confirm `target_name` is the object meant. Rows carry RA/Dec but no constellation.
+- For "where will this comet be next month", request a `1d` step across the month with observer coordinates for altitude and azimuth, and confirm `target_name` is the object meant. Each row names its `constellation`, for finding the object on a chart, and carries `sun_elongation_degrees` with `visibility` — how far it sits from the Sun and whether it is a morning or evening object; one close to the Sun stays in twilight.
