@@ -3,8 +3,8 @@
  *   `scripts/lint-packaging.ts` each declare their own copy of. The strip step and
  *   the check that verifies it must agree exactly: if the strip's pattern is
  *   narrowed, the check silently stops catching what the strip stopped removing,
- *   and a platform-locked or agent-doc-bloated bundle ships green. Both files'
- *   `AGENT_DOC_ENTRY` JSDoc points here.
+ *   and a platform-locked or agent-doc-bloated bundle ships green. Both scripts are
+ *   framework-synced copies, so this suite is the only check of the pair in this repo.
  * @module tests/scripts/packaging-regexes.test
  */
 
@@ -131,5 +131,34 @@ describe('agent-doc trees match at a package root only (cyanheads/mcp-ts-core#79
   it('still strips package-root skills/, framework-skills/, .claude/, and .agents/', () => {
     expect(filterAgentDocEntries(agentDocs)).toEqual(agentDocs);
     expect(agentDocs.filter((entry) => lint.AGENT_DOC_ENTRY.test(entry))).toEqual(agentDocs);
+  });
+});
+
+describe('agent-doc files match at a package root only (cyanheads/mcp-ts-core#820)', () => {
+  /** A dependency's root `AGENTS.md` / `CLAUDE.md`, scoped or not, at any nesting depth. */
+  const rootDocs = [
+    'node_modules/some-pkg/AGENTS.md',
+    'node_modules/@cyanheads/mcp-ts-core/CLAUDE.md',
+    'node_modules/a/node_modules/@scope/b/AGENTS.md',
+  ];
+
+  /** The same names deeper in a package are package content, not agent docs. */
+  const nested = ['node_modules/some-pkg/docs/CLAUDE.md', 'node_modules/@scope/pkg/lib/AGENTS.md'];
+
+  it('strips a package-root AGENTS.md or CLAUDE.md in both scripts', () => {
+    expect(filterAgentDocEntries(rootDocs)).toEqual(rootDocs);
+    expect(rootDocs.filter((entry) => lint.AGENT_DOC_ENTRY.test(entry))).toEqual(rootDocs);
+    expect(lint.checkBundleEntries(rootDocs, 'test.mcpb')[0]).toContain('agent-doc entries');
+  });
+
+  it('keeps an AGENTS.md or CLAUDE.md below a package root', () => {
+    expect(filterAgentDocEntries(nested)).toEqual([]);
+    expect(nested.filter((entry) => lint.AGENT_DOC_ENTRY.test(entry))).toEqual([]);
+  });
+
+  it('classes the framework CLAUDE.md as an agent doc, not a build-only file', () => {
+    const entry = 'node_modules/@cyanheads/mcp-ts-core/CLAUDE.md';
+    expect(CLEAN_BUILD_ONLY_ENTRY.test(entry)).toBe(false);
+    expect(lint.BUILD_ONLY_ENTRY.test(entry)).toBe(false);
   });
 });
